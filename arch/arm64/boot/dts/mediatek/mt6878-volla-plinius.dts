@@ -52,6 +52,18 @@
 		};
 	};
 
+	/*
+	 * The LK leaves OVL0 -> ... -> DSI0 scanning out the framebuffer
+	 * above to the command mode panel; keep pushing frames to it.
+	 */
+	display-refresh@14001000 {
+		compatible = "mediatek,mt6878-disp-refresh";
+		reg = <0x0 0x14001000 0x0 0x1000>,
+		      <0x0 0x1401a000 0x0 0x1000>;
+		reg-names = "mutex", "dsi";
+		mediatek,mutex-id = <0>;
+	};
+
 	memory@40000000 {
 		device_type = "memory";
 		reg = <0x0 0x40000000 0x3 0x0>;
