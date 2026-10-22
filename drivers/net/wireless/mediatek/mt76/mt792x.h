@@ -235,6 +235,10 @@ struct mt792x_hif_ops {
 	int (*mcu_init)(struct mt792x_dev *dev);
 	int (*drv_own)(struct mt792x_dev *dev);
 	int (*fw_own)(struct mt792x_dev *dev);
+	/* optional, for firmwares started by other means than a file */
+	int (*load_firmware)(struct mt792x_dev *dev);
+	/* optional, for ring layouts the common code does not know */
+	void (*dma_prefetch)(struct mt792x_dev *dev);
 };
 
 struct mt792x_dev {

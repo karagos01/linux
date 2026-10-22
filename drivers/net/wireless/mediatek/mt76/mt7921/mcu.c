@@ -636,7 +636,10 @@ int mt7921_run_firmware(struct mt792x_dev *dev)
 {
 	int err;
 
-	err = mt792x_load_firmware(dev);
+	if (dev->hif_ops->load_firmware)
+		err = dev->hif_ops->load_firmware(dev);
+	else
+		err = mt792x_load_firmware(dev);
 	if (err)
 		return err;
 

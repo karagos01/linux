@@ -754,9 +754,13 @@ mt792x_get_offload_capability(struct device *dev, const char *fw_wm)
 	const u8 *data, *end;
 	u8 offload_caps = 0;
 
+	/* No firmware file, no offload */
+	if (!fw_wm)
+		return 0;
+
 	ret = request_firmware(&fw, fw_wm, dev);
 	if (ret)
-		return ret;
+		return 0;
 
 	if (!fw || !fw->data || fw->size < sizeof(*hdr)) {
 		dev_err(dev, "Invalid firmware\n");

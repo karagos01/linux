@@ -199,7 +199,9 @@ static void mt7927_wfdma_setup(struct mt792x_dev *dev)
 
 static void mt792x_dma_prefetch(struct mt792x_dev *dev)
 {
-	if (is_mt7927(&dev->mt76)) {
+	if (dev->hif_ops->dma_prefetch) {
+		dev->hif_ops->dma_prefetch(dev);
+	} else if (is_mt7927(&dev->mt76)) {
 		mt7927_dma_prefetch_setup(dev);
 	} else if (is_mt7925(&dev->mt76)) {
 		mt7925_dma_prefetch_setup(dev);

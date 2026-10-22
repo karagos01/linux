@@ -12,8 +12,10 @@ MODULE_PARM_DESC(disable_clc, "disable CLC support");
 
 bool mt7921_regd_clc_supported(struct mt792x_dev *dev)
 {
+	/* The CLC comes with the firmware file */
 	if (mt7921_disable_clc ||
-	    mt76_is_usb(&dev->mt76))
+	    mt76_is_usb(&dev->mt76) ||
+	    dev->hif_ops->load_firmware)
 		return false;
 
 	return true;
