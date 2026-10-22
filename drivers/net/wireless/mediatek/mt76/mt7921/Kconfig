@@ -14,6 +14,17 @@ config MT7921E
 
 	  To compile this driver as a module, choose M here.
 
+config MT7921_SOC
+	tristate "MediaTek MT7921 compatible SoC integrated WiFi support"
+	select MT7921_COMMON
+	depends on MAC80211
+	depends on MTK_CONNSYS
+	help
+	  This adds support for the 802.11ax 2x2:2SS WiFi integrated in the
+	  connectivity subsystem of MediaTek SoCs like the MT6878.
+
+	  To compile this driver as a module, choose M here.
+
 config MT7921S
 	tristate "MediaTek MT7921S (SDIO) support"
 	select MT76_SDIO
