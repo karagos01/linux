@@ -870,13 +870,18 @@ static void u2_phy_role_switch_work(struct work_struct *work)
 		instance->role_switch = usb_role_switch_get(&instance->phy->dev);
 
 	if (IS_ERR_OR_NULL(instance->role_switch)) {
+		instance->role_switch = NULL;
+
+		/* Without a role switch provider we stay in the default role */
 		if (instance->sw_get_retries >= 10) {
-			dev_warn(&instance->phy->dev, "failed to get role switch\n");
+			dev_info(&instance->phy->dev, "no role switch, keeping %s role\n",
+				 instance->current_role == USB_ROLE_HOST ? "host" : "device");
 			return;
 		}
 
 		instance->sw_get_retries += 1;
 		schedule_delayed_work(&instance->dr_work, msecs_to_jiffies(500));
+		return;
 	}
 
 	role = usb_role_switch_get_role(instance->role_switch);
@@ -897,6 +902,13 @@ static int u2_phy_software_role_switch_init(struct mtk_phy_instance *instance)
 	int mode;
 
 	instance->sw_get_retries = 0;
+
+	/*
+	 * Power on schedules the work unconditionally, so set it up before
+	 * anything here can fail. Device is the default role.
+	 */
+	INIT_DELAYED_WORK(&instance->dr_work, u2_phy_role_switch_work);
+	u2_phy_instance_role_set(instance, USB_ROLE_DEVICE);
 
 	ep = fwnode_graph_get_endpoint_by_id(dev_fwnode(&instance->phy->dev),
 					     0,
@@ -922,12 +934,9 @@ static int u2_phy_software_role_switch_init(struct mtk_phy_instance *instance)
 		return -ENODEV;
 
 	mode = usb_get_role_switch_default_mode(usb_dev);
+	put_device(usb_dev);
 	if (mode == USB_DR_MODE_HOST)
 		u2_phy_instance_role_set(instance, USB_ROLE_HOST);
-	else
-		u2_phy_instance_role_set(instance, USB_ROLE_DEVICE);
-
-	INIT_DELAYED_WORK(&instance->dr_work, u2_phy_role_switch_work);
 
 	return 0;
 }
