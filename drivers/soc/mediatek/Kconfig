@@ -60,6 +60,18 @@ config MTK_REGULATOR_COUPLER
 	default ARCH_MEDIATEK
 	depends on REGULATOR
 
+config MTK_CONNSYS
+	tristate "MediaTek connectivity subsystem power control"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on HAVE_ARM_SMCCC && OF
+	depends on REGULATOR
+	select MFD_SYSCON
+	help
+	  Say yes here to power on the MediaTek connectivity subsystem
+	  (connsys) and configure its RF companion chip (A-die) on SoCs
+	  like the MT6878. This is required by the WiFi driver of these
+	  SoCs.
+
 config MTK_DISP_REFRESH
 	tristate "MediaTek bootloader command mode panel refresh"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
