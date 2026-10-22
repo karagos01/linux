@@ -66,64 +66,32 @@
 	};
 
 	/* Connectivity subsystem (WiFi/BT/GPS) with the MT6637 A-die */
-	consys: consys@18000000 {
-		compatible = "mediatek,mt6878-6637-consys";
-		reg = <0x00 0x18000000 0x00 0x470>,
-		      <0x00 0x10001000 0x00 0xee4>,
-		      <0x00 0x10005000 0x00 0xa7c>,
-		      <0x00 0x11ec0000 0x00 0xa04>,
-		      <0x00 0x18001000 0x00 0x658>,
-		      <0x00 0x18003000 0x00 0x204>,
-		      <0x00 0x1800e000 0x00 0x118>,
-		      <0x00 0x18011000 0x00 0x138>,
-		      <0x00 0x18012000 0x00 0x98>,
-		      <0x00 0x18020000 0x00 0x4c>,
-		      <0x00 0x18023000 0x00 0xe28>,
-		      <0x00 0x1803b000 0x00 0x18>,
-		      <0x00 0x18040000 0x00 0x2c>,
-		      <0x00 0x18041000 0x00 0x140>,
-		      <0x00 0x18042000 0x00 0x324>,
-		      <0x00 0x18046000 0x00 0x324>,
-		      <0x00 0x1804b000 0x00 0x414>,
-		      <0x00 0x1804d000 0x00 0x41c>,
-		      <0x00 0x1804f000 0x00 0x148>,
-		      <0x00 0x18053800 0x00 0x1000>,
-		      <0x00 0x18060000 0x00 0xbf8>,
-		      <0x00 0x18070000 0x00 0x8004>,
-		      <0x00 0x1c001000 0x00 0xfd0>,
-		      <0x00 0x1c00a000 0x00 0x51c>,
-		      <0x00 0x1803c000 0x00 0x34>,
-		      <0x00 0x1803e000 0x00 0x34>;
+	consys: connsys@18000000 {
+		compatible = "mediatek,mt6878-connsys";
+		reg = <0x0 0x18000000 0x0 0x80000>,
+		      <0x0 0x1c00d000 0x0 0x1000>;
+		reg-names = "conn", "srclken-rc";
+		memory-region = <&consys_emi>;
 		power-domains = <&spm MT6878_POWER_DOMAIN_CONN>;
-		emi-addr = <0x0 0x87e00000>;
-		emi-size = <0xc00000>;
-		ro-bt-emi-size = <0x2e0000>;
-		ro-gps-emi-size = <0xa0000>;
-		ro-wifi-emi-size = <0x300000>;
-		ro-emi-size = <0x680000>;
-		rw-emi-size = <0x480000>;
-		emi-alignment = <0x100000>;
-		emi-max-addr = <0x90000000>;
-		mt6363_vcn13-supply = <&mt6363_vcn13>;
-		mt6363_vrfio18-supply = <&mt6363_vrfio18>;
-		mt6369_vcn33_1-supply = <&mt6369_vcn33_1>;
-		mt6369_vcn33_2-supply = <&mt6369_vcn33_2>;
-		mt6369_vant18-supply = <&mt6369_vant18>;
+		mediatek,topckgen = <&topckgen>;
+		pinctrl-names = "default", "sleep", "adie-cfg";
+		pinctrl-0 = <&conn_pins_default>;
+		pinctrl-1 = <&conn_pins_sleep>;
+		pinctrl-2 = <&conn_pins_adie_cfg>;
+		vrfio18-supply = <&mt6363_vrfio18>;
+		vcn13-supply = <&mt6363_vcn13>;
+		vcn33-1-supply = <&mt6369_vcn33_1>;
+		vcn33-2-supply = <&mt6369_vcn33_2>;
+		vant18-supply = <&mt6369_vant18>;
 	};
 
-	/* WiFi part of connsys, driven by the (out-of-tree) gen4m driver */
-	wifi@18400000 {
-		compatible = "mediatek,wifi";
-		reg = <0x0 0x18400000 0x0 0x100000>,
-		      <0x0 0x18000000 0x0 0x700000>;
-		remap-idx = <1>;
-		memory-region = <&wifi_reserved>;
+	wifi@18000000 {
+		compatible = "mediatek,mt6878-wifi";
+		reg = <0x0 0x18000000 0x0 0x700000>;
 		interrupts = <GIC_SPI 484 IRQ_TYPE_LEVEL_HIGH 0>,
 			     <GIC_SPI 692 IRQ_TYPE_LEVEL_HIGH 0>;
-		emi-addr = <0x0>;
-		emi-size = <0x1400000>;
-		emi-alignment = <0x1000000>;
-		emi-max-addr = <0xc0000000>;
+		memory-region = <&wifi_dma>;
+		mediatek,connsys = <&consys>;
 	};
 
 	memory@40000000 {
@@ -220,15 +188,15 @@
 			no-map;
 		};
 
-		consys-emi-reserved@87e00000 {
+		consys_emi: consys-emi-reserved@87e00000 {
 			reg = <0x0 0x87e00000 0x0 0x00d00000>;
 			no-map;
 		};
 
-		wifi_reserved: shared-dma-pool-wifi-reserve-memory-dma@88b00000 {
-			compatible = "shared-dma-pool";
+		/* The connsys may only access the memory the bootloader allows it */
+		wifi_dma: wifi-dma@88b00000 {
+			compatible = "restricted-dma-pool";
 			reg = <0x0 0x88b00000 0x0 0x01400000>;
-			no-map;
 		};
 
 		consys-scp-emi-reserved@89f00000 {
@@ -405,6 +373,61 @@
 };
 
 &pio {
+	conn_pins_default: conn-default-state {
+		pins-conn {
+			pinmux = <PINMUX_GPIO172__FUNC_CONN_TOP_CLK>,
+				 <PINMUX_GPIO173__FUNC_CONN_TOP_DATA>,
+				 <PINMUX_GPIO174__FUNC_CONN_BT_CLK>,
+				 <PINMUX_GPIO175__FUNC_CONN_BT_DATA>,
+				 <PINMUX_GPIO176__FUNC_CONN_HRST_B>,
+				 <PINMUX_GPIO177__FUNC_CONN_WB_PTA>,
+				 <PINMUX_GPIO178__FUNC_CONN_WF_CTRL0>,
+				 <PINMUX_GPIO179__FUNC_CONN_WF_CTRL1>,
+				 <PINMUX_GPIO180__FUNC_CONN_WF_CTRL2>,
+				 <PINMUX_GPIO181__FUNC_CONN_WF_CTRL3>,
+				 <PINMUX_GPIO182__FUNC_CONN_WF_CTRL4>;
+			drive-strength = <4>;
+		};
+	};
+
+	/* CONN_WF_CTRL2 low selects a 26 MHz clock while the A-die is set up */
+	conn_pins_adie_cfg: conn-adie-cfg-state {
+		pins-conn {
+			pinmux = <PINMUX_GPIO172__FUNC_CONN_TOP_CLK>,
+				 <PINMUX_GPIO173__FUNC_CONN_TOP_DATA>,
+				 <PINMUX_GPIO174__FUNC_CONN_BT_CLK>,
+				 <PINMUX_GPIO175__FUNC_CONN_BT_DATA>,
+				 <PINMUX_GPIO176__FUNC_CONN_HRST_B>,
+				 <PINMUX_GPIO177__FUNC_CONN_WB_PTA>,
+				 <PINMUX_GPIO178__FUNC_CONN_WF_CTRL0>,
+				 <PINMUX_GPIO179__FUNC_CONN_WF_CTRL1>,
+				 <PINMUX_GPIO181__FUNC_CONN_WF_CTRL3>,
+				 <PINMUX_GPIO182__FUNC_CONN_WF_CTRL4>;
+			drive-strength = <4>;
+		};
+
+		pins-clk-sel {
+			pinmux = <PINMUX_GPIO180__FUNC_GPIO180>;
+			output-low;
+		};
+	};
+
+	conn_pins_sleep: conn-sleep-state {
+		pins-conn {
+			pinmux = <PINMUX_GPIO172__FUNC_GPIO172>,
+				 <PINMUX_GPIO173__FUNC_GPIO173>,
+				 <PINMUX_GPIO174__FUNC_GPIO174>,
+				 <PINMUX_GPIO175__FUNC_GPIO175>,
+				 <PINMUX_GPIO176__FUNC_GPIO176>,
+				 <PINMUX_GPIO177__FUNC_GPIO177>,
+				 <PINMUX_GPIO178__FUNC_GPIO178>,
+				 <PINMUX_GPIO179__FUNC_GPIO179>,
+				 <PINMUX_GPIO180__FUNC_GPIO180>,
+				 <PINMUX_GPIO181__FUNC_GPIO181>,
+				 <PINMUX_GPIO182__FUNC_GPIO182>;
+		};
+	};
+
 	key_gpio_default: key-default-state {
 		pins-keys {
 			pinmux = <PINMUX_GPIO54__FUNC_GPIO54>,
@@ -446,10 +469,6 @@
 			};
 		};
 
-		mt6363-consys {
-			compatible = "mediatek,mt6363-consys";
-		};
-
 		regulators@30 {
 			compatible = "mediatek,mt6363-regulator";
 			reg = <0x30>;
@@ -471,19 +490,11 @@
 	pmic@9 {
 		compatible = "mediatek,mt6685";
 		reg = <0x9 SPMI_USID>;
-
-		mt6685-consys {
-			compatible = "mediatek,mt6685-consys";
-		};
 	};
 
 	pmic@5 {
 		compatible = "mediatek,mt6369-regulator";
 		reg = <0x5 SPMI_USID>;
-
-		mt6369-consys {
-			compatible = "mediatek,mt6369-consys";
-		};
 
 		regulators {
 			mt6369_vcn33_1: vcn33-1 {
