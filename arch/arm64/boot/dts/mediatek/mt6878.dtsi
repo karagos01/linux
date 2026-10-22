@@ -740,6 +740,26 @@
 			};
 		};
 
+		spmi: spmi@1cc04000 {
+			compatible = "mediatek,mt6878-spmi";
+			reg = <0x1cc04000 0x900>,
+			      <0x1cc01000 0x100>;
+			reg-names = "pmif", "spmimst";
+			/*
+			 * The PMIF clocks are not modelled yet; the bootloader
+			 * leaves them running.
+			 */
+			clocks = <&clk26m>, <&clk26m>, <&clk26m>;
+			clock-names = "pmif_sys_ck", "pmif_tmr_ck", "spmimst_clk_mux";
+			interrupts-extended = <&pio 212 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "rcs";
+			interrupt-controller;
+			#interrupt-cells = <3>;
+			#address-cells = <2>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
 		watchdog: watchdog@1c00a000 {
 			compatible = "mediatek,mt6878-wdt",
 				     "mediatek,mt6589-wdt",

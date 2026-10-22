@@ -7,6 +7,7 @@
 #include "mt6878.dtsi"
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
+#include <dt-bindings/spmi/spmi.h>
 
 /*
  * The SoC dtsi carries the CMF Phone 1 carveouts, Plinius gets its own
@@ -335,6 +336,39 @@
 				 <PINMUX_GPIO55__FUNC_GPIO55>;
 			input-enable;
 			bias-pull-up;
+		};
+	};
+};
+
+&spmi {
+	status = "okay";
+
+	mt6363: pmic@4 {
+		compatible = "mediatek,mt6363";
+		reg = <0x4 SPMI_USID>;
+		interrupts = <4 64 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-controller;
+		#interrupt-cells = <3>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		keys {
+			compatible = "mediatek,mt6363-keys";
+			interrupts = <4 48 IRQ_TYPE_LEVEL_HIGH>,
+				     <4 51 IRQ_TYPE_LEVEL_HIGH>,
+				     <4 49 IRQ_TYPE_LEVEL_HIGH>,
+				     <4 52 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "powerkey", "powerkey_r",
+					  "homekey", "homekey_r";
+
+			key-power {
+				linux,keycodes = <KEY_POWER>;
+				wakeup-source;
+			};
+
+			key-volume-down {
+				linux,keycodes = <KEY_VOLUMEDOWN>;
+			};
 		};
 	};
 };
