@@ -9,6 +9,7 @@
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/phy/phy.h>
+#include <dt-bindings/power/mediatek,mt6878-power.h>
 #include <dt-bindings/reset/ti-syscon.h>
 #include "mt6878-pinfunc.h"
 
@@ -346,6 +347,11 @@
 			interrupt-controller;
 			#interrupt-cells = <2>;
 			interrupts = <GIC_SPI 239 IRQ_TYPE_LEVEL_HIGH 0>;
+		};
+
+		infracfg_ao: syscon@10001000 {
+			compatible = "mediatek,mt6878-infracfg-ao", "syscon";
+			reg = <0x10001000 0x1000>;
 		};
 
 		apmixedsys: syscon@1000c000 {
@@ -736,6 +742,25 @@
 					mtu3_drd_switch: endpoint {
 						remote-endpoint = <&usb_role>;
 					};
+				};
+			};
+		};
+
+		scpsys: syscon@1c001000 {
+			compatible = "mediatek,mt6878-scpsys", "syscon", "simple-mfd";
+			reg = <0x1c001000 0x1000>;
+
+			/* System Power Manager */
+			spm: power-controller {
+				compatible = "mediatek,mt6878-power-controller";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#power-domain-cells = <1>;
+
+				power-domain@MT6878_POWER_DOMAIN_CONN {
+					reg = <MT6878_POWER_DOMAIN_CONN>;
+					mediatek,infracfg = <&infracfg_ao>;
+					#power-domain-cells = <0>;
 				};
 			};
 		};
