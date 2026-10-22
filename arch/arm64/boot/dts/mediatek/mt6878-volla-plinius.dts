@@ -111,6 +111,21 @@
 		mt6369_vant18-supply = <&mt6369_vant18>;
 	};
 
+	/* WiFi part of connsys, driven by the (out-of-tree) gen4m driver */
+	wifi@18400000 {
+		compatible = "mediatek,wifi";
+		reg = <0x0 0x18400000 0x0 0x100000>,
+		      <0x0 0x18000000 0x0 0x700000>;
+		remap-idx = <1>;
+		memory-region = <&wifi_reserved>;
+		interrupts = <GIC_SPI 484 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 692 IRQ_TYPE_LEVEL_HIGH 0>;
+		emi-addr = <0x0>;
+		emi-size = <0x1400000>;
+		emi-alignment = <0x1000000>;
+		emi-max-addr = <0xc0000000>;
+	};
+
 	memory@40000000 {
 		device_type = "memory";
 		reg = <0x0 0x40000000 0x3 0x0>;
@@ -210,7 +225,8 @@
 			no-map;
 		};
 
-		shared-dma-pool-wifi-reserve-memory-dma@88b00000 {
+		wifi_reserved: shared-dma-pool-wifi-reserve-memory-dma@88b00000 {
+			compatible = "shared-dma-pool";
 			reg = <0x0 0x88b00000 0x0 0x01400000>;
 			no-map;
 		};
@@ -449,6 +465,15 @@
 				regulator-min-microvolt = <1800000>;
 				regulator-max-microvolt = <1800000>;
 			};
+		};
+	};
+
+	pmic@9 {
+		compatible = "mediatek,mt6685";
+		reg = <0x9 SPMI_USID>;
+
+		mt6685-consys {
+			compatible = "mediatek,mt6685-consys";
 		};
 	};
 
