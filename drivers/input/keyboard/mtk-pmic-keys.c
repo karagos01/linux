@@ -134,6 +134,26 @@ static const struct mtk_pmic_regs mt6359_regs = {
 	.key_release_irq = true,
 };
 
+#define MT6363_TOPSTATUS		0x1e
+#define MT6363_STRUP_CON11		0xa0e
+
+/*
+ * MT6363 sits behind the SPMI PMIC MFD, which owns the interrupt enables,
+ * and keeps its long-press reset setup in a layout this driver does not
+ * model, so leave both as the bootloader configured them.
+ */
+static const struct mtk_pmic_regs mt6363_regs = {
+	.keys_regs[MTK_PMIC_PWRKEY_INDEX] =
+		MTK_PMIC_KEYS_REGS(MT6363_TOPSTATUS,
+				   0x2, 0, 0, 0),
+	.keys_regs[MTK_PMIC_HOMEKEY_INDEX] =
+		MTK_PMIC_KEYS_REGS(MT6363_TOPSTATUS,
+				   0x8, 0, 0, 0),
+	.pmic_rst_reg = MT6363_STRUP_CON11,
+	.rst_lprst_mask = 0,
+	.key_release_irq = true,
+};
+
 struct mtk_pmic_keys_info {
 	struct mtk_pmic_keys *keys;
 	const struct mtk_pmic_keys_regs *regs;
@@ -317,6 +337,9 @@ static const struct of_device_id of_mtk_pmic_keys_match_tbl[] = {
 		.compatible = "mediatek,mt6359-keys",
 		.data = &mt6359_regs,
 	}, {
+		.compatible = "mediatek,mt6363-keys",
+		.data = &mt6363_regs,
+	}, {
 		/* sentinel */
 	}
 };
@@ -326,7 +349,6 @@ static int mtk_pmic_keys_probe(struct platform_device *pdev)
 {
 	int error, index = 0;
 	unsigned int keycount;
-	struct mt6397_chip *pmic_chip = dev_get_drvdata(pdev->dev.parent);
 	struct device_node *node = pdev->dev.of_node;
 	static const char *const irqnames[] = { "powerkey", "homekey" };
 	static const char *const irqnames_r[] = { "powerkey_r", "homekey_r" };
@@ -341,7 +363,13 @@ static int mtk_pmic_keys_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	keys->dev = &pdev->dev;
-	keys->regmap = pmic_chip->regmap;
+	/* SPMI PMICs register their regmap on the parent device */
+	keys->regmap = dev_get_regmap(pdev->dev.parent, NULL);
+	if (!keys->regmap) {
+		struct mt6397_chip *pmic_chip = dev_get_drvdata(pdev->dev.parent);
+
+		keys->regmap = pmic_chip->regmap;
+	}
 	mtk_pmic_regs = of_id->data;
 
 	keys->input_dev = input_dev = devm_input_allocate_device(keys->dev);
