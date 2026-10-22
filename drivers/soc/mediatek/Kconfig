@@ -60,6 +60,16 @@ config MTK_REGULATOR_COUPLER
 	default ARCH_MEDIATEK
 	depends on REGULATOR
 
+config MTK_DISP_REFRESH
+	tristate "MediaTek bootloader command mode panel refresh"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on HAS_IOMEM
+	help
+	  Periodically retrigger a display pipeline left configured by the
+	  bootloader for a command mode DSI panel, so that the boot
+	  framebuffer (simple-framebuffer) shows up on screen. Only useful
+	  until a real display driver is available for the SoC.
+
 config MTK_MMSYS
 	tristate "MediaTek MMSYS Support"
 	default ARCH_MEDIATEK
