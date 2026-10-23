@@ -434,6 +434,23 @@
 			};
 		};
 
+		mmc1: mmc@11240000 {
+			compatible = "mediatek,mt6878-mmc";
+			reg = <0x11240000 0x1000>,
+			      <0x11d80000 0x1000>;
+			interrupts = <GIC_SPI 388 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&topckgen CLK_TOP_MSDC30_1_SEL>,
+				 <&pericfg_ao CLK_PERAOP_MSDC1_H>,
+				 <&pericfg_ao CLK_PERAOP_MSDC1>,
+				 <&topckgen CLK_TOP_MSDC30_1_HCLK_SEL>,
+				 <&pericfg_ao CLK_PERAOP_MSDC1_SLV_H>,
+				 <&pericfg_ao CLK_PERAOP_MSDC1_MST_F>,
+				 <&pericfg_ao CLK_PERAOP_MSDC0_H>;
+			clock-names = "source", "hclk", "source_cg", "bus_clk",
+				      "pclk_cg", "axi_cg", "sys_cg";
+			status = "disabled";
+		};
+
 		ufsphy: ufsphy@112a0000 {
 			compatible = "mediatek,mt8183-ufsphy";
 			#phy-cells = <0>;
