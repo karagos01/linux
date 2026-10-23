@@ -32,9 +32,9 @@ static const struct mtk_gate_regs ufspdn_cg_regs = {
 
 static const struct mtk_gate ufspdn_clks[] = {
 	GATE_UFSPDN(CLK_UFSPDN_UFSHCI, "ufspdn_ufshci",
-			"top_ufs_ck"/* parent */, 0),
+			"ufs_ck"/* parent */, 0),
 	GATE_UFSPDN(CLK_UFSPDN_UFSHCI_AES, "ufspdn_ufshci_aes",
-			"top_aes_ufsfde_ck"/* parent */, 1),
+			"aes_ufsfde_ck"/* parent */, 1),
 	GATE_UFSPDN(CLK_UFSPDN_UFSHCI_AHB, "ufspdn_UFSHCI_ahb",
 			"hf_fufs_faxi_ck"/* parent */, 3),
 	GATE_UFSPDN(CLK_UFSPDN_UFSHCI_AXI, "ufspdn_UFSHCI_axi",
