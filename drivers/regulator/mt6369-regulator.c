@@ -2,10 +2,12 @@
 /*
  * MediaTek MT6369 SPMI PMIC regulator driver
  *
- * Only the LDOs feeding the connectivity subsystem are described for now.
+ * Only the LDOs feeding the connectivity subsystem and the SD card slot are
+ * described for now.
  * Register layout taken from the MediaTek downstream driver.
  */
 
+#include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
@@ -20,20 +22,30 @@
 
 #define MT6369_LDO_VCN33_1_CON0		0x1c3f
 #define MT6369_LDO_VCN33_2_CON0		0x1c4d
+#define MT6369_LDO_VMCH_CON0		0x1c95
+#define MT6369_LDO_VMCH_EINT		0x1ca3
+#define MT6369_LDO_VMC_CON0		0x1ca4
 #define MT6369_LDO_VANT18_CON0		0x1cb2
 #define MT6369_VCN33_1_ANA_CON1		0x1db1
 #define MT6369_VCN33_2_ANA_CON1		0x1db5
+#define MT6369_VMCH_ANA_CON1		0x1da9
+#define MT6369_VMC_ANA_CON1		0x1dad
 #define MT6369_VANT18_ANA_CON1		0x1e09
 
 #define MT6369_LDO_EN			BIT(0)
 #define MT6369_LDO_VOSEL		GENMASK(3, 0)
+#define MT6369_VMCH_EINT_EN		BIT(0)
+#define MT6369_VMCH_EINT_POL		BIT(2)
 
 enum mt6369_regulator_id {
 	MT6369_ID_VCN33_1,
 	MT6369_ID_VCN33_2,
 	MT6369_ID_VANT18,
+	MT6369_ID_VMCH,
+	MT6369_ID_VMC,
 };
 
+/* Shared by VCN33_1, VCN33_2, VMCH and VMC */
 static const unsigned int mt6369_vcn33_volts[] = {
 	1200000, 1300000, 1500000, 1700000, 1800000, 2000000, 2500000, 2600000,
 	2700000, 2800000, 2900000, 3000000, 3100000, 3300000, 3400000, 3500000,
@@ -51,6 +63,50 @@ static const struct regulator_ops mt6369_ldo_ops = {
 	.get_voltage_sel = regulator_get_voltage_sel_regmap,
 	.enable = regulator_enable_regmap,
 	.disable = regulator_disable_regmap,
+	.is_enabled = regulator_is_enabled_regmap,
+};
+
+/*
+ * VMCH feeds the SD card slot. Like the stock kernel, gate it with the card
+ * detect EINT of the PMIC: the LDO is on while the EINT line is high.
+ */
+static int mt6369_vmch_enable(struct regulator_dev *rdev)
+{
+	int ret;
+
+	ret = regmap_update_bits(rdev->regmap, MT6369_LDO_VMCH_EINT,
+				 MT6369_VMCH_EINT_POL, MT6369_VMCH_EINT_POL);
+	if (ret)
+		return ret;
+
+	ret = regmap_set_bits(rdev->regmap, MT6369_LDO_VMCH_CON0, MT6369_LDO_EN);
+	if (ret)
+		return ret;
+
+	return regmap_set_bits(rdev->regmap, MT6369_LDO_VMCH_EINT, MT6369_VMCH_EINT_EN);
+}
+
+static int mt6369_vmch_disable(struct regulator_dev *rdev)
+{
+	int ret;
+
+	ret = regmap_clear_bits(rdev->regmap, MT6369_LDO_VMCH_CON0, MT6369_LDO_EN);
+	if (ret)
+		return ret;
+
+	/* Let VMCH discharge */
+	udelay(1500);
+
+	return regmap_clear_bits(rdev->regmap, MT6369_LDO_VMCH_EINT, MT6369_VMCH_EINT_EN);
+}
+
+static const struct regulator_ops mt6369_vmch_ops = {
+	.list_voltage = regulator_list_voltage_table,
+	.map_voltage = regulator_map_voltage_iterate,
+	.set_voltage_sel = regulator_set_voltage_sel_regmap,
+	.get_voltage_sel = regulator_get_voltage_sel_regmap,
+	.enable = mt6369_vmch_enable,
+	.disable = mt6369_vmch_disable,
 	.is_enabled = regulator_is_enabled_regmap,
 };
 
@@ -79,6 +135,24 @@ static const struct regulator_desc mt6369_regulators[] = {
 		   MT6369_LDO_VCN33_2_CON0, MT6369_VCN33_2_ANA_CON1),
 	MT6369_LDO(MT6369_ID_VANT18, "vant18", mt6369_vant18_volts,
 		   MT6369_LDO_VANT18_CON0, MT6369_VANT18_ANA_CON1),
+	[MT6369_ID_VMCH] = {
+		.name = "vmch",
+		.of_match = of_match_ptr("vmch"),
+		.regulators_node = of_match_ptr("regulators"),
+		.ops = &mt6369_vmch_ops,
+		.type = REGULATOR_VOLTAGE,
+		.id = MT6369_ID_VMCH,
+		.owner = THIS_MODULE,
+		.n_voltages = ARRAY_SIZE(mt6369_vcn33_volts),
+		.volt_table = mt6369_vcn33_volts,
+		.enable_reg = MT6369_LDO_VMCH_EINT,
+		.enable_mask = MT6369_VMCH_EINT_EN,
+		.vsel_reg = MT6369_VMCH_ANA_CON1,
+		.vsel_mask = MT6369_LDO_VOSEL,
+		.enable_time = 240,
+	},
+	MT6369_LDO(MT6369_ID_VMC, "vmc", mt6369_vcn33_volts,
+		   MT6369_LDO_VMC_CON0, MT6369_VMC_ANA_CON1),
 };
 
 static const struct regmap_config mt6369_spmi_regmap_config = {
