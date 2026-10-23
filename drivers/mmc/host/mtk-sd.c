@@ -450,6 +450,8 @@ struct mtk_mmc_compatible {
 	bool support_new_tx;
 	bool support_new_rx;
 	bool support_spm_res_release;
+	/* The clock divider only latches while the source clock is running */
+	bool no_src_clk_gate;
 };
 
 struct msdc_tune_para {
@@ -565,6 +567,25 @@ static const struct mtk_mmc_compatible mt6779_compat = {
 	.stop_dly_sel = 3,
 	.enhance_rx = true,
 	.support_64g = true,
+};
+
+static const struct mtk_mmc_compatible mt6878_compat = {
+	.clk_div_bits = 12,
+	.recheck_sdio_irq = false,
+	.hs400_tune = false,
+	.needs_top_base = true,
+	.pad_tune_reg = MSDC_PAD_TUNE0,
+	.async_fifo = true,
+	.data_tune = true,
+	.busy_check = true,
+	.stop_clk_fix = true,
+	.stop_dly_sel = 3,
+	.pop_en_cnt = 8,
+	.enhance_rx = true,
+	.support_64g = true,
+	.support_new_tx = true,
+	.support_new_rx = true,
+	.no_src_clk_gate = true,
 };
 
 static const struct mtk_mmc_compatible mt6795_compat = {
@@ -716,6 +737,7 @@ static const struct of_device_id msdc_of_ids[] = {
 	{ .compatible = "mediatek,mt2701-mmc", .data = &mt2701_compat},
 	{ .compatible = "mediatek,mt2712-mmc", .data = &mt2712_compat},
 	{ .compatible = "mediatek,mt6779-mmc", .data = &mt6779_compat},
+	{ .compatible = "mediatek,mt6878-mmc", .data = &mt6878_compat},
 	{ .compatible = "mediatek,mt6795-mmc", .data = &mt6795_compat},
 	{ .compatible = "mediatek,mt7620-mmc", .data = &mt7620_compat},
 	{ .compatible = "mediatek,mt7622-mmc", .data = &mt7622_compat},
@@ -1081,7 +1103,8 @@ static void msdc_set_mclk(struct msdc_host *host, unsigned char timing, u32 hz)
 	}
 	sdr_clr_bits(host->base + MSDC_CFG, MSDC_CFG_CKPDN);
 
-	clk_disable_unprepare(host->src_clk_cg);
+	if (!host->dev_comp->no_src_clk_gate)
+		clk_disable_unprepare(host->src_clk_cg);
 	if (host->dev_comp->clk_div_bits == 8)
 		sdr_set_field(host->base + MSDC_CFG,
 			      MSDC_CFG_CKMOD | MSDC_CFG_CKDIV,
@@ -1091,7 +1114,8 @@ static void msdc_set_mclk(struct msdc_host *host, unsigned char timing, u32 hz)
 			      MSDC_CFG_CKMOD_EXTRA | MSDC_CFG_CKDIV_EXTRA,
 			      (mode << 12) | div);
 
-	clk_prepare_enable(host->src_clk_cg);
+	if (!host->dev_comp->no_src_clk_gate)
+		clk_prepare_enable(host->src_clk_cg);
 	readl_poll_timeout(host->base + MSDC_CFG, val, (val & MSDC_CFG_CKSTB), 0, 0);
 	sdr_set_bits(host->base + MSDC_CFG, MSDC_CFG_CKPDN);
 	mmc->actual_clock = sclk;
