@@ -679,6 +679,19 @@ static int btmtk_hci_setup(struct hci_dev *hdev)
 	return btmtk_wmt_cmd(bt, WMT_OP_FUNC_CTRL, func_on, sizeof(func_on));
 }
 
+/* Program the public BD address via the MediaTek vendor command. */
+static int btmtk_hci_set_bdaddr(struct hci_dev *hdev, const bdaddr_t *bdaddr)
+{
+	struct sk_buff *skb;
+
+	skb = __hci_cmd_sync(hdev, 0xfc1a, sizeof(*bdaddr), bdaddr, HCI_CMD_TIMEOUT);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	kfree_skb(skb);
+	return 0;
+}
+
 static int btmtk_hci_send(struct hci_dev *hdev, struct sk_buff *skb)
 {
 	struct btmtk_connsys *bt = hci_get_drvdata(hdev);
@@ -768,7 +781,12 @@ static int btmtk_connsys_probe(struct platform_device *pdev)
 	bt->hdev->flush = btmtk_hci_flush;
 	bt->hdev->setup = btmtk_hci_setup;
 	bt->hdev->send = btmtk_hci_send;
+	bt->hdev->set_bdaddr = btmtk_hci_set_bdaddr;
 	hci_set_quirk(bt->hdev, HCI_QUIRK_NON_PERSISTENT_SETUP);
+	/* The firmware has no valid address of its own; take it from the
+	 * "local-bd-address" devicetree property and program it.
+	 */
+	hci_set_quirk(bt->hdev, HCI_QUIRK_USE_BDADDR_PROPERTY);
 	/* The firmware advertises an extended-features page 2 whose declared
 	 * features (e.g. the synchronization train) it does not implement.
 	 */
