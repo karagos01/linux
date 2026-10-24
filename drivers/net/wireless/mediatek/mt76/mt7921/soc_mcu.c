@@ -214,21 +214,32 @@ static int mt7921_soc_send_bss_info(struct mt792x_dev *dev, struct ieee80211_vif
 		.nss = 2,
 		.he_op_params = { 0xf0, 0x3f, 0x00 },
 	};
+	struct cfg80211_chan_def *chandef = &vif->bss_conf.chanreq.oper;
 	struct ieee80211_supported_band *sband = NULL;
-	struct ieee80211_sta *sta;
+	struct ieee80211_sta *sta = NULL;
 	u16 rates = 0, basic = 0;
 
-	if (vif->bss_conf.chanreq.oper.chan)
-		sband = mt76_hw(dev)->wiphy->bands[vif->bss_conf.chanreq.oper.chan->band];
+	if (chandef->chan)
+		sband = mt76_hw(dev)->wiphy->bands[chandef->chan->band];
+
+	if (sbss->ap) {
+		req.current_op_mode = LEGACY_OP_MODE_AP;
+		req.is_ap_mode = 1;
+		req.sta_rec_idx_of_ap = 0;
+	}
 
 	req.ssid_len = min_t(int, vif->cfg.ssid_len, IEEE80211_MAX_SSID_LEN);
 	memcpy(req.ssid, vif->cfg.ssid, req.ssid_len);
 	ether_addr_copy(req.bssid, vif->bss_conf.bssid);
 
 	rcu_read_lock();
-	sta = mt7921_soc_find_ap(vif);
+	if (!sbss->ap)
+		sta = mt7921_soc_find_ap(vif);
 	if (sta && sband)
 		rates = mt7921_soc_rate_set(sband, sta->deflink.supp_rates[sband->band]);
+	else if (sbss->ap && sband)
+		/* An access point offers all rates */
+		rates = mt7921_soc_rate_set(sband, ~0);
 	if (sta && sbss->connected)
 		req.sta_rec_idx_of_ap = ((struct mt792x_sta *)sta->drv_priv)->deflink.wcid.idx;
 	if (sband) {
@@ -239,12 +250,25 @@ static int mt7921_soc_send_bss_info(struct mt792x_dev *dev, struct ieee80211_vif
 	}
 	rcu_read_unlock();
 
+	if (sbss->ap && sband) {
+		if (chandef->width != NL80211_CHAN_WIDTH_20_NOHT)
+			req.phy_type_set |= LEGACY_PHY_TYPE_HT;
+		if (chandef->width != NL80211_CHAN_WIDTH_20_NOHT &&
+		    sband->band != NL80211_BAND_2GHZ && sband->vht_cap.vht_supported)
+			req.phy_type_set |= LEGACY_PHY_TYPE_VHT;
+		if (vif->bss_conf.he_support)
+			req.phy_type_set |= LEGACY_PHY_TYPE_HE;
+	}
+
 	req.operational_rate_set = cpu_to_le16(rates);
 	req.bss_basic_rate_set = cpu_to_le16(basic);
 	req.hw_default_fixed_rate_code = cpu_to_le16(mt7921_soc_lowest_rate(basic));
 
 	/* The firmware takes the key management from the keys installed later */
-	if (vif->cfg.assoc || sbss->connected) {
+	if (sbss->ap) {
+		req.auth_mode = sbss->privacy ? 7 : 0;
+		req.enc_status = sbss->privacy ? 6 : 1;
+	} else if (vif->cfg.assoc || sbss->connected) {
 		req.auth_mode = vif->bss_conf.bss &&
 				(vif->bss_conf.bss->capability & WLAN_CAPABILITY_PRIVACY) ?
 				7 : 0;
@@ -260,12 +284,12 @@ static int mt7921_soc_send_bss_info(struct mt792x_dev *dev, struct ieee80211_vif
 }
 
 static int mt7921_soc_send_activate(struct mt792x_dev *dev, u8 bss_idx, u8 omac_idx,
-				    const u8 *addr, bool active)
+				    const u8 *addr, bool ap, bool active)
 {
 	struct mt7921_legacy_bss_activate req = {
 		.bss_idx = bss_idx,
 		.active = active,
-		.network_type = LEGACY_NETWORK_TYPE_AIS,
+		.network_type = ap ? LEGACY_NETWORK_TYPE_P2P : LEGACY_NETWORK_TYPE_AIS,
 		.omac_idx = omac_idx,
 		.bmc_wlan_idx = mt7921_soc_bmc_wlan_idx(bss_idx),
 	};
@@ -275,6 +299,24 @@ static int mt7921_soc_send_activate(struct mt792x_dev *dev, u8 bss_idx, u8 omac_
 
 	return mt7921_soc_legacy_send(dev, MCU_CE_CMD_LEGACY_BSS_ACTIVATE_CTRL,
 				      &req, sizeof(req));
+}
+
+/* Abort a granted channel request the BSS kept, see mt7921_soc_roc() */
+static void mt7921_soc_abort_channel(struct mt792x_dev *dev, u8 bss_idx)
+{
+	struct mt7921_soc_bss *sbss = &mt7921_soc_dev(dev)->bss[bss_idx];
+	struct mt7921_legacy_ch_privilege req = {
+		.bss_idx = bss_idx,
+		.token_id = sbss->abort_token,
+		.action = LEGACY_CH_ACTION_ABORT,
+		.dbdc_band = LEGACY_BAND_AUTO,
+	};
+
+	if (!sbss->abort_pending)
+		return;
+
+	sbss->abort_pending = false;
+	mt7921_soc_legacy_send(dev, MCU_CE_CMD_LEGACY_CH_PRIVILEGE, &req, sizeof(req));
 }
 
 static int mt7921_soc_remove_sta(struct mt792x_dev *dev, u8 action, u8 sta_idx,
@@ -357,6 +399,8 @@ static int mt7921_soc_dev_info(struct mt792x_dev *dev, struct sk_buff *skb)
 		return -EINVAL;
 
 	sbss = &mt7921_soc_dev(dev)->bss[idx];
+	if (!req->active)
+		mt7921_soc_abort_channel(dev, idx);
 	if (!req->active && sbss->connected) {
 		sbss->connected = false;
 		vif = mt7921_soc_find_vif(dev, idx);
@@ -364,8 +408,13 @@ static int mt7921_soc_dev_info(struct mt792x_dev *dev, struct sk_buff *skb)
 			mt7921_soc_pm_bss(dev, vif, false);
 	}
 	sbss->active = req->active;
+	if (req->active) {
+		sbss->ap = mt7921_soc_dev(dev)->adding_ap;
+		sbss->privacy = false;
+	}
 
-	mt7921_soc_send_activate(dev, idx, req->omac_idx, req->omac_addr, req->active);
+	mt7921_soc_send_activate(dev, idx, req->omac_idx, req->omac_addr, sbss->ap,
+				 req->active);
 	if (req->active)
 		/* The firmware defaults to power save */
 		mt7921_soc_ps_profile(dev, idx, false);
@@ -375,12 +424,61 @@ static int mt7921_soc_dev_info(struct mt792x_dev *dev, struct sk_buff *skb)
 	return 0;
 }
 
+/*
+ * UNI beacon content: TXD and beacon frame, the legacy template has the IEs
+ * only. Returns true if the privacy of the access point changed.
+ */
+static bool mt7921_soc_beacon(struct mt792x_dev *dev, u8 bss_idx,
+			      struct mt7921_soc_bss *sbss, const void *tlv)
+{
+	const struct {
+		__le16 tag;
+		__le16 len;
+		__le16 tim_ie_pos;
+		__le16 csa_ie_pos;
+		__le16 bcc_ie_pos;
+		u8 enable;
+		u8 type;
+		__le16 pkt_len;
+		u8 pkt[];
+	} __packed *bcn = tlv;
+	int hdr = MT_TXD_SIZE + offsetof(struct ieee80211_mgmt, u.beacon.variable);
+	int len = le16_to_cpu(bcn->pkt_len) - hdr;
+	const struct ieee80211_mgmt *mgmt = (const void *)(bcn->pkt + MT_TXD_SIZE);
+	struct mt7921_legacy_beacon *req;
+	bool privacy;
+
+	if (!bcn->enable || len < 0 || len > LEGACY_BEACON_MAX_IE_LEN ||
+	    le16_to_cpu(bcn->pkt_len) > le16_to_cpu(bcn->len) - sizeof(*bcn))
+		return false;
+
+	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	if (!req)
+		return false;
+
+	req->update_method = LEGACY_BEACON_UPDATE_ALL;
+	req->bss_idx = bss_idx;
+	req->capability = mgmt->u.beacon.capab_info;
+	req->ie_len = cpu_to_le16(len);
+	memcpy(req->ie, mgmt->u.beacon.variable, len);
+	mt7921_soc_legacy_send(dev, MCU_CE_CMD_LEGACY_UPDATE_BEACON, req,
+			       offsetof(struct mt7921_legacy_beacon, ie) + len);
+	kfree(req);
+
+	privacy = le16_to_cpu(mgmt->u.beacon.capab_info) & WLAN_CAPABILITY_PRIVACY;
+	if (privacy == sbss->privacy)
+		return false;
+
+	sbss->privacy = privacy;
+	return true;
+}
+
 /* UNI BSS_INFO_UPDATE: SET_BSS_INFO with the current state of the BSS */
 static int mt7921_soc_bss_info(struct mt792x_dev *dev, struct sk_buff *skb)
 {
 	struct mt76_connac_bss_basic_tlv *basic = NULL;
 	bool rlm = false, was_connected;
-	void *ps = NULL;
+	void *ps = NULL, *bcn = NULL;
 	struct mt7921_soc_bss *sbss;
 	struct ieee80211_vif *vif;
 	u8 bss_idx;
@@ -410,6 +508,9 @@ static int mt7921_soc_bss_info(struct mt792x_dev *dev, struct sk_buff *skb)
 		case UNI_BSS_INFO_PS:
 			ps = (void *)tlv;
 			break;
+		case UNI_BSS_INFO_BCN_CONTENT:
+			bcn = (void *)tlv;
+			break;
 		default:
 			break;
 		}
@@ -427,6 +528,11 @@ static int mt7921_soc_bss_info(struct mt792x_dev *dev, struct sk_buff *skb)
 		mt7921_soc_ps_profile(dev, bss_idx, tlv->profile);
 	}
 
+	sbss = &mt7921_soc_dev(dev)->bss[bss_idx];
+	/* The key management of an access point follows its beacon */
+	if (bcn && mt7921_soc_beacon(dev, bss_idx, sbss, bcn))
+		rlm = true;
+
 	/* Beacon filter and similar settings are not handled */
 	if (!basic && !rlm)
 		return 0;
@@ -435,13 +541,14 @@ static int mt7921_soc_bss_info(struct mt792x_dev *dev, struct sk_buff *skb)
 	if (!vif)
 		return 0;
 
-	sbss = &mt7921_soc_dev(dev)->bss[bss_idx];
 	was_connected = sbss->connected;
 	if (basic)
 		sbss->connected = sbss->active && !basic->conn_state;
 
-	if (was_connected && !sbss->connected)
+	if (was_connected && !sbss->connected) {
+		mt7921_soc_abort_channel(dev, bss_idx);
 		mt7921_soc_pm_bss(dev, vif, false);
+	}
 
 	mt7921_soc_send_bss_info(dev, vif, sbss);
 
@@ -480,6 +587,7 @@ static int mt7921_soc_key(struct mt792x_dev *dev, struct mt76_wcid *wcid,
 {
 	struct mt792x_vif *mvif = (struct mt792x_vif *)vif->drv_priv;
 	bool group = wcid == &mvif->sta.deflink.wcid;
+	bool ap = vif->type == NL80211_IFTYPE_AP;
 	struct ieee80211_sta *sta = wcid_to_sta(wcid);
 	int i;
 
@@ -502,8 +610,10 @@ static int mt7921_soc_key(struct mt792x_dev *dev, struct mt76_wcid *wcid,
 		struct sec_key *key = &sec->key[i];
 		struct mt7921_legacy_key req = {
 			.add_remove = 1,
-			.tx_key = !group,
+			/* An access point sends with the group key too */
+			.tx_key = !group || ap,
 			.key_type = !group,
+			.is_authenticator = ap,
 			.bss_idx = mvif->bss_conf.mt76.idx,
 			.algorithm_id = mt7921_soc_cipher(key->cipher_id),
 			.key_id = key->key_id,
@@ -515,7 +625,7 @@ static int mt7921_soc_key(struct mt792x_dev *dev, struct mt76_wcid *wcid,
 		if (!req.algorithm_id || key->key_len > sizeof(req.key_material))
 			continue;
 
-		/* The group key is installed for the AP */
+		/* The group key is installed for the AP, that is us in AP mode */
 		if (group)
 			ether_addr_copy(req.peer_addr, vif->bss_conf.bssid);
 		else if (sta)
@@ -525,6 +635,10 @@ static int mt7921_soc_key(struct mt792x_dev *dev, struct mt76_wcid *wcid,
 		mt7921_soc_legacy_send(dev, MCU_CE_CMD_LEGACY_ADD_REMOVE_KEY,
 				       &req, sizeof(req));
 	}
+
+	/* The key handshake with the AP is done */
+	if (!group && !ap)
+		mt7921_soc_abort_channel(dev, mvif->bss_conf.mt76.idx);
 
 	return 0;
 }
@@ -536,6 +650,7 @@ static void mt7921_soc_fill_sta(struct mt792x_dev *dev, struct mt7921_legacy_sta
 	struct mt792x_sta *msta = (struct mt792x_sta *)sta->drv_priv;
 	struct ieee80211_link_sta *link = &sta->deflink;
 	struct ieee80211_supported_band *sband = NULL;
+	bool ap = vif->type == NL80211_IFTYPE_AP;
 	u16 rates = 0, basic = 0;
 
 	if (vif->bss_conf.chanreq.oper.chan)
@@ -546,7 +661,9 @@ static void mt7921_soc_fill_sta(struct mt792x_dev *dev, struct mt7921_legacy_sta
 	}
 
 	req->sta_idx = msta->deflink.wcid.idx;
-	req->sta_type = LEGACY_STA_TYPE_LEGACY | LEGACY_STA_TYPE_AP;
+	/* Clients of an access point belong to a P2P network */
+	req->sta_type = ap ? LEGACY_STA_TYPE_P2P | LEGACY_STA_TYPE_CLIENT :
+			     LEGACY_STA_TYPE_LEGACY | LEGACY_STA_TYPE_AP;
 	ether_addr_copy(req->mac_addr, sta->addr);
 	req->bss_idx = msta->vif->bss_conf.mt76.idx;
 	req->desired_phy_type_set = mt7921_soc_phy_type_set(sta, sband ? sband->band :
@@ -569,8 +686,15 @@ static void mt7921_soc_fill_sta(struct mt792x_dev *dev, struct mt7921_legacy_sta
 	if (state == MT76_STA_INFO_STATE_ASSOC) {
 		req->sta_state = LEGACY_STA_STATE_3;
 		req->need_resp = 1;
-		req->aid = cpu_to_le16(vif->cfg.aid);
-		req->listen_interval = cpu_to_le16(mt76_hw(dev)->conf.listen_interval);
+		if (ap) {
+			/* mac80211 does not tell the client's listen interval */
+			req->aid = cpu_to_le16(sta->aid);
+			req->listen_interval = cpu_to_le16(10);
+		} else {
+			req->aid = cpu_to_le16(vif->cfg.aid);
+			req->listen_interval =
+				cpu_to_le16(mt76_hw(dev)->conf.listen_interval);
+		}
 	}
 
 	if (link->ht_cap.ht_supported) {
@@ -608,7 +732,11 @@ static void mt7921_soc_fill_sta(struct mt792x_dev *dev, struct mt7921_legacy_sta
 		req->he_6g_band_cap = link->he_6ghz_capa.capa;
 	}
 
-	/* RCPI of the AP, from its last beacons */
+	/* RCPI of the AP, from its last beacons; a client starts at -60 dBm */
+	if (ap) {
+		req->rcpi = 100;
+		return;
+	}
 	req->rcpi = clamp((ewma_rssi_read(&msta->vif->bss_conf.rssi) ?
 			   -(int)ewma_rssi_read(&msta->vif->bss_conf.rssi) : -60) + 110,
 			  0, 110) * 2;
@@ -700,6 +828,51 @@ out:
 	return ret;
 }
 
+/*
+ * Channel for starting an access point, called with the MCU mutex held. The
+ * firmware keeps the channel of the access point once it is started.
+ */
+int mt7921_soc_ap_channel(struct mt792x_dev *dev, struct ieee80211_vif *vif)
+{
+	struct mt792x_vif *mvif = (struct mt792x_vif *)vif->drv_priv;
+	struct mt7921_soc_dev *sdev = mt7921_soc_dev(dev);
+	u8 idx = mvif->bss_conf.mt76.idx;
+	struct mt7921_legacy_bss_rlm rlm = {};
+	struct mt7921_legacy_ch_privilege req = {
+		.bss_idx = idx,
+		.token_id = ++dev->phy.roc_token_id,
+		.action = LEGACY_CH_ACTION_REQ,
+		.req_type = LEGACY_CH_REQ_GO_START_BSS,
+		.dbdc_band = LEGACY_BAND_AUTO,
+		.max_interval = cpu_to_le32(200),
+	};
+	int ret;
+
+	mt7921_soc_fill_rlm(&rlm, vif, idx);
+	req.primary_channel = rlm.primary_channel;
+	req.sco = rlm.sco;
+	req.band = rlm.band;
+	req.channel_width = rlm.vht_channel_width;
+	req.center_freq_s1 = rlm.vht_channel_freq_s1;
+	req.center_freq_s2 = rlm.vht_channel_freq_s2;
+
+	reinit_completion(&sdev->ap_grant);
+	ret = mt7921_soc_legacy_send(dev, MCU_CE_CMD_LEGACY_CH_PRIVILEGE, &req, sizeof(req));
+	if (ret)
+		return ret;
+
+	if (!wait_for_completion_timeout(&sdev->ap_grant, HZ)) {
+		dev_warn(dev->mt76.dev, "No channel for the access point\n");
+		return -ETIMEDOUT;
+	}
+
+	/* Released once the access point is created */
+	sdev->bss[idx].abort_token = req.token_id;
+	sdev->bss[idx].abort_pending = true;
+
+	return 0;
+}
+
 /* UNI ROC: CH_PRIVILEGE, for joining a BSS or remaining on a channel */
 static int mt7921_soc_roc(struct mt792x_dev *dev, struct sk_buff *skb)
 {
@@ -749,6 +922,8 @@ static int mt7921_soc_roc(struct mt792x_dev *dev, struct sk_buff *skb)
 			u8 bss_idx;
 			u8 tokenid;
 		} __packed *abort = (void *)tlv;
+		struct mt7921_soc_bss *sbss;
+		struct ieee80211_vif *vif;
 
 		req.bss_idx = abort->bss_idx;
 		req.token_id = abort->tokenid;
@@ -756,12 +931,21 @@ static int mt7921_soc_roc(struct mt792x_dev *dev, struct sk_buff *skb)
 
 		/*
 		 * The firmware holds data frames without the channel: once
-		 * associated keep it until the key handshake is done, the
-		 * grant expires on its own.
+		 * associated to a protected BSS keep it until the key
+		 * handshake is done. The grant does not expire, every later
+		 * request waits for the abort.
 		 */
-		if (abort->bss_idx < ARRAY_SIZE(mt7921_soc_dev(dev)->bss) &&
-		    mt7921_soc_dev(dev)->bss[abort->bss_idx].connected)
+		if (abort->bss_idx >= ARRAY_SIZE(mt7921_soc_dev(dev)->bss))
+			return -EINVAL;
+
+		sbss = &mt7921_soc_dev(dev)->bss[abort->bss_idx];
+		vif = mt7921_soc_find_vif(dev, abort->bss_idx);
+		if (sbss->connected && vif && vif->bss_conf.bss &&
+		    (vif->bss_conf.bss->capability & WLAN_CAPABILITY_PRIVACY)) {
+			sbss->abort_token = abort->tokenid;
+			sbss->abort_pending = true;
 			return 0;
+		}
 	}
 
 	return mt7921_soc_legacy_send(dev, MCU_CE_CMD_LEGACY_CH_PRIVILEGE, &req, sizeof(req));
@@ -829,6 +1013,22 @@ bool mt7921_soc_legacy_cmd(struct mt792x_dev *dev, struct sk_buff *skb, int cmd,
 		return false;
 	}
 
+	/* An access point is created, not connected */
+	if (cmd == MCU_CE_CMD(SET_BSS_CONNECTED) && skb->len >= 6 &&
+	    skb->data[0] < ARRAY_SIZE(mt7921_soc_dev(dev)->bss) &&
+	    mt7921_soc_dev(dev)->bss[skb->data[0]].ap) {
+		struct mt7921_legacy_pm_bss_created req = {
+			.bss_idx = skb->data[0],
+			.dtim_period = skb->data[1] ?: 1,
+			.beacon_interval = cpu_to_le16(get_unaligned_le16(skb->data + 4)),
+		};
+
+		mt7921_soc_legacy_send(dev, MCU_CE_CMD_LEGACY_PM_BSS_CREATED,
+				       &req, sizeof(req));
+		mt7921_soc_abort_channel(dev, req.bss_idx);
+		goto consume;
+	}
+
 	/* Channel and RX path are managed by the firmware through CH_PRIVILEGE */
 	if (cmd == MCU_EXT_CMD(CHANNEL_SWITCH) || cmd == MCU_EXT_CMD(SET_RX_PATH))
 		goto consume;
@@ -876,6 +1076,14 @@ static void mt7921_soc_ch_privilege_event(struct mt76_dev *mdev, enum mt76_rxq_i
 	/* Only grants are of interest */
 	if (data[2])
 		goto out;
+
+	/* Requested by mt7921_soc_ap_channel() */
+	if (data[9] == LEGACY_CH_REQ_GO_START_BSS) {
+		struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
+
+		complete(&mt7921_soc_dev(dev)->ap_grant);
+		goto out;
+	}
 
 	uni = alloc_skb(sizeof(*rxd) + 4 + sizeof(*grant), GFP_ATOMIC);
 	if (!uni)

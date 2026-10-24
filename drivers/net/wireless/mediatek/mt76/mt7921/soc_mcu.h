@@ -17,8 +17,10 @@ enum {
 	MCU_CE_CMD_LEGACY_SET_BSS_INFO = 0x12,
 	MCU_CE_CMD_LEGACY_UPDATE_STA_RECORD = 0x13,
 	MCU_CE_CMD_LEGACY_REMOVE_STA_RECORD = 0x14,
+	MCU_CE_CMD_LEGACY_PM_BSS_CREATED = 0x15,
 	MCU_CE_CMD_LEGACY_PM_BSS_CONNECTED = 0x16,
 	MCU_CE_CMD_LEGACY_PM_BSS_ABORT = 0x17,
+	MCU_CE_CMD_LEGACY_UPDATE_BEACON = 0x18,
 	MCU_CE_CMD_LEGACY_CH_PRIVILEGE = 0x1c,
 };
 
@@ -34,8 +36,13 @@ enum {
 };
 
 #define LEGACY_NETWORK_TYPE_AIS		0
+#define LEGACY_NETWORK_TYPE_P2P		1
+
+#define LEGACY_OP_MODE_AP		2
 
 #define LEGACY_STA_TYPE_LEGACY		BIT(0)
+#define LEGACY_STA_TYPE_P2P		BIT(1)
+#define LEGACY_STA_TYPE_CLIENT		BIT(5)
 #define LEGACY_STA_TYPE_AP		BIT(6)
 
 #define LEGACY_STA_STATE_1		0
@@ -59,6 +66,11 @@ enum {
 
 #define LEGACY_CH_ACTION_REQ		0
 #define LEGACY_CH_ACTION_ABORT		1
+
+#define LEGACY_CH_REQ_GO_START_BSS	3
+
+#define LEGACY_BEACON_UPDATE_ALL	1
+#define LEGACY_BEACON_MAX_IE_LEN	600
 
 struct mt7921_legacy_bss_activate {
 	u8 bss_idx;
@@ -241,6 +253,14 @@ struct mt7921_legacy_pm_bss_connected {
 	u8 rsv;
 } __packed;
 
+struct mt7921_legacy_pm_bss_created {
+	u8 bss_idx;
+	u8 dtim_period;
+	__le16 beacon_interval;
+	__le16 atim_window;
+	u8 rsv[2];
+} __packed;
+
 struct mt7921_legacy_pm_bss_abort {
 	u8 bss_idx;
 	u8 rsv[3];
@@ -277,6 +297,15 @@ struct mt7921_legacy_key {
 	u8 mgmt_protection;
 	u8 key_material[32];
 	u8 key_rsc[16];
+} __packed;
+
+struct mt7921_legacy_beacon {
+	u8 update_method;
+	u8 bss_idx;
+	u8 rsv[2];
+	__le16 capability;
+	__le16 ie_len;
+	u8 ie[LEGACY_BEACON_MAX_IE_LEN];
 } __packed;
 
 #endif /* __MT7921_SOC_MCU_H */
