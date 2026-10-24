@@ -110,22 +110,32 @@ patternProperties:
           bias-pull-down:
             oneOf:
               - type: boolean
+              - enum: [100, 101, 102, 103]
+                description:
+                  PUPD/R1/R0 pull-down type, set with the MTK_PUPD_SET_R1R0_*
+                  macros for different resistance.
               - enum: [75000, 5000]
                 description: Pull down RSEL type resistance values (in ohms)
             description:
               For normal pull down type there is no need to specify a resistance
               value, hence this can be specified as a boolean property.
-              For RSEL pull down type a resistance value (in ohms) can be added.
+              For PUPD/R1/R0 pull down type an MTK_PUPD_SET_R1R0_* value can be
+              added, and for RSEL pull down type a resistance value (in ohms).
 
           bias-pull-up:
             oneOf:
               - type: boolean
+              - enum: [100, 101, 102, 103]
+                description:
+                  PUPD/R1/R0 pull-up type, set with the MTK_PUPD_SET_R1R0_*
+                  macros for different resistance.
               - enum: [10000, 5000, 4000, 3000]
                 description: Pull up RSEL type resistance values (in ohms)
             description:
               For normal pull up type there is no need to specify a resistance
               value, hence this can be specified as a boolean property.
-              For RSEL pull up type a resistance value (in ohms) can be added.
+              For PUPD/R1/R0 pull up type an MTK_PUPD_SET_R1R0_* value can be
+              added, and for RSEL pull up type a resistance value (in ohms).
 
           bias-disable: true
 
