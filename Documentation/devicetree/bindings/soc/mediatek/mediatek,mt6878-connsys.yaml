@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/mediatek/mediatek,mt6878-connsys.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6878 connsys combo controller
+
+maintainers:
+  - Kara <karagos01@gmail.com>
+
+description:
+  The "connsys" combo in the MT6878 hosts WiFi, Bluetooth, GPS and FM behind a
+  shared power domain, a shared A-die and a set of analog supplies. This node
+  owns those shared resources; the per-function controllers (WiFi, Bluetooth)
+  reference it through a "mediatek,connsys" phandle and are brought up on top of
+  it. The firmware is staged into the reserved connsys EMI region by the
+  bootloader.
+
+properties:
+  compatible:
+    const: mediatek,mt6878-connsys
+
+  reg:
+    items:
+      - description: conn_infra register window
+      - description: srclken-rc (source-clock enable) register window
+
+  reg-names:
+    items:
+      - const: conn
+      - const: srclken-rc
+
+  memory-region:
+    maxItems: 1
+    description: Reserved EMI region the bootloader stages the firmware into.
+
+  power-domains:
+    maxItems: 1
+
+  mediatek,topckgen:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Phandle to the topckgen syscon, used to route the bus clocks.
+
+  mediatek,xtal-52mhz:
+    type: boolean
+    description:
+      Present when the A-die reference crystal runs at 52 MHz instead of the
+      default 26 MHz.
+
+  pinctrl-names:
+    items:
+      - const: default
+      - const: sleep
+      - const: adie-cfg
+
+  pinctrl-0: true
+  pinctrl-1: true
+  pinctrl-2: true
+
+  vrfio18-supply:
+    description: RF I/O 1.8 V supply.
+
+  vcn13-supply:
+    description: A-die 1.3 V supply.
+
+  vcn33-1-supply:
+    description: A-die 3.3 V supply, rail 1.
+
+  vcn33-2-supply:
+    description: A-die 3.3 V supply, rail 2.
+
+  vant18-supply:
+    description: Antenna 1.8 V supply.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - memory-region
+  - power-domains
+  - mediatek,topckgen
+  - vrfio18-supply
+  - vcn13-supply
+  - vcn33-1-supply
+  - vcn33-2-supply
+  - vant18-supply
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/power/mediatek,mt6878-power.h>
+
+    connsys@18000000 {
+        compatible = "mediatek,mt6878-connsys";
+        reg = <0x18000000 0x80000>,
+              <0x1c00d000 0x1000>;
+        reg-names = "conn", "srclken-rc";
+        memory-region = <&consys_emi>;
+        power-domains = <&spm MT6878_POWER_DOMAIN_CONN>;
+        mediatek,topckgen = <&topckgen>;
+        pinctrl-names = "default", "sleep", "adie-cfg";
+        pinctrl-0 = <&conn_pins_default>;
+        pinctrl-1 = <&conn_pins_sleep>;
+        pinctrl-2 = <&conn_pins_adie_cfg>;
+        vrfio18-supply = <&mt6363_vrfio18>;
+        vcn13-supply = <&mt6363_vcn13>;
+        vcn33-1-supply = <&mt6369_vcn33_1>;
+        vcn33-2-supply = <&mt6369_vcn33_2>;
+        vant18-supply = <&mt6369_vant18>;
+    };
