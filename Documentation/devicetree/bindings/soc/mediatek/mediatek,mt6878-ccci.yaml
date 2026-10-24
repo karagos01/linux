@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/mediatek/mediatek,mt6878-ccci.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6878 modem (CCCI)
+
+maintainers:
+  - Kara <karagos01@gmail.com>
+
+description:
+  The MT6878 integrates a cellular modem reached from the application
+  processor over the "CCCI" cross-core communication interface. The modem
+  firmware is loaded by the bootloader; this node boots the modem and exposes
+  its control channels and the DPMAIF data path. Control and data run through
+  shared-memory regions handed over from the bootloader, and a pair of CCIF
+  mailboxes plus a DPMAIF interrupt drive the two cores.
+
+properties:
+  compatible:
+    const: mediatek,mt6878-ccci
+
+  reg:
+    items:
+      - description: AP-side CCIF mailbox
+      - description: MD-side CCIF mailbox
+      - description: infracfg
+      - description: SPM (system power manager)
+      - description: topckgen
+      - description: infracfg-ao (always-on)
+      - description: NEMI configuration
+      - description: DPMAIF always-on
+      - description: DPMAIF power domain
+
+  reg-names:
+    items:
+      - const: ap-ccif
+      - const: md-ccif
+      - const: infracfg
+      - const: spm
+      - const: topckgen
+      - const: infracfg-ao
+      - const: nemicfg
+      - const: dpmaif-ao
+      - const: dpmaif-pd
+
+  interrupts:
+    items:
+      - description: CCIF mailbox interrupt
+      - description: CCIF exception interrupt
+      - description: DPMAIF data-path interrupt
+
+  memory-region:
+    items:
+      - description: Bootloader handover tag region
+      - description: Modem non-cacheable shared memory
+      - description: Modem cacheable shared memory
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - memory-region
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    modem@10209000 {
+        compatible = "mediatek,mt6878-ccci";
+        reg = <0x10209000 0x1000>,
+              <0x1020a000 0x1000>,
+              <0x1020e000 0x1000>,
+              <0x1c001000 0x1000>,
+              <0x10000000 0x1000>,
+              <0x10001000 0x1000>,
+              <0x10270000 0x1000>,
+              <0x10014000 0x1000>,
+              <0x1022d000 0x1000>;
+        reg-names = "ap-ccif", "md-ccif", "infracfg", "spm", "topckgen",
+                    "infracfg-ao", "nemicfg", "dpmaif-ao", "dpmaif-pd";
+        interrupts = <GIC_SPI 228 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 229 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 238 IRQ_TYPE_LEVEL_HIGH 0>;
+        memory-region = <&ccci_tag>, <&md_nc_smem>, <&md_c_smem>;
+    };
