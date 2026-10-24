@@ -1007,6 +1007,7 @@ static void mtk_connsys_hw_power_off(struct mtk_connsys *cs)
  */
 int mtk_connsys_power_on(struct mtk_connsys *cs, enum mtk_connsys_radio radio)
 {
+	bool first;
 	int ret = 0;
 
 	mutex_lock(&cs->lock);
@@ -1014,41 +1015,53 @@ int mtk_connsys_power_on(struct mtk_connsys *cs, enum mtk_connsys_radio radio)
 	if (cs->radios & BIT(radio))
 		goto out;
 
-	if (radio != MTK_CONNSYS_WIFI) {
+	if (radio != MTK_CONNSYS_WIFI && radio != MTK_CONNSYS_BT) {
 		ret = -EOPNOTSUPP;
 		goto out;
 	}
 
-	ret = mtk_connsys_hw_power_on(cs);
-	if (ret)
-		goto out;
+	/*
+	 * The conn_infra, A-die and the analog supplies are shared by all
+	 * radios, so they are brought up for whichever radio comes up first
+	 * and torn down again when the last one is released.
+	 */
+	first = !cs->radios;
+	if (first) {
+		ret = mtk_connsys_hw_power_on(cs);
+		if (ret)
+			goto out;
+	}
 
-	ret = mtk_connsys_set_radio_status(cs, BIT(radio));
+	ret = mtk_connsys_set_radio_status(cs, cs->radios | BIT(radio));
 	if (ret)
 		goto err;
 
-	ret = mtk_connsys_adie_wf_xobuf(cs, true);
-	if (ret)
-		goto err;
+	/* The XO buffer is only needed for the WiFi subsystem */
+	if (radio == MTK_CONNSYS_WIFI) {
+		ret = mtk_connsys_adie_wf_xobuf(cs, true);
+		if (ret)
+			goto err;
+	}
 
-	mtk_connsys_low_power_cfg(cs);
+	if (first) {
+		mtk_connsys_low_power_cfg(cs);
 
-	ret = regulator_bulk_enable(ARRAY_SIZE(cs->rf_supplies), cs->rf_supplies);
-	if (ret) {
-		pm_runtime_put_sync(cs->dev);
-		pinctrl_select_state(cs->pinctrl, cs->pins_sleep);
-		regulator_bulk_disable(ARRAY_SIZE(cs->common_supplies), cs->common_supplies);
-		goto out;
+		ret = regulator_bulk_enable(ARRAY_SIZE(cs->rf_supplies), cs->rf_supplies);
+		if (ret)
+			goto err;
 	}
 
 	cs->radios |= BIT(radio);
-	dev_dbg(cs->dev, "powered on, A-die 0x%08x\n", cs->adie_id);
+	dev_dbg(cs->dev, "powered on for radio %d, A-die 0x%08x\n", radio, cs->adie_id);
 	goto out;
 
 err:
-	pm_runtime_put_sync(cs->dev);
-	pinctrl_select_state(cs->pinctrl, cs->pins_sleep);
-	regulator_bulk_disable(ARRAY_SIZE(cs->common_supplies), cs->common_supplies);
+	/* Only unwind the shared bring-up when this radio started it */
+	if (first) {
+		pm_runtime_put_sync(cs->dev);
+		pinctrl_select_state(cs->pinctrl, cs->pins_sleep);
+		regulator_bulk_disable(ARRAY_SIZE(cs->common_supplies), cs->common_supplies);
+	}
 out:
 	mutex_unlock(&cs->lock);
 	return ret;
