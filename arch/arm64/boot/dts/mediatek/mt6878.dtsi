@@ -664,8 +664,6 @@
 				<&pericfg_ao CLK_PERAOP_DMA_B>;
 			clock-names = "main", "dma";
 			clock-div = <1>;
-			scl-gpio-id = <139>;
-			sda-gpio-id = <140>;
 		};
 
 		i2c8: i2c@11e03000 {
