@@ -46,12 +46,6 @@
 			height = <2400>;
 			stride = <(1088 * 4)>;
 			format = "a8r8g8b8";
-			panel = <&fb_panel>;
-
-			fb_panel: fb-panel {
-				width-mm = <69>;
-				height-mm = <154>;
-			};
 		};
 	};
 
