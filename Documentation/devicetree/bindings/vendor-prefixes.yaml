@@ -1823,6 +1823,8 @@ patternProperties:
     description: VoCore Studio
   "^voipac,.*":
     description: Voipac Technologies s.r.o.
+  "^volla,.*":
+    description: Hallo Welt Systeme UG
   "^voltafield,.*":
     description: Voltafield Technology Corp.
   "^vot,.*":
