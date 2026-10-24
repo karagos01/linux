@@ -96,6 +96,14 @@
 		mediatek,connsys = <&consys>;
 	};
 
+	bluetooth@18800000 {
+		compatible = "mediatek,mt6878-bluetooth";
+		reg = <0x0 0x18000000 0x0 0x61000>,
+		      <0x0 0x18800000 0x0 0x21000>;
+		reg-names = "conn", "bgf";
+		mediatek,connsys = <&consys>;
+	};
+
 	modem@10209000 {
 		compatible = "mediatek,mt6878-ccci";
 		reg = <0x0 0x10209000 0x0 0x1000>,

@@ -472,4 +472,17 @@ config BT_INTEL_PCIE
 
 	  Say Y here to compiler support for Intel Bluetooth PCIe device into
 	  the kernel or say M to compile it as module (btintel_pcie)
+
+config BT_MTK_CONNSYS
+	tristate "MediaTek connsys Bluetooth driver"
+	depends on BT && (MTK_CONNSYS || COMPILE_TEST)
+	help
+	  MediaTek Bluetooth driver for the BGF subsystem of the connsys
+	  connectivity combo found on SoCs like the MT6878. The controller
+	  shares the connsys power domain and RF chip with WiFi and exchanges
+	  HCI with the firmware over a shared-memory ring in the connsys EMI.
+
+	  Say Y here to compile support for the connsys Bluetooth controller
+	  into the kernel or say M to compile it as a module (btmtk_connsys).
+
 endmenu
