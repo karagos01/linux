@@ -101,6 +101,7 @@
 		reg = <0x0 0x18000000 0x0 0x61000>,
 		      <0x0 0x18800000 0x0 0x21000>;
 		reg-names = "conn", "bgf";
+		interrupts = <GIC_SPI 693 IRQ_TYPE_LEVEL_HIGH 0>;
 		mediatek,connsys = <&consys>;
 		/* Factory BD address 58:9E:C6:AB:A6:1A (little-endian here) */
 		local-bd-address = [1a a6 ab c6 9e 58];

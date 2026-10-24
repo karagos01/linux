@@ -20,9 +20,9 @@
 
 #include <linux/completion.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
-#include <linux/kthread.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -94,10 +94,12 @@
 /* SW IRQ / doorbell (conn window, absolute) */
 #define BGF_MCUCIRQ			0x1803f00c	/* TX doorbell to FW */
 #define BGF_BTIF0_WAKEUP_OUT		(BIT(0) | BIT(1))
-#define BGF_SW_IRQ_STATUS		0x1803f010
+#define BGF_SW_IRQ_STATUS		0x1803f010	/* cause, write-1-to-clear */
 #define BGF_SW_IRQ_RESET		0x1803f014
 #define BGF_SW_IRQ_FW_LOG_B		BIT(0)
 #define BGF_SW_IRQ_SUBSYS_RST_B		BIT(1)
+#define BGF_SW_IRQ_WHOLE_RST_B		BIT(2)
+#define BGF_SW_IRQ_FW2AP_B		BIT(3)	/* RX data available in C2H */
 
 /* BGF D-die registers (BGF window) */
 #define BGF_MCCR			0x18800100
@@ -165,7 +167,7 @@ struct btmtk_connsys {
 	struct hci_dev *hdev;
 	struct mutex tx_lock;		/* serializes H2C pushes */
 
-	struct task_struct *rx_thread;
+	int irq;			/* BGF software IRQ (RX notify) */
 	struct sk_buff *rx_skb;		/* HCI frame being reassembled */
 	u32 rx_want;			/* bytes still needed for rx_skb */
 	u8 rx_hdr;			/* header bytes gathered so far */
@@ -467,6 +469,26 @@ static int beif_send(struct btmtk_connsys *bt, u8 type, const u8 *data, u32 len)
 
 static int btmtk_wmt_event(struct btmtk_connsys *bt, const u8 *evt, u32 len);
 
+/*
+ * The firmware's "Read Local Supported Commands" response advertises the
+ * Read Local Supported Codecs [v2] commands, but it then rejects them and
+ * returns a malformed event for the v2 opcode. Clear those two bits in the
+ * supported-commands bitmap so the core never issues the codec reads.
+ */
+static void btmtk_fixup_event(struct sk_buff *skb)
+{
+	u8 *d = skb->data;
+
+	/* [evt=0x0e][plen][ncmd][op_lo][op_hi][status][64-byte command bitmap] */
+	if (skb->len < 6 + 64 || d[0] != HCI_EV_CMD_COMPLETE)
+		return;
+	if (get_unaligned_le16(d + 3) != HCI_OP_READ_LOCAL_COMMANDS || d[5])
+		return;
+
+	d[6 + 45] &= ~0x04;	/* Read Local Supported Codecs V2 */
+	d[6 + 29] &= ~0x20;	/* Read Local Supported Codecs */
+}
+
 /* Feed received bytes through an H4 reassembler, dispatch complete frames. */
 static void btmtk_rx_bytes(struct btmtk_connsys *bt, const u8 *buf, u32 len)
 {
@@ -521,6 +543,8 @@ static void btmtk_rx_bytes(struct btmtk_connsys *bt, const u8 *buf, u32 len)
 			btmtk_wmt_event(bt, bt->rx_skb->data, bt->rx_skb->len);
 			kfree_skb(bt->rx_skb);
 		} else {
+			if (type == H4_EVT)
+				btmtk_fixup_event(bt->rx_skb);
 			hci_recv_frame(bt->hdev, bt->rx_skb);
 		}
 		bt->rx_skb = NULL;
@@ -554,15 +578,32 @@ static void beif_rx_drain(struct btmtk_connsys *bt)
 	}
 }
 
-static int btmtk_rx_thread(void *data)
+/*
+ * BGF software-interrupt handler (threaded). The firmware raises this line
+ * (level-high GIC SPI) when it places data in the C2H ring, or to signal a
+ * firmware-log / reset condition. The cause is latched in BGF_SW_IRQ_STATUS
+ * and cleared write-1-to-clear via BGF_SW_IRQ_RESET.
+ */
+static irqreturn_t btmtk_sw_irq(int irq, void *data)
 {
 	struct btmtk_connsys *bt = data;
+	u32 status = bt_rd(bt, BGF_SW_IRQ_STATUS);
 
-	while (!kthread_should_stop()) {
-		beif_rx_drain(bt);
-		usleep_range(1000, 2000);
-	}
-	return 0;
+	/* Ack first, so a notify raised while we drain is not lost: it will
+	 * re-assert the level and fire the IRQ again rather than be cleared.
+	 */
+	if (status)
+		bt_wr(bt, BGF_SW_IRQ_RESET, status);
+
+	if (status & (BGF_SW_IRQ_SUBSYS_RST_B | BGF_SW_IRQ_WHOLE_RST_B))
+		dev_warn_ratelimited(bt->dev,
+				     "firmware reset notification (0x%08x)\n", status);
+	if (status & BGF_SW_IRQ_FW_LOG_B)
+		dev_dbg(bt->dev, "firmware log notification\n");
+
+	/* Drain unconditionally: the ring indices are authoritative. */
+	beif_rx_drain(bt);
+	return IRQ_HANDLED;
 }
 
 /* Record the status of the WMT event we are waiting for and wake the sender. */
@@ -633,30 +674,31 @@ static int btmtk_hci_open(struct hci_dev *hdev)
 		return ret;
 
 	ret = beif_reset(bt);
-	if (ret)
-		goto err_release;
-
-	bt->rx_skb = NULL;
-	bt->rx_thread = kthread_run(btmtk_rx_thread, bt, "btmtk_connsys_rx");
-	if (IS_ERR(bt->rx_thread)) {
-		ret = PTR_ERR(bt->rx_thread);
-		goto err_release;
+	if (ret) {
+		bgf_conninfra_release(bt);
+		return ret;
 	}
 
-	return 0;
+	bt->rx_skb = NULL;
+	bt->rx_hdr = 0;
+	bt->rx_want = 0;
 
-err_release:
-	bgf_conninfra_release(bt);
-	return ret;
+	/* Clear any stale cause, then let the BGF software IRQ drive RX. */
+	bt_wr(bt, BGF_SW_IRQ_RESET, bt_rd(bt, BGF_SW_IRQ_STATUS));
+	enable_irq(bt->irq);
+
+	return 0;
 }
 
 static int btmtk_hci_close(struct hci_dev *hdev)
 {
 	struct btmtk_connsys *bt = hci_get_drvdata(hdev);
+	static const u8 func_off[] = { 0x00, 0x00 };	/* subsys 0 (BT), off */
 
-	if (!IS_ERR_OR_NULL(bt->rx_thread))
-		kthread_stop(bt->rx_thread);
-	bt->rx_thread = NULL;
+	/* Turn the Bluetooth function back off (RX IRQ still live for the reply). */
+	btmtk_wmt_cmd(bt, WMT_OP_FUNC_CTRL, func_off, sizeof(func_off));
+
+	disable_irq(bt->irq);
 
 	kfree_skb(bt->rx_skb);
 	bt->rx_skb = NULL;
@@ -765,6 +807,22 @@ static int btmtk_connsys_probe(struct platform_device *pdev)
 	bgf_conninfra_release(bt);
 	if (ret)
 		goto err_power_off;
+
+	/* BGF software IRQ: RX-data / firmware notifications. Kept disabled
+	 * until the HCI device is opened (and re-disabled on close).
+	 */
+	bt->irq = platform_get_irq(pdev, 0);
+	if (bt->irq < 0) {
+		ret = bt->irq;
+		goto err_power_off;
+	}
+	ret = devm_request_threaded_irq(dev, bt->irq, NULL, btmtk_sw_irq,
+					IRQF_ONESHOT | IRQF_NO_AUTOEN,
+					"btmtk_connsys", bt);
+	if (ret) {
+		dev_err(dev, "cannot request BGF IRQ %d: %d\n", bt->irq, ret);
+		goto err_power_off;
+	}
 
 	bt->hdev = hci_alloc_dev();
 	if (!bt->hdev) {
