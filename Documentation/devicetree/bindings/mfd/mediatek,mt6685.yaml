@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/mfd/mediatek,mt6685.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6685 SPMI PMIC
+
+maintainers:
+  - Kara <karagos01@gmail.com>
+
+description:
+  The MT6685 is a MediaTek companion PMIC on the System Power Management
+  Interface (SPMI) bus, providing the clock-buffer and related functions for
+  the connectivity A-die. It is a multi-function device whose sub-functions
+  are described in child nodes.
+
+properties:
+  compatible:
+    const: mediatek,mt6685
+
+  reg:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: true
+
+examples:
+  - |
+    #include <dt-bindings/spmi/spmi.h>
+
+    spmi {
+        #address-cells = <2>;
+        #size-cells = <0>;
+
+        pmic@9 {
+            compatible = "mediatek,mt6685";
+            reg = <0x9 SPMI_USID>;
+        };
+    };
