@@ -72,6 +72,15 @@ config MTK_CONNSYS
 	  like the MT6878. This is required by the WiFi driver of these
 	  SoCs.
 
+config MTK_CCCI
+	tristate "MediaTek modem control and communication (CCCI)"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on HAVE_ARM_SMCCC && OF
+	help
+	  Say yes here to boot the integrated cellular modem of MediaTek
+	  SoCs like the MT6878 and to talk to it through the CCIF mailbox.
+	  The modem firmware has to be loaded by the bootloader.
+
 config MTK_DISP_REFRESH
 	tristate "MediaTek bootloader command mode panel refresh"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
