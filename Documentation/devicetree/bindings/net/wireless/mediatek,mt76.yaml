@@ -27,6 +27,7 @@ properties:
       - mediatek,mt7622-wmac
       - mediatek,mt7981-wmac
       - mediatek,mt7986-wmac
+      - mediatek,mt6878-wifi
 
   reg:
     minItems: 1
@@ -71,6 +72,12 @@ properties:
     description:
       Phandle to the infrastructure bus fabric syscon node.
       This property is MT7622 specific
+
+  mediatek,connsys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the connsys combo controller that owns the shared power
+      domain, A-die and EMI. This property is MT6878 specific.
 
   ieee80211-freq-limit: true
 
@@ -298,7 +305,29 @@ allOf:
       properties:
         interrupts:
           minItems: 4
-    else:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt6878-wifi
+    then:
+      properties:
+        interrupts:
+          minItems: 2
+          maxItems: 2
+      required:
+        - interrupts
+        - memory-region
+        - mediatek,connsys
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - mediatek,mt76
+              - mediatek,mt7628-wmac
+              - mediatek,mt7622-wmac
+    then:
       properties:
         interrupts:
           maxItems: 1
@@ -387,4 +416,16 @@ examples:
                  <&topckgen 62>;
         clock-names = "mcu", "ap2conn";
         memory-region = <&wmcpu_emi>;
+    };
+
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+    wifi@18000000 {
+        compatible = "mediatek,mt6878-wifi";
+        reg = <0x18000000 0x700000>;
+        interrupts = <GIC_SPI 484 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 692 IRQ_TYPE_LEVEL_HIGH 0>;
+        memory-region = <&wifi_dma>;
+        mediatek,connsys = <&consys>;
     };
