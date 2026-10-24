@@ -257,6 +257,7 @@ patternProperties:
         type: boolean
 
       mediatek,software-role-switch:
+        type: boolean
         description:
           Forcibly sets the phy mode. In dual-role mode, it polls
           role switcher and manually changes mode accordingly.
