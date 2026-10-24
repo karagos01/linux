@@ -1406,9 +1406,9 @@ static const unsigned int mt6878_pull_type[] = {
 };
 
 static const char * const mt6878_pinctrl_register_base_names[] = {
-	"gpio", "iocfg_bl", "iocfg_bm", "iocfg_br",
-	"iocfg_bl1", "iocfg_br1", "iocfg_lm", "iocfg_lt",
-	"iocfg_rm", "iocfg_rt",
+	"base", "bl", "bm", "br",
+	"bl1", "br1", "lm", "lt",
+	"rm", "rt",
 };
 
 static const struct mtk_eint_hw mt6878_eint_hw = {
