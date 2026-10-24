@@ -239,6 +239,7 @@ allOf:
         compatible:
           contains:
             enum:
+              - mediatek,mt6878-mmc
               - mediatek,mt7986-mmc
               - mediatek,mt7988-mmc
               - mediatek,mt8183-mmc
