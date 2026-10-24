@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/regulator/mediatek,mt6369-regulator.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6369 PMIC Regulators
+
+maintainers:
+  - Kara <karagos01@gmail.com>
+
+description:
+  The MT6369 is an SPMI companion PMIC. This binding covers the LDO
+  regulators that feed the connectivity subsystem (vcn33-1, vcn33-2, vant18)
+  and the SD card slot (vmch, vmc); other outputs are not described.
+
+properties:
+  compatible:
+    const: mediatek,mt6369-regulator
+
+  reg:
+    maxItems: 1
+
+  regulators:
+    type: object
+    additionalProperties: false
+    patternProperties:
+      "^vcn33-[12]$":
+        type: object
+        $ref: regulator.yaml#
+        unevaluatedProperties: false
+      "^(vmch|vmc|vant18)$":
+        type: object
+        $ref: regulator.yaml#
+        unevaluatedProperties: false
+
+required:
+  - compatible
+  - reg
+  - regulators
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/spmi/spmi.h>
+
+    spmi {
+        #address-cells = <2>;
+        #size-cells = <0>;
+
+        pmic@5 {
+            compatible = "mediatek,mt6369-regulator";
+            reg = <0x5 SPMI_USID>;
+
+            regulators {
+                vcn33-1 {
+                    regulator-name = "mt6369_vcn33_1";
+                    regulator-min-microvolt = <3300000>;
+                    regulator-max-microvolt = <3500000>;
+                };
+
+                vmch {
+                    regulator-name = "mt6369_vmch";
+                    regulator-min-microvolt = <2900000>;
+                    regulator-max-microvolt = <2900000>;
+                };
+            };
+        };
+    };
