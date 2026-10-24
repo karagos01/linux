@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/mediatek/mediatek,mt6878-disp-refresh.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6878 bootloader command-mode panel refresher
+
+maintainers:
+  - Kara <karagos01@gmail.com>
+
+description:
+  The bootloader leaves the display pipeline (OVL0 -> ... -> DSI0) scanning out
+  a framebuffer to a command-mode panel. This device keeps pushing frames to
+  that panel through the display mutex and DSI engine the bootloader set up,
+  without a full display driver, and exposes the panel brightness (DCS 0x51)
+  as a backlight device.
+
+properties:
+  compatible:
+    const: mediatek,mt6878-disp-refresh
+
+  reg:
+    items:
+      - description: display mutex register window
+      - description: DSI engine register window
+
+  reg-names:
+    items:
+      - const: mutex
+      - const: dsi
+
+  mediatek,mutex-id:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Index of the display mutex the bootloader programmed.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - mediatek,mutex-id
+
+additionalProperties: false
+
+examples:
+  - |
+    display-refresh@14001000 {
+        compatible = "mediatek,mt6878-disp-refresh";
+        reg = <0x14001000 0x1000>,
+              <0x1401a000 0x1000>;
+        reg-names = "mutex", "dsi";
+        mediatek,mutex-id = <0>;
+    };
