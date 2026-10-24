@@ -49,6 +49,10 @@ properties:
   "#interrupt-cells":
     const: 3
 
+  keys:
+    type: object
+    $ref: /schemas/input/mediatek,pmic-keys.yaml#
+
 patternProperties:
   "^adc@[0-9a-f]+$":
     type: object
