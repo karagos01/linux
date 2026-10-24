@@ -21,6 +21,7 @@ properties:
     oneOf:
       - enum:
           - mediatek,mt6873-spmi
+          - mediatek,mt6878-spmi
           - mediatek,mt8195-spmi
       - items:
           - enum:
@@ -52,6 +53,22 @@ properties:
 
   assigned-clock-parents:
     maxItems: 1
+
+  interrupts:
+    minItems: 1
+    maxItems: 2
+
+  interrupt-names:
+    minItems: 1
+    maxItems: 2
+    description:
+      Names of the PMIF interrupts. MT6878 provides a single "rcs"
+      (reset-and-clock) interrupt.
+
+  interrupt-controller: true
+
+  "#interrupt-cells":
+    const: 3
 
 required:
   - compatible
