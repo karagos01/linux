@@ -425,7 +425,7 @@
 };
 
 &pio {
-	conn_pins_default: conn-default-state {
+	conn_pins_default: conn-default-pins {
 		pins-conn {
 			pinmux = <PINMUX_GPIO172__FUNC_CONN_TOP_CLK>,
 				 <PINMUX_GPIO173__FUNC_CONN_TOP_DATA>,
@@ -443,7 +443,7 @@
 	};
 
 	/* CONN_WF_CTRL2 low selects a 26 MHz clock while the A-die is set up */
-	conn_pins_adie_cfg: conn-adie-cfg-state {
+	conn_pins_adie_cfg: conn-adie-cfg-pins {
 		pins-conn {
 			pinmux = <PINMUX_GPIO172__FUNC_CONN_TOP_CLK>,
 				 <PINMUX_GPIO173__FUNC_CONN_TOP_DATA>,
@@ -464,7 +464,7 @@
 		};
 	};
 
-	conn_pins_sleep: conn-sleep-state {
+	conn_pins_sleep: conn-sleep-pins {
 		pins-conn {
 			pinmux = <PINMUX_GPIO172__FUNC_GPIO172>,
 				 <PINMUX_GPIO173__FUNC_GPIO173>,
@@ -480,7 +480,7 @@
 		};
 	};
 
-	mmc1_pins_default: mmc1-default-state {
+	mmc1_pins_default: mmc1-default-pins {
 		pins-cmd-dat {
 			pinmux = <PINMUX_GPIO78__FUNC_MSDC1_CMD>,
 				 <PINMUX_GPIO79__FUNC_MSDC1_DAT0>,
@@ -499,7 +499,7 @@
 		};
 	};
 
-	key_gpio_default: key-default-state {
+	key_gpio_default: key-default-pins {
 		pins-keys {
 			pinmux = <PINMUX_GPIO54__FUNC_GPIO54>,
 				 <PINMUX_GPIO55__FUNC_GPIO55>;
