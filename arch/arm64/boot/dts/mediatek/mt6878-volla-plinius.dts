@@ -102,6 +102,8 @@
 		      <0x0 0x18800000 0x0 0x21000>;
 		reg-names = "conn", "bgf";
 		mediatek,connsys = <&consys>;
+		/* Factory BD address 58:9E:C6:AB:A6:1A (little-endian here) */
+		local-bd-address = [1a a6 ab c6 9e 58];
 	};
 
 	modem@10209000 {
