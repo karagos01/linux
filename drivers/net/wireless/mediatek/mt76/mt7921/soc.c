@@ -1408,6 +1408,35 @@ static int mt7921_soc_ampdu_action(struct ieee80211_hw *hw, struct ieee80211_vif
 	return 0;
 }
 
+static int mt7921_soc_add_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+{
+	struct mt7921_soc_dev *sdev = mt7921_soc_dev(mt792x_hw_dev(hw));
+	int ret;
+
+	/* The legacy firmware needs the network type to activate a BSS */
+	sdev->adding_ap = vif->type == NL80211_IFTYPE_AP;
+	ret = mt7921_ops.add_interface(hw, vif);
+	sdev->adding_ap = false;
+
+	return ret;
+}
+
+static int mt7921_soc_start_ap(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+			       struct ieee80211_bss_conf *link_conf)
+{
+	struct mt792x_dev *dev = mt792x_hw_dev(hw);
+	int ret;
+
+	/* Like a connection, an access point starts with a channel request */
+	mt792x_mutex_acquire(dev);
+	ret = mt7921_soc_ap_channel(dev, vif);
+	mt792x_mutex_release(dev);
+	if (ret)
+		return ret;
+
+	return mt7921_ops.start_ap(hw, vif, link_conf);
+}
+
 static int mt7921_soc_probe(struct platform_device *pdev)
 {
 	static const struct mt76_driver_ops drv_ops = {
@@ -1509,6 +1538,8 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 	ops->mgd_prepare_tx = mt7921_ops.mgd_prepare_tx;
 	ops->mgd_complete_tx = mt7921_ops.mgd_complete_tx;
 	ops->ampdu_action = mt7921_soc_ampdu_action;
+	ops->add_interface = mt7921_soc_add_interface;
+	ops->start_ap = mt7921_soc_start_ap;
 
 	mdev = mt76_alloc_device(pdev_dev, sizeof(*sdev), ops, &drv_ops);
 	if (!mdev)
@@ -1517,6 +1548,7 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 	dev = container_of(mdev, struct mt792x_dev, mt76);
 	sdev = to_soc_dev(dev);
 	sdev->cs = cs;
+	init_completion(&sdev->ap_grant);
 	platform_set_drvdata(pdev, mdev);
 
 	nvram_name = MT7921_SOC_NVRAM;
