@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/bluetooth/mediatek,mt6878-bluetooth.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6878 connsys Bluetooth
+
+maintainers:
+  - Kara <karagos01@gmail.com>
+
+description:
+  The Bluetooth controller in the MT6878 lives in the "BGF" subsystem of the
+  MediaTek connectivity combo ("connsys"), together with WiFi, GPS and FM. The
+  connsys power domain, the shared A-die and the analog supplies are brought up
+  by the connsys controller (see
+  Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6878-connsys.yaml);
+  the bootloader stages the BGF firmware into the connsys EMI. This node powers
+  the BGF subsystem on top of that and exchanges HCI with the firmware over a
+  shared-memory ring in that EMI.
+
+allOf:
+  - $ref: bluetooth-controller.yaml#
+
+properties:
+  compatible:
+    const: mediatek,mt6878-bluetooth
+
+  reg:
+    items:
+      - description: conn_infra register window
+      - description: BGF subsystem ("D-die") register window
+
+  reg-names:
+    items:
+      - const: conn
+      - const: bgf
+
+  interrupts:
+    maxItems: 1
+    description: BGF software interrupt, raised by the firmware on RX data.
+
+  mediatek,connsys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the connsys combo controller that owns the shared power
+      domain, A-die and EMI this Bluetooth subsystem sits on.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - mediatek,connsys
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    bluetooth@18800000 {
+        compatible = "mediatek,mt6878-bluetooth";
+        reg = <0x18000000 0x61000>,
+              <0x18800000 0x21000>;
+        reg-names = "conn", "bgf";
+        interrupts = <GIC_SPI 693 IRQ_TYPE_LEVEL_HIGH 0>;
+        mediatek,connsys = <&consys>;
+        local-bd-address = [1a a6 ab c6 9e 58];
+    };
