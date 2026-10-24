@@ -31,6 +31,7 @@
 #include <linux/slab.h>
 #include <linux/soc/mediatek/mtk-connsys.h>
 #include <linux/unaligned.h>
+#include <linux/workqueue.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
@@ -86,6 +87,14 @@
 #define BGF_IRQ_STAT			0x18060034
 #define BGF_IRQ_STAT2			0x1806003c
 #define BGF_IRQ_FW_OWN_B		BIT(0)
+#define BGF_IRQ_FW_OWN_CLR_B		BIT(0)	/* in BGF_IRQ_STAT:  driver-own done */
+#define BGF_IRQ_FW_OWN_SET_B		BIT(0)	/* in BGF_IRQ_STAT2: fw-own done */
+
+/* Low-power ownership control (conn window, always-on CSR) */
+#define BGF_LPCTL			0x18060030
+#define BGF_HOST_SET_FW_OWN_B		BIT(0)	/* hand the chip to the firmware */
+#define BGF_HOST_CLR_FW_OWN_B		BIT(1)	/* reclaim the chip for the driver */
+#define BGF_OWNER_STATE_SYNC_B		BIT(2)	/* 1 = firmware owns the chip */
 
 /* conn_infra SYSRAM debug (conn window) */
 #define BGF_MCU_PC			0x18023a00
@@ -155,6 +164,16 @@
 #define H4_SCO				0x03
 #define H4_EVT				0x04
 
+/* How long the chip stays awake after the last activity before sleeping. */
+#define PSM_IDLE_MS			200
+/* Ownership handshake: poll ~500 us/step, re-assert the request every 16. */
+#define PSM_OWN_RETRIES			300
+
+static bool psm = true;
+module_param(psm, bool, 0444);
+MODULE_PARM_DESC(psm,
+	"runtime power save: let the firmware own (sleep) the chip when idle (default on; set psm=0 to keep it always awake)");
+
 struct btmtk_connsys {
 	struct device *dev;
 	struct mtk_connsys *cs;
@@ -166,6 +185,18 @@ struct btmtk_connsys {
 
 	struct hci_dev *hdev;
 	struct mutex tx_lock;		/* serializes H2C pushes */
+
+	/* Runtime power save (PSM): the chip is "driver-owned" (awake) while
+	 * there is traffic and "firmware-owned" (asleep) when idle. Guarded by
+	 * psm_lock; idle_work hands ownership back to the firmware a short while
+	 * after the last user drops its reference.
+	 */
+	bool psm_enabled;
+	struct mutex psm_lock;
+	int awake;			/* nested count of active users */
+	bool sleeping;			/* true while firmware owns the chip */
+	bool bt_on;			/* true between hci_open and hci_close */
+	struct delayed_work idle_work;
 
 	int irq;			/* BGF software IRQ (RX notify) */
 	struct sk_buff *rx_skb;		/* HCI frame being reassembled */
@@ -255,6 +286,126 @@ static int bgf_conninfra_wakeup(struct btmtk_connsys *bt)
 static void bgf_conninfra_release(struct btmtk_connsys *bt)
 {
 	bt_clr(bt, CONN_INFRA_WAKEUP_BT, BIT(0));
+}
+
+/*
+ * Transfer ownership of the chip between the driver and the firmware.
+ *
+ * For driver-own (fw_own == false) the request bit is BGF_HOST_CLR_FW_OWN and
+ * completion is BGF_OWNER_STATE_SYNC clearing in BGF_LPCTL. For fw-own
+ * (fw_own == true) the request bit is BGF_HOST_SET_FW_OWN; the hardware
+ * auto-asserts OWNER_STATE_SYNC without waiting for the firmware, so completion
+ * is instead the FW_OWN_SET latch in BGF_IRQ_STAT2 (then write-1-to-clear).
+ * The request is re-asserted periodically while polling. conn_infra must be
+ * awake. Returns -ETIMEDOUT if the handshake never completes.
+ */
+static int bgf_own(struct btmtk_connsys *bt, bool fw_own)
+{
+	u32 req = fw_own ? BGF_HOST_SET_FW_OWN_B : BGF_HOST_CLR_FW_OWN_B;
+	int retry;
+
+	/* Clear the BT host CSR latch before driving the ownership request. */
+	bt_wr(bt, CONN_INFRA_CFG_HOST_CSR, CONN_INFRA_HOST_CSR_CLR);
+
+	for (retry = 0; retry < PSM_OWN_RETRIES; retry++) {
+		if (!(retry & 0xf))
+			bt_wr(bt, BGF_LPCTL, req);
+
+		if (fw_own) {
+			if (bt_rd(bt, BGF_IRQ_STAT2) & BGF_IRQ_FW_OWN_SET_B) {
+				bt_wr(bt, BGF_IRQ_STAT2, BGF_IRQ_FW_OWN_SET_B);
+				return 0;
+			}
+		} else if (!(bt_rd(bt, BGF_LPCTL) & BGF_OWNER_STATE_SYNC_B)) {
+			bt_wr(bt, BGF_IRQ_STAT, BGF_IRQ_FW_OWN_CLR_B);
+			return 0;
+		}
+
+		usleep_range(500, 550);
+	}
+
+	dev_err(bt->dev, "%s-own handshake timed out (LPCTL 0x%08x)\n",
+		fw_own ? "fw" : "driver", bt_rd(bt, BGF_LPCTL));
+	return -ETIMEDOUT;
+}
+
+/* Bring the chip to the active state: conn_infra on + driver-owned. */
+static int psm_activate(struct btmtk_connsys *bt)
+{
+	int ret;
+
+	if (!bt->sleeping)
+		return 0;
+
+	ret = bgf_conninfra_wakeup(bt);
+	if (ret)
+		return ret;
+
+	ret = bgf_own(bt, false);
+	if (ret) {
+		bgf_conninfra_release(bt);
+		return ret;
+	}
+
+	bt->sleeping = false;
+	return 0;
+}
+
+/* Hand the chip back to the firmware so it can sleep, and drop conn_infra. */
+static void psm_idle(struct btmtk_connsys *bt)
+{
+	if (bt->sleeping)
+		return;
+
+	/* If the firmware will not take ownership, stay awake and retry later. */
+	if (bgf_own(bt, true))
+		return;
+
+	bgf_conninfra_release(bt);
+	bt->sleeping = true;
+}
+
+static void btmtk_idle_work(struct work_struct *work)
+{
+	struct btmtk_connsys *bt = container_of(work, struct btmtk_connsys,
+						idle_work.work);
+
+	mutex_lock(&bt->psm_lock);
+	if (bt->bt_on && !bt->awake)
+		psm_idle(bt);
+	mutex_unlock(&bt->psm_lock);
+}
+
+/* Take a wake reference: ensure the chip is awake before touching it. */
+static int btmtk_psm_get(struct btmtk_connsys *bt)
+{
+	int ret = 0;
+
+	if (!bt->psm_enabled)
+		return 0;
+
+	mutex_lock(&bt->psm_lock);
+	if (bt->awake == 0) {
+		cancel_delayed_work(&bt->idle_work);
+		ret = psm_activate(bt);
+	}
+	if (!ret)
+		bt->awake++;
+	mutex_unlock(&bt->psm_lock);
+	return ret;
+}
+
+/* Drop a wake reference; the idle timer sleeps the chip once all are gone. */
+static void btmtk_psm_put(struct btmtk_connsys *bt)
+{
+	if (!bt->psm_enabled)
+		return;
+
+	mutex_lock(&bt->psm_lock);
+	if (bt->awake > 0 && --bt->awake == 0)
+		schedule_delayed_work(&bt->idle_work,
+				      msecs_to_jiffies(PSM_IDLE_MS));
+	mutex_unlock(&bt->psm_lock);
 }
 
 /* Disable one GALS sleep-protect channel and wait for the ack to clear. */
@@ -587,7 +738,16 @@ static void beif_rx_drain(struct btmtk_connsys *bt)
 static irqreturn_t btmtk_sw_irq(int irq, void *data)
 {
 	struct btmtk_connsys *bt = data;
-	u32 status = bt_rd(bt, BGF_SW_IRQ_STATUS);
+	u32 status;
+
+	/* The firmware raised this to wake the host, so the chip is already
+	 * leaving fw-own; take a wake reference (driver-own) before touching the
+	 * conn-window registers, which are unreachable while conn_infra sleeps.
+	 */
+	if (btmtk_psm_get(bt))
+		return IRQ_HANDLED;
+
+	status = bt_rd(bt, BGF_SW_IRQ_STATUS);
 
 	/* Ack first, so a notify raised while we drain is not lost: it will
 	 * re-assert the level and fire the IRQ again rather than be cleared.
@@ -603,6 +763,8 @@ static irqreturn_t btmtk_sw_irq(int irq, void *data)
 
 	/* Drain unconditionally: the ring indices are authoritative. */
 	beif_rx_drain(bt);
+
+	btmtk_psm_put(bt);
 	return IRQ_HANDLED;
 }
 
@@ -640,6 +802,13 @@ static int btmtk_wmt_cmd(struct btmtk_connsys *bt, u8 op, const u8 *param, u16 p
 	buf[6] = plen >> 8;
 	memcpy(buf + 7, param, plen);
 
+	/* Keep the chip awake across the whole exchange: the reply is serviced
+	 * by the RX IRQ, which takes its own wake reference on top of this one.
+	 */
+	ret = btmtk_psm_get(bt);
+	if (ret)
+		return ret;
+
 	bt->wmt_op = op;
 	bt->wmt_status = -ETIMEDOUT;
 	bt->wmt_pending = true;
@@ -648,19 +817,24 @@ static int btmtk_wmt_cmd(struct btmtk_connsys *bt, u8 op, const u8 *param, u16 p
 	ret = beif_send(bt, H4_CMD, buf, 7 + plen);
 	if (ret) {
 		bt->wmt_pending = false;
-		return ret;
+		goto out;
 	}
 
 	if (!wait_for_completion_timeout(&bt->wmt_done, msecs_to_jiffies(2000))) {
 		bt->wmt_pending = false;
 		dev_err(bt->dev, "WMT op 0x%02x timed out\n", op);
-		return -ETIMEDOUT;
+		ret = -ETIMEDOUT;
+		goto out;
 	}
 	if (bt->wmt_status) {
 		dev_err(bt->dev, "WMT op 0x%02x failed, status %d\n", op, bt->wmt_status);
-		return -EIO;
+		ret = -EIO;
+		goto out;
 	}
-	return 0;
+	ret = 0;
+out:
+	btmtk_psm_put(bt);
+	return ret;
 }
 
 static int btmtk_hci_open(struct hci_dev *hdev)
@@ -668,16 +842,33 @@ static int btmtk_hci_open(struct hci_dev *hdev)
 	struct btmtk_connsys *bt = hci_get_drvdata(hdev);
 	int ret;
 
-	/* Keep conn_infra awake for the doorbell writes while the HCI is up */
-	ret = bgf_conninfra_wakeup(bt);
-	if (ret)
-		return ret;
+	if (bt->psm_enabled) {
+		/* Start from the asleep state, then take the first wake
+		 * reference (conn_infra on + driver-own) and hold it across the
+		 * bring-up; it is dropped at the end of ->setup so the chip can
+		 * idle once HCI initialisation settles.
+		 */
+		mutex_lock(&bt->psm_lock);
+		bt->sleeping = true;
+		bt->awake = 0;
+		bt->bt_on = true;
+		mutex_unlock(&bt->psm_lock);
+
+		ret = btmtk_psm_get(bt);
+		if (ret) {
+			bt->bt_on = false;
+			return ret;
+		}
+	} else {
+		/* Keep conn_infra awake for the doorbell writes the whole time */
+		ret = bgf_conninfra_wakeup(bt);
+		if (ret)
+			return ret;
+	}
 
 	ret = beif_reset(bt);
-	if (ret) {
-		bgf_conninfra_release(bt);
-		return ret;
-	}
+	if (ret)
+		goto err;
 
 	bt->rx_skb = NULL;
 	bt->rx_hdr = 0;
@@ -688,12 +879,36 @@ static int btmtk_hci_open(struct hci_dev *hdev)
 	enable_irq(bt->irq);
 
 	return 0;
+
+err:
+	if (bt->psm_enabled) {
+		mutex_lock(&bt->psm_lock);
+		bt->awake = 0;
+		bt->bt_on = false;
+		if (!bt->sleeping) {
+			bgf_conninfra_release(bt);
+			bt->sleeping = true;
+		}
+		mutex_unlock(&bt->psm_lock);
+	} else {
+		bgf_conninfra_release(bt);
+	}
+	return ret;
 }
 
 static int btmtk_hci_close(struct hci_dev *hdev)
 {
 	struct btmtk_connsys *bt = hci_get_drvdata(hdev);
 	static const u8 func_off[] = { 0x00, 0x00 };	/* subsys 0 (BT), off */
+
+	if (bt->psm_enabled) {
+		/* Stop the idle timer and make sure the chip is awake for the
+		 * final handshake (RX IRQ still live to service the reply).
+		 */
+		cancel_delayed_work_sync(&bt->idle_work);
+		if (btmtk_psm_get(bt))
+			dev_warn(bt->dev, "could not wake chip for close\n");
+	}
 
 	/* Turn the Bluetooth function back off (RX IRQ still live for the reply). */
 	btmtk_wmt_cmd(bt, WMT_OP_FUNC_CTRL, func_off, sizeof(func_off));
@@ -703,7 +918,19 @@ static int btmtk_hci_close(struct hci_dev *hdev)
 	kfree_skb(bt->rx_skb);
 	bt->rx_skb = NULL;
 
-	bgf_conninfra_release(bt);
+	if (bt->psm_enabled) {
+		mutex_lock(&bt->psm_lock);
+		bt->bt_on = false;
+		bt->awake = 0;
+		if (!bt->sleeping) {
+			bgf_conninfra_release(bt);
+			bt->sleeping = true;
+		}
+		mutex_unlock(&bt->psm_lock);
+	} else {
+		bgf_conninfra_release(bt);
+	}
+
 	return 0;
 }
 
@@ -716,9 +943,18 @@ static int btmtk_hci_setup(struct hci_dev *hdev)
 {
 	struct btmtk_connsys *bt = hci_get_drvdata(hdev);
 	static const u8 func_on[] = { 0x00, 0x01 };	/* subsys 0 (BT), on */
+	int ret;
 
 	/* Enable the Bluetooth function in the firmware before normal traffic */
-	return btmtk_wmt_cmd(bt, WMT_OP_FUNC_CTRL, func_on, sizeof(func_on));
+	ret = btmtk_wmt_cmd(bt, WMT_OP_FUNC_CTRL, func_on, sizeof(func_on));
+
+	/* Drop the wake reference taken in ->open; later HCI init traffic
+	 * re-takes it as needed, and the chip idles once it goes quiet.
+	 */
+	if (bt->psm_enabled)
+		btmtk_psm_put(bt);
+
+	return ret;
 }
 
 /* Program the public BD address via the MediaTek vendor command. */
@@ -739,7 +975,14 @@ static int btmtk_hci_send(struct hci_dev *hdev, struct sk_buff *skb)
 	struct btmtk_connsys *bt = hci_get_drvdata(hdev);
 	int ret;
 
+	ret = btmtk_psm_get(bt);
+	if (ret) {
+		hdev->stat.err_tx++;
+		return ret;
+	}
+
 	ret = beif_send(bt, hci_skb_pkt_type(skb), skb->data, skb->len);
+	btmtk_psm_put(bt);
 	if (ret) {
 		hdev->stat.err_tx++;
 		return ret;
@@ -776,6 +1019,10 @@ static int btmtk_connsys_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, bt);
 	mutex_init(&bt->tx_lock);
 	init_completion(&bt->wmt_done);
+	mutex_init(&bt->psm_lock);
+	INIT_DELAYED_WORK(&bt->idle_work, btmtk_idle_work);
+	bt->psm_enabled = psm;
+	bt->sleeping = true;	/* conn_infra not forced on until the HCI opens */
 
 	bt->cs = devm_mtk_connsys_get(dev);
 	if (IS_ERR(bt->cs))
@@ -856,7 +1103,8 @@ static int btmtk_connsys_probe(struct platform_device *pdev)
 		goto err_free_hdev;
 	}
 
-	dev_info(dev, "BGF Bluetooth ready (%s)\n", dev_name(&bt->hdev->dev));
+	dev_info(dev, "BGF Bluetooth ready (%s, power-save %s)\n",
+		 dev_name(&bt->hdev->dev), bt->psm_enabled ? "on" : "off");
 	return 0;
 
 err_free_hdev:
@@ -875,6 +1123,7 @@ static void btmtk_connsys_remove(struct platform_device *pdev)
 		hci_unregister_dev(bt->hdev);
 		hci_free_dev(bt->hdev);
 	}
+	cancel_delayed_work_sync(&bt->idle_work);
 	mtk_connsys_power_off(bt->cs, MTK_CONNSYS_BT);
 }
 
