@@ -96,6 +96,25 @@
 		mediatek,connsys = <&consys>;
 	};
 
+	modem@10209000 {
+		compatible = "mediatek,mt6878-ccci";
+		reg = <0x0 0x10209000 0x0 0x1000>,
+		      <0x0 0x1020a000 0x0 0x1000>,
+		      <0x0 0x1020e000 0x0 0x1000>,
+		      <0x0 0x1c001000 0x0 0x1000>,
+		      <0x0 0x10000000 0x0 0x1000>,
+		      <0x0 0x10001000 0x0 0x1000>,
+		      <0x0 0x10270000 0x0 0x1000>,
+		      <0x0 0x10014000 0x0 0x1000>,
+		      <0x0 0x1022d000 0x0 0x1000>;
+		reg-names = "ap-ccif", "md-ccif", "infracfg", "spm", "topckgen",
+			    "infracfg-ao", "nemicfg", "dpmaif-ao", "dpmaif-pd";
+		interrupts = <GIC_SPI 228 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 229 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 238 IRQ_TYPE_LEVEL_HIGH 0>;
+		memory-region = <&ccci_tag>, <&md_nc_smem>, <&md_c_smem>;
+	};
+
 	memory@40000000 {
 		device_type = "memory";
 		reg = <0x0 0x40000000 0x3 0x0>;
@@ -206,12 +225,12 @@
 			no-map;
 		};
 
-		ap-md-c-smem@8a000000 {
+		md_c_smem: ap-md-c-smem@8a000000 {
 			reg = <0x0 0x8a000000 0x0 0x01960000>;
 			no-map;
 		};
 
-		ap-md-nc-smem@8c000000 {
+		md_nc_smem: ap-md-nc-smem@8c000000 {
 			reg = <0x0 0x8c000000 0x0 0x00130000>;
 			no-map;
 		};
@@ -256,7 +275,7 @@
 			no-map;
 		};
 
-		ccci-tag-mem@bfdf0000 {
+		ccci_tag: ccci-tag-mem@bfdf0000 {
 			reg = <0x0 0xbfdf0000 0x0 0x00010000>;
 			no-map;
 		};
@@ -524,6 +543,14 @@
 				regulator-name = "mt6363_vrfio18";
 				regulator-min-microvolt = <1800000>;
 				regulator-max-microvolt = <1800000>;
+			};
+
+			/* RF reference supply of the modem, always on in stock */
+			vtref18 {
+				regulator-name = "mt6363_vtref18";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
 			};
 		};
 	};
