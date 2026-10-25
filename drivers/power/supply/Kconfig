@@ -728,6 +728,25 @@ config CHARGER_MT6370
 	  Average Input Current Regulation, Battery Temperature Sensing,
 	  Over-Temperature Protection, DPDM Detection for BC1.2.
 
+config CHARGER_MT6375
+	tristate "MediaTek MT6375 Charger Driver"
+	depends on MFD_MT6375
+	help
+	  Say Y here to enable the switching battery charger embedded in the
+	  MediaTek MT6375 SubPMIC. It reports the charging status and detected
+	  BC1.2 USB port type and lets userspace tune the input and charge
+	  current/voltage limits through the power_supply framework.
+
+config BATTERY_MT6375
+	tristate "MediaTek MT6375 Fuel Gauge Driver"
+	depends on MFD_MT6375
+	depends on IIO
+	help
+	  Say Y here to enable the fuel gauge of the MediaTek MT6375 SubPMIC.
+	  It reports the battery voltage, current, temperature and, using the
+	  open-circuit-voltage table of the monitored-battery node, the state
+	  of charge through the power_supply framework.
+
 	  This driver can also be built as a module. If so, the module
 	  will be called "mt6370-charger".
 
