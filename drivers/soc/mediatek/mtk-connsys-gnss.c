@@ -171,9 +171,9 @@ struct mtk_gnss {
 	struct miscdevice miscdev;
 	struct mutex io_lock;		/* serialises the char-dev transport */
 	bool link_open;			/* link0 powered up and data path live */
+	bool opening;			/* open() is bringing the link up */
 	void __iomem *tx_ring;		/* A2D TX ring (GPS_EMI_TX0_PHYS) */
 	void __iomem *rx_ring;		/* D2A RX ring (GPS_EMI base + 0x57000) */
-	unsigned long rx_woff;		/* D2A DMA write offset (bytes) */
 	unsigned long rx_roff;		/* bytes already returned to userspace */
 };
 
@@ -802,24 +802,28 @@ static int gps_cdev_open(struct inode *inode, struct file *filp)
 	struct mtk_gnss *gnss = gps_from_file(filp);
 	int err;
 
+	/* Guard against concurrent/second opens, but do NOT hold io_lock across
+	 * the bring-up: the download path (gps_a2d_send) and the reactive D2A
+	 * IRQ handlers take io_lock themselves, so holding it here would deadlock.
+	 */
 	mutex_lock(&gnss->io_lock);
-	if (gnss->link_open) {
+	if (gnss->link_open || gnss->opening) {
 		mutex_unlock(&gnss->io_lock);
 		return -EBUSY;
 	}
+	gnss->opening = true;
+	mutex_unlock(&gnss->io_lock);
 
 	err = gps_common_on(gnss);
-	if (err) {
-		mutex_unlock(&gnss->io_lock);
-		return err;
-	}
+	if (err)
+		goto fail_opening;
 
 	gnss->rx_ring = ioremap(GPS_EMI_PHYS_BASE + GPS_EMI_RX0_OFF,
 				GPS_DL_RX_BUF_SIZE);
 	if (!gnss->rx_ring) {
 		gps_common_off(gnss);
-		mutex_unlock(&gnss->io_lock);
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto fail_opening;
 	}
 
 	reinit_completion(&gnss->ramcode);
@@ -827,14 +831,56 @@ static int gps_cdev_open(struct inode *inode, struct file *filp)
 		enable_irq(gnss->irq_mcub);
 
 	gps_dsp_on(gnss);		/* also claims EMI */
-	gps_dma_d2a_arm(0);		/* keep the D2A receive DMA running */
-	gnss->rx_woff = 0;
-	gnss->rx_roff = 0;
-	gnss->link_open = true;
 
-	dev_info(gnss->dev, "gpsdl0 opened: link0 up, D2A armed\n");
+	/* Download the DSP RAM image and bring the GNSS firmware up to
+	 * RAMCODE_READY (same path the probe self-test uses). This enables the
+	 * reactive D2A IRQs (data/nodata/dma); we LEAVE them enabled after
+	 * RAMCODE so the firmware's steady-state frames keep draining into the
+	 * RX ring, where read() picks them up as a pure consumer.
+	 */
+	gps_mvcd_download_l1(gnss);
+	if (!wait_for_completion_timeout(&gnss->ramcode, msecs_to_jiffies(5000))) {
+		dev_err(gnss->dev, "gpsdl0 open: no RAMCODE_READY within 5s\n");
+		if (gnss->irq_data >= 0)
+			disable_irq(gnss->irq_data);
+		if (gnss->irq_nodata >= 0)
+			disable_irq(gnss->irq_nodata);
+		if (gnss->irq_dma >= 0)
+			disable_irq(gnss->irq_dma);
+		mutex_lock(&gnss->io_lock);
+		gps_d2a_drain_locked(gnss);
+		mutex_unlock(&gnss->io_lock);
+		if (gnss->irq_mcub >= 0)
+			disable_irq(gnss->irq_mcub);
+		gps_dsp_off(gnss);
+		gps_common_off(gnss);
+		iounmap(gnss->rx_ring);
+		gnss->rx_ring = NULL;
+		err = -EIO;
+		goto fail_opening;
+	}
+
+	/* RAMCODE up. The reactive IRQs now own the D2A ring (producer pointer
+	 * dl_woff); lift the download storm-guard budget so they keep servicing
+	 * steady-state traffic, and start the read() consumer past the download
+	 * progress records already in the ring.
+	 */
+	atomic_set(&g_gps_irq_budget, INT_MAX);
+	mutex_lock(&gnss->io_lock);
+	gnss->rx_roff = gnss->dl_woff;
+	gnss->link_open = true;
+	gnss->opening = false;
 	mutex_unlock(&gnss->io_lock);
+
+	dev_info(gnss->dev,
+		 "gpsdl0 opened: GNSS firmware running (RAMCODE_READY)\n");
 	return 0;
+
+fail_opening:
+	mutex_lock(&gnss->io_lock);
+	gnss->opening = false;
+	mutex_unlock(&gnss->io_lock);
+	return err;
 }
 
 static int gps_cdev_release(struct inode *inode, struct file *filp)
@@ -842,18 +888,34 @@ static int gps_cdev_release(struct inode *inode, struct file *filp)
 	struct mtk_gnss *gnss = gps_from_file(filp);
 
 	mutex_lock(&gnss->io_lock);
-	if (gnss->link_open) {
-		gps_dma_stop(GPS_DL_DMA_LINK0_D2A);
-		if (gnss->irq_mcub >= 0)
-			disable_irq(gnss->irq_mcub);
-		gps_dsp_off(gnss);
-		gps_common_off(gnss);
-		iounmap(gnss->rx_ring);
-		gnss->rx_ring = NULL;
-		gnss->link_open = false;
-		dev_info(gnss->dev, "gpsdl0 closed\n");
+	if (!gnss->link_open) {
+		mutex_unlock(&gnss->io_lock);
+		return 0;
 	}
+	gnss->link_open = false;
 	mutex_unlock(&gnss->io_lock);
+
+	/* Stop the reactive IRQs before teardown. disable_irq() waits for the
+	 * threaded handler to finish, and that handler takes io_lock - so this
+	 * must NOT run while we hold io_lock.
+	 */
+	if (gnss->irq_data >= 0)
+		disable_irq(gnss->irq_data);
+	if (gnss->irq_nodata >= 0)
+		disable_irq(gnss->irq_nodata);
+	if (gnss->irq_dma >= 0)
+		disable_irq(gnss->irq_dma);
+	if (gnss->irq_mcub >= 0)
+		disable_irq(gnss->irq_mcub);
+
+	mutex_lock(&gnss->io_lock);
+	gps_d2a_drain_locked(gnss);
+	gps_dsp_off(gnss);
+	gps_common_off(gnss);
+	iounmap(gnss->rx_ring);
+	gnss->rx_ring = NULL;
+	mutex_unlock(&gnss->io_lock);
+	dev_info(gnss->dev, "gpsdl0 closed\n");
 	return 0;
 }
 
@@ -871,14 +933,16 @@ static ssize_t gps_cdev_write(struct file *filp, const char __user *ubuf,
 	if (IS_ERR(kbuf))
 		return PTR_ERR(kbuf);
 
+	/* Check liveness under io_lock, then release it: gps_a2d_send() takes
+	 * io_lock itself, so calling it while we hold the lock would deadlock.
+	 */
 	mutex_lock(&gnss->io_lock);
-	if (!gnss->link_open) {
-		ret = -ENODEV;
-	} else {
+	ret = gnss->link_open ? 0 : -ENODEV;
+	mutex_unlock(&gnss->io_lock);
+	if (ret == 0) {
 		gps_a2d_send(gnss, kbuf, count);
 		ret = count;
 	}
-	mutex_unlock(&gnss->io_lock);
 	kfree(kbuf);
 	return ret;
 }
@@ -893,7 +957,7 @@ static ssize_t gps_cdev_read(struct file *filp, char __user *ubuf,
 {
 	struct mtk_gnss *gnss = gps_from_file(filp);
 	u8 bounce[512];
-	unsigned long avail, left;
+	unsigned long avail, woff;
 	size_t n;
 	int ret;
 
@@ -903,11 +967,13 @@ static ssize_t gps_cdev_read(struct file *filp, char __user *ubuf,
 		return -ENODEV;
 	}
 
-	left = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
-	gnss->rx_woff = (GPS_DL_RX_WORDS - left) * 4;
-
-	if (gnss->rx_woff >= gnss->rx_roff)
-		avail = gnss->rx_woff - gnss->rx_roff;
+	/* The reactive D2A IRQs own the DMA and advance dl_woff (the producer
+	 * pointer) as each burst completes; read() is a pure consumer tracking
+	 * rx_roff against it. (read/write serialise on io_lock with the IRQs.)
+	 */
+	woff = gnss->dl_woff;
+	if (woff >= gnss->rx_roff)
+		avail = woff - gnss->rx_roff;
 	else				/* ring wrapped: return up to the wrap */
 		avail = GPS_DL_RX_BUF_SIZE - gnss->rx_roff;
 	n = min3(avail, count, sizeof(bounce));
