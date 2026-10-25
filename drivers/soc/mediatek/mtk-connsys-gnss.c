@@ -142,6 +142,16 @@
 #define CONN_INFRA_CFG_ID		0x02050401
 #define CONN_INFRA_CFG_PWRCTRL1		0x01210	/* BIT16 = conn_infra ready */
 #define CONN_INFRA_RDY_B		BIT(16)
+/*
+ * conn_infra EMI_CTL for the GPS L1 DSP (CONN_INFRA_CFG_BASE 0x18011000 + 0x120,
+ * i.e. window offset 0x11120). BIT5 "GPS_L1_INFRA_REQ" requests the conn_infra
+ * -> EMI route for the L1 DSP. The stock driver pokes this directly (not via an
+ * SMC), so it never showed in the GPS-SMC trace; without it the DSP can boot
+ * from on-chip IRAM/TCM (descriptor + first fragment) but stalls as soon as the
+ * RAM image spills into EMI-backed DSP DRAM.
+ */
+#define CONN_INFRA_CFG_EMI_CTL_GPS_L1	0x11120
+#define CONN_INFRA_GPS_L1_INFRA_REQ	BIT(5)
 
 struct mtk_gnss {
 	struct device *dev;
@@ -418,6 +428,14 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 	dev_info(gnss->dev, "GPS MVCD: sent %u fragment(s), d2a rx %#lx B\n",
 		 frag_num, woff);
 
+	/* diagnostic: is the conn_infra<->GPS GALS path sleep-protected (blocked)
+	 * while the DSP is stalled? SLP_CTRL bits: RX 0x10, TX 0x01 set = protected
+	 */
+	dev_info(gnss->dev,
+		 "SLP conn2gps ctl %#x sta %#x | gps2conn ctl %#x sta %#x\n",
+		 readl(gnss->conn + 0x1470), readl(gnss->conn + 0x1474),
+		 readl(gnss->conn + 0x1480), readl(gnss->conn + 0x1484));
+
 	/*
 	 * Answer the DSP's last boot message so it starts running the RAM code.
 	 * Keep the D2A DMA armed across this so the final records still drain.
@@ -594,6 +612,16 @@ static void gps_common_off(struct mtk_gnss *gnss)
 static void gps_dsp_on(struct mtk_gnss *gnss)
 {
 	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
+
+	/* request the conn_infra->EMI route for the L1 DSP (direct reg, not SMC) */
+	dev_info(gnss->dev, "EMI_CTL_GPS_L1 before %#x\n",
+		 readl(gnss->conn + CONN_INFRA_CFG_EMI_CTL_GPS_L1));
+	writel(readl(gnss->conn + CONN_INFRA_CFG_EMI_CTL_GPS_L1) |
+	       CONN_INFRA_GPS_L1_INFRA_REQ,
+	       gnss->conn + CONN_INFRA_CFG_EMI_CTL_GPS_L1);
+	dev_info(gnss->dev, "EMI_CTL_GPS_L1 after %#x\n",
+		 readl(gnss->conn + CONN_INFRA_CFG_EMI_CTL_GPS_L1));
+
 	gps_smc(GPS_SMC_PWR_STAT_CTRL, GPS_L1_DSP_ON, 0, NULL);
 	if (gps_smc(GPS_SMC_SET_DSP_ON_POLL_ACK, GPS_DATA_LINK_ID0, 0, NULL))
 		dev_info(gnss->dev, "GPS L1 DSP ON: DSP booted and ACKed\n");
@@ -604,6 +632,9 @@ static void gps_dsp_on(struct mtk_gnss *gnss)
 
 static void gps_dsp_off(struct mtk_gnss *gnss)
 {
+	writel(readl(gnss->conn + CONN_INFRA_CFG_EMI_CTL_GPS_L1) &
+	       ~CONN_INFRA_GPS_L1_INFRA_REQ,
+	       gnss->conn + CONN_INFRA_CFG_EMI_CTL_GPS_L1);
 	gps_usrt_ctrl(GPS_DATA_LINK_ID0, false);
 	gps_smc(GPS_SMC_PWR_STAT_CTRL, GPS_L1_DSP_OFF, 0, NULL);
 	gps_smc(GPS_SMC_SET_CFG_DSP_MEM_OFF, GPS_L1_DSP_OFF, GPS_DATA_LINK_ID0, NULL);
