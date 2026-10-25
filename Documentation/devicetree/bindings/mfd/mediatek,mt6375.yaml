@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/mfd/mediatek,mt6375.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6375 SubPMIC
+
+maintainers:
+  - Kara <karagos01@gmail.com>
+
+description:
+  MT6375 is a companion power management IC that bundles a single-cell
+  Li-Ion/Li-Polymer switching battery charger with BC1.2 detection, an
+  auxiliary ADC, a coulomb-counter fuel gauge and a USB Type-C & Power
+  Delivery port controller. The die is reached over several I2C slave
+  addresses on one bus, presented as a single banked register space.
+
+properties:
+  compatible:
+    const: mediatek,mt6375
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  interrupt-controller: true
+
+  "#interrupt-cells":
+    const: 1
+
+  adc:
+    type: object
+    additionalProperties: false
+    description:
+      Auxiliary ADC reporting the battery, system and charger input voltages
+      and currents, the junction temperature and the USB D+/D- and Type-C
+      CC/SBU lines.
+
+    properties:
+      compatible:
+        const: mediatek,mt6375-adc
+
+      "#io-channel-cells":
+        const: 1
+
+    required:
+      - compatible
+      - "#io-channel-cells"
+
+  charger:
+    type: object
+    $ref: /schemas/power/supply/mediatek,mt6375-charger.yaml#
+
+  gauge:
+    type: object
+    $ref: /schemas/power/supply/mediatek,mt6375-gauge.yaml#
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - interrupt-controller
+  - "#interrupt-cells"
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/iio/adc/mediatek,mt6375_adc.h>
+    #include <dt-bindings/mfd/mt6375.h>
+    i2c {
+      #address-cells = <1>;
+      #size-cells = <0>;
+
+      pmic@34 {
+        compatible = "mediatek,mt6375";
+        reg = <0x34>;
+        interrupts-extended = <&pio 15 IRQ_TYPE_LEVEL_LOW>;
+        interrupt-controller;
+        #interrupt-cells = <1>;
+
+        mt6375_adc: adc {
+          compatible = "mediatek,mt6375-adc";
+          #io-channel-cells = <1>;
+        };
+
+        charger {
+          compatible = "mediatek,mt6375-charger";
+          interrupts = <MT6375_FL_PWR_RDY>,
+                       <MT6375_FL_DETACH>,
+                       <MT6375_FL_BC12_DN>;
+          interrupt-names = "attach", "detach", "bc12_done";
+        };
+
+        gauge {
+          compatible = "mediatek,mt6375-gauge";
+          io-channels = <&mt6375_adc MT6375_ADC_VBAT>,
+                        <&mt6375_adc MT6375_ADC_IBAT>;
+          io-channel-names = "vbat", "ibat";
+          monitored-battery = <&battery>;
+        };
+      };
+    };
