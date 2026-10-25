@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/mediatek,mt6375-charger.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6375 Battery Charger
+
+maintainers:
+  - Kara <karagos01@gmail.com>
+
+description:
+  This module is part of the MT6375 MFD device. It provides the single-cell
+  switching battery charger with BC1.2 USB port detection.
+
+properties:
+  compatible:
+    const: mediatek,mt6375-charger
+
+  interrupts:
+    description:
+      The charger uses the power-ready and detach events to track whether an
+      input supply is present and the BC1.2-done event to learn the detected
+      USB port type.
+    items:
+      - description: irq of "input power is ready"
+      - description: irq of "input detached"
+      - description: irq of "BC1.2 detection is done"
+
+  interrupt-names:
+    items:
+      - const: attach
+      - const: detach
+      - const: bc12_done
+
+required:
+  - compatible
+  - interrupts
+  - interrupt-names
+
+additionalProperties: false
+
+...
