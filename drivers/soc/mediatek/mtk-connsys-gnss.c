@@ -27,12 +27,17 @@
 
 #include <linux/completion.h>
 #include <linux/delay.h>
+#include <linux/fs.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/miscdevice.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/sched.h>
+#include <linux/uaccess.h>
 #include <linux/arm-smccc.h>
 #include <linux/soc/mediatek/mtk-connsys.h>
 #include <linux/soc/mediatek/mtk_sip_svc.h>
@@ -143,7 +148,18 @@ struct mtk_gnss {
 	void __iomem *conn;
 	int irq_mcub;			/* link0 MCUB mailbox IRQ (SPI 381) */
 	struct completion ramcode;	/* completed when the DSP posts RAMCODE_READY */
+
+	/* /dev/gpsdl0 data-link char device (link0) */
+	struct miscdevice miscdev;
+	struct mutex io_lock;		/* serialises the char-dev transport */
+	bool link_open;			/* link0 powered up and data path live */
+	void __iomem *tx_ring;		/* A2D TX ring (GPS_EMI_TX0_PHYS) */
+	void __iomem *rx_ring;		/* D2A RX ring (GPS_EMI base + 0x57000) */
+	unsigned long rx_woff;		/* D2A DMA write offset (bytes) */
+	unsigned long rx_roff;		/* bytes already returned to userspace */
 };
+
+#define GPS_EMI_RX0_OFF			0x57000
 
 /*
  * The GNSS DSP RAM-code download handshake: the DSP will not act on the MVCD
@@ -490,14 +506,19 @@ static void mtk_gnss_conninfra_release(struct mtk_gnss *gnss)
  * is up; we then tear it back down with "common off" so the probe is a clean,
  * self-contained bring-up test.
  */
-static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
+/*
+ * Run the full GPS "common on" secure sequence (TF-A does the sensitive work;
+ * we orchestrate the SMCs in the exact order the stock data-link driver uses
+ * for this SoC: CONNAC2 + TFA, no in-kernel conninfra driver). On success the
+ * whole GPS common power domain is up.
+ */
+static int gps_common_on(struct mtk_gnss *gnss)
 {
 	struct device *dev = gnss->dev;
 	unsigned long ver = 0;
 	u32 emi_20msb;
 	int err;
 
-	/* Shared supplies and A-die (refcounted against WiFi/BT). */
 	err = mtk_connsys_power_on(gnss->cs, MTK_CONNSYS_GPS);
 	if (err)
 		return dev_err_probe(dev, err, "failed to power on connsys\n");
@@ -508,93 +529,90 @@ static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
 		return err;
 	}
 
-	/* tell TF-A the AP requests the GPS common domain on */
 	gps_smc(GPS_SMC_COMMON_ON_SET_FLAG, GPS_SMC_SET_FLAG_MAGIC, 1, NULL);
+	udelay(200);	/* let the 3T 32k clock settle */
 
-	/* let the 3T 32k clock settle, as the downstream flow does */
-	udelay(200);
-
-	/* part1: TF-A polls conn_infra and returns its version in a1 */
 	if ((int)gps_smc(GPS_SMC_COMMON_ON_PART1, 0, 0, &ver) == -1) {
 		dev_err(dev, "GPS common_on part1 failed\n");
 		goto err_flag;
 	}
 	dev_info(dev, "GPS common_on part1 ok: conn_infra ver %#010lx\n", ver);
 
-	/* peri remap: no-op on this SoC (conn2ap GPS peri not remapped) */
-
-	/* EMI remap (part2): program the conn_infra remap with the GPS
-	 * reserved-memory base (top 20 bits of the 36-bit, 64KB-aligned addr).
-	 */
 	emi_20msb = (u32)((GPS_EMI_PHYS_BASE & GPS_EMI_REMAP_BASE_MASK) >> 16);
 	gps_smc(GPS_SMC_COMMON_ON_PART2, emi_20msb, 0, NULL);
-
-	/* part3 */
 	gps_smc(GPS_SMC_COMMON_ON_PART3, 1, 0, NULL);
-
-	/*
-	 * Tell TF-A the A-die chip id (MT6637). The stock data-link driver built
-	 * with the conninfra driver does this between part3 and part4; TF-A needs
-	 * it to finish the A-die clock setup the GPS DSP runs on.
-	 */
 	gps_smc(GPS_SMC_SET_ADIE_CHIPID, 0x6637, 0, NULL);
 
-	/* emi_usage_init: software bookkeeping only (EMI claimed at routing) */
-
-	/* part4 */
 	if ((int)gps_smc(GPS_SMC_COMMON_ON_PART4, 0, 0, NULL) == -1) {
 		dev_err(dev, "GPS common_on part4 failed\n");
 		gps_smc(GPS_SMC_COMMON_ON_INNER_FAIL, 0, 0, NULL);
 		goto err_flag;
 	}
-
-	/* bus_debug_flag: no-op on this SoC */
-
-	/* part5 */
 	if ((int)gps_smc(GPS_SMC_COMMON_ON_PART5, 0, 0, NULL) == -1) {
 		dev_err(dev, "GPS common_on part5 failed\n");
 		gps_smc(GPS_SMC_COMMON_ON_FAIL_HANDLER, 0, 0, NULL);
 		goto err_flag;
 	}
+	dev_info(dev, "GPS common_on COMPLETE (ver %#010lx)\n", ver);
+	return 0;
 
-	dev_info(dev,
-		 "GPS common_on COMPLETE: full secure power domain up (ver %#010lx)\n",
-		 ver);
+err_flag:
+	gps_smc(GPS_SMC_COMMON_ON_SET_FLAG, GPS_SMC_SET_FLAG_MAGIC, 0, NULL);
+	mtk_gnss_conninfra_release(gnss);
+	mtk_connsys_power_off(gnss->cs, MTK_CONNSYS_GPS);
+	return -EIO;
+}
 
-	/*
-	 * Bring the GPS L1 DSP up: TF-A sets its power state and polls for the
-	 * DSP's ACK (a0 != 0). A successful ACK means the DSP has booted from
-	 * the firmware the bootloader pre-staged in the connsys EMI and is now
-	 * alive - the first end-to-end sign of life from the GPS core itself.
-	 * (USRT/DMA data routing is a later step; here we just prove boot.)
-	 */
-	/*
-	 * Enable the MCUB mailbox IRQ so the DSP's DSP->AP events (RESET_DONE,
-	 * then RAMCODE_READY) are serviced in real time, claim EMI, bring the
-	 * L1 DSP up, enable the USRT, and wait for the DSP to report its RAM
-	 * code is running. The real IRQ servicing is what the DSP's ROM->RAM
-	 * handshake needs (a synchronous poll does not drive it).
-	 */
+static void gps_common_off(struct mtk_gnss *gnss)
+{
+	gps_smc(GPS_SMC_COMMON_OFF_PART1, 0, 0, NULL);
+	if (gps_smc(GPS_SMC_COMMON_OFF_PART2, 0, 0, NULL) != 0)
+		dev_warn(gnss->dev, "GPS common_off part2 (sleep prot) not clean\n");
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);	/* release EMI */
+	gps_smc(GPS_SMC_COMMON_OFF_PART3, 0, 0, NULL);
+	gps_smc(GPS_SMC_COMMON_ON_SET_FLAG, GPS_SMC_SET_FLAG_MAGIC, 0, NULL);
+	mtk_gnss_conninfra_release(gnss);
+	mtk_connsys_power_off(gnss->cs, MTK_CONNSYS_GPS);
+}
+
+/* Bring the L1 DSP up (claim EMI, power the DSP, poll its ACK, enable USRT). */
+static void gps_dsp_on(struct mtk_gnss *gnss)
+{
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
+	gps_smc(GPS_SMC_PWR_STAT_CTRL, GPS_L1_DSP_ON, 0, NULL);
+	if (gps_smc(GPS_SMC_SET_DSP_ON_POLL_ACK, GPS_DATA_LINK_ID0, 0, NULL))
+		dev_info(gnss->dev, "GPS L1 DSP ON: DSP booted and ACKed\n");
+	else
+		dev_err(gnss->dev, "GPS L1 DSP ON: no ACK (DSP did not boot)\n");
+	gps_usrt_ctrl(GPS_DATA_LINK_ID0, true);
+}
+
+static void gps_dsp_off(struct mtk_gnss *gnss)
+{
+	gps_usrt_ctrl(GPS_DATA_LINK_ID0, false);
+	gps_smc(GPS_SMC_PWR_STAT_CTRL, GPS_L1_DSP_OFF, 0, NULL);
+	gps_smc(GPS_SMC_SET_CFG_DSP_MEM_OFF, GPS_L1_DSP_OFF, GPS_DATA_LINK_ID0, NULL);
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
+}
+
+/*
+ * Self-test (probe_power=1): bring the whole stack up, run the in-kernel MVCD
+ * download, wait for RAMCODE, then tear everything down.
+ */
+static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
+{
+	struct device *dev = gnss->dev;
+	int err;
+
+	err = gps_common_on(gnss);
+	if (err)
+		return err;
+
 	reinit_completion(&gnss->ramcode);
 	if (gnss->irq_mcub >= 0)
 		enable_irq(gnss->irq_mcub);
 
-	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);	/* claim EMI */
-
-	gps_smc(GPS_SMC_PWR_STAT_CTRL, GPS_L1_DSP_ON, 0, NULL);
-	if (gps_smc(GPS_SMC_SET_DSP_ON_POLL_ACK, GPS_DATA_LINK_ID0, 0, NULL))
-		dev_info(dev, "GPS L1 DSP ON: DSP booted and ACKed\n");
-	else
-		dev_err(dev, "GPS L1 DSP ON: no ACK (DSP did not boot)\n");
-
-	gps_usrt_ctrl(GPS_DATA_LINK_ID0, true);
-
-	/*
-	 * Download the L1 DSP RAM image over the data link. Each fragment is
-	 * paired with a D2A receive-DMA drain cycle (see gps_mvcd_download_l1)
-	 * so the DSP never back-pressures. The DSP reports RAMCODE_READY over
-	 * the MCUB mailbox (serviced by the IRQ above) once the image is in.
-	 */
+	gps_dsp_on(gnss);
 	gps_mvcd_download_l1(gnss);
 
 	if (wait_for_completion_timeout(&gnss->ramcode, msecs_to_jiffies(3000)))
@@ -605,29 +623,220 @@ static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
 	if (gnss->irq_mcub >= 0)
 		disable_irq(gnss->irq_mcub);
 
-	/* turn the USRT and the DSP back off before unwinding the common domain */
-	gps_usrt_ctrl(GPS_DATA_LINK_ID0, false);
-	gps_smc(GPS_SMC_PWR_STAT_CTRL, GPS_L1_DSP_OFF, 0, NULL);
-	gps_smc(GPS_SMC_SET_CFG_DSP_MEM_OFF, GPS_L1_DSP_OFF, GPS_DATA_LINK_ID0, NULL);
-
-	/* --- common off: tear the domain back down --- */
-	gps_smc(GPS_SMC_COMMON_OFF_PART1, 0, 0, NULL);
-	if (gps_smc(GPS_SMC_COMMON_OFF_PART2, 0, 0, NULL) != 0)
-		dev_warn(dev, "GPS common_off part2 (sleep prot) not clean\n");
-	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);	/* release EMI */
-	gps_smc(GPS_SMC_COMMON_OFF_PART3, 0, 0, NULL);
-
-	gps_smc(GPS_SMC_COMMON_ON_SET_FLAG, GPS_SMC_SET_FLAG_MAGIC, 0, NULL);
-	mtk_gnss_conninfra_release(gnss);
-	mtk_connsys_power_off(gnss->cs, MTK_CONNSYS_GPS);
+	gps_dsp_off(gnss);
+	gps_common_off(gnss);
 	return 0;
-
-err_flag:
-	gps_smc(GPS_SMC_COMMON_ON_SET_FLAG, GPS_SMC_SET_FLAG_MAGIC, 0, NULL);
-	mtk_gnss_conninfra_release(gnss);
-	mtk_connsys_power_off(gnss->cs, MTK_CONNSYS_GPS);
-	return -EIO;
 }
+
+/* ---- /dev/gpsdl0 data-link char device (link0) ---- */
+
+struct gps_bootup_info {
+	__u32 frag_num;
+	__u32 code_size;
+	__u32 start_addr;
+	__u32 exec_addr;
+	__u32 cipher_key;
+};
+
+#define GPSDL_IOC_GET_BOOTUP	_IOR('g', 1, struct gps_bootup_info)
+#define GPSDL_IOC_SEND_FRAG	_IO('g', 2)	/* arg = fragment index */
+
+static struct mtk_gnss *gps_from_file(struct file *filp)
+{
+	return container_of(filp->private_data, struct mtk_gnss, miscdev);
+}
+
+static int gps_cdev_open(struct inode *inode, struct file *filp)
+{
+	struct mtk_gnss *gnss = gps_from_file(filp);
+	int err;
+
+	mutex_lock(&gnss->io_lock);
+	if (gnss->link_open) {
+		mutex_unlock(&gnss->io_lock);
+		return -EBUSY;
+	}
+
+	err = gps_common_on(gnss);
+	if (err) {
+		mutex_unlock(&gnss->io_lock);
+		return err;
+	}
+
+	gnss->rx_ring = ioremap(GPS_EMI_PHYS_BASE + GPS_EMI_RX0_OFF,
+				GPS_DL_RX_BUF_SIZE);
+	if (!gnss->rx_ring) {
+		gps_common_off(gnss);
+		mutex_unlock(&gnss->io_lock);
+		return -ENOMEM;
+	}
+
+	reinit_completion(&gnss->ramcode);
+	if (gnss->irq_mcub >= 0)
+		enable_irq(gnss->irq_mcub);
+
+	gps_dsp_on(gnss);		/* also claims EMI */
+	gps_dma_d2a_arm(0);		/* keep the D2A receive DMA running */
+	gnss->rx_woff = 0;
+	gnss->rx_roff = 0;
+	gnss->link_open = true;
+
+	dev_info(gnss->dev, "gpsdl0 opened: link0 up, D2A armed\n");
+	mutex_unlock(&gnss->io_lock);
+	return 0;
+}
+
+static int gps_cdev_release(struct inode *inode, struct file *filp)
+{
+	struct mtk_gnss *gnss = gps_from_file(filp);
+
+	mutex_lock(&gnss->io_lock);
+	if (gnss->link_open) {
+		gps_dma_stop(GPS_DL_DMA_LINK0_D2A);
+		if (gnss->irq_mcub >= 0)
+			disable_irq(gnss->irq_mcub);
+		gps_dsp_off(gnss);
+		gps_common_off(gnss);
+		iounmap(gnss->rx_ring);
+		gnss->rx_ring = NULL;
+		gnss->link_open = false;
+		dev_info(gnss->dev, "gpsdl0 closed\n");
+	}
+	mutex_unlock(&gnss->io_lock);
+	return 0;
+}
+
+/* Send a frame to the DSP over the A2D link (append-free: one frame per write). */
+static ssize_t gps_cdev_write(struct file *filp, const char __user *ubuf,
+			      size_t count, loff_t *ppos)
+{
+	struct mtk_gnss *gnss = gps_from_file(filp);
+	u8 *kbuf;
+	int ret;
+
+	if (count == 0 || count > GPS_DL_RX_BUF_SIZE)
+		return -EINVAL;
+	kbuf = memdup_user(ubuf, count);
+	if (IS_ERR(kbuf))
+		return PTR_ERR(kbuf);
+
+	mutex_lock(&gnss->io_lock);
+	if (!gnss->link_open) {
+		ret = -ENODEV;
+	} else {
+		gps_a2d_send(gnss, kbuf, count);
+		ret = count;
+	}
+	mutex_unlock(&gnss->io_lock);
+	kfree(kbuf);
+	return ret;
+}
+
+/*
+ * Return whatever D2A bytes the DSP has produced since the last read, without
+ * blocking (userspace polls). Updates the DMA write offset from the left-len,
+ * copies the fresh slice out of the RX ring and advances the read offset.
+ */
+static ssize_t gps_cdev_read(struct file *filp, char __user *ubuf,
+			     size_t count, loff_t *ppos)
+{
+	struct mtk_gnss *gnss = gps_from_file(filp);
+	u8 bounce[512];
+	unsigned long avail, left;
+	size_t n;
+	int ret;
+
+	mutex_lock(&gnss->io_lock);
+	if (!gnss->link_open) {
+		mutex_unlock(&gnss->io_lock);
+		return -ENODEV;
+	}
+
+	left = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
+	gnss->rx_woff = (GPS_DL_RX_WORDS - left) * 4;
+
+	if (gnss->rx_woff >= gnss->rx_roff)
+		avail = gnss->rx_woff - gnss->rx_roff;
+	else				/* ring wrapped: return up to the wrap */
+		avail = GPS_DL_RX_BUF_SIZE - gnss->rx_roff;
+	n = min3(avail, count, sizeof(bounce));
+	if (n == 0) {
+		mutex_unlock(&gnss->io_lock);
+		return 0;
+	}
+	/* RX ring is Device memory (ioremap): bounce via memcpy_fromio, never
+	 * copy_to_user straight from iomem (that faults on unaligned access).
+	 */
+	memcpy_fromio(bounce, gnss->rx_ring + gnss->rx_roff, n);
+	if (copy_to_user(ubuf, bounce, n)) {
+		ret = -EFAULT;
+	} else {
+		ret = n;
+		gnss->rx_roff += n;
+		if (gnss->rx_roff >= GPS_DL_RX_BUF_SIZE)
+			gnss->rx_roff -= GPS_DL_RX_BUF_SIZE;
+	}
+	mutex_unlock(&gnss->io_lock);
+	return ret;
+}
+
+static long gps_cdev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	struct mtk_gnss *gnss = gps_from_file(filp);
+	struct arm_smccc_res res;
+	long ret = 0;
+
+	mutex_lock(&gnss->io_lock);
+	if (!gnss->link_open) {
+		mutex_unlock(&gnss->io_lock);
+		return -ENODEV;
+	}
+
+	switch (cmd) {
+	case GPSDL_IOC_GET_BOOTUP: {
+		struct gps_bootup_info info;
+
+		arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL,
+			      GPS_SMC_MVCD_GET_DSP_BOOTUP, GPS_MVCD_DSP_L1,
+			      0, 0, 0, 0, 0, &res);
+		if (res.a1 == 0) {
+			ret = -EIO;
+			break;
+		}
+		info.frag_num   = (u32)(res.a1 & 0xffff);
+		info.code_size  = (u32)((res.a1 >> 16) & 0xffff);
+		info.start_addr = (u32)((res.a1 >> 32) & 0xffff);
+		info.exec_addr  = (u32)((res.a1 >> 48) & 0xffff);
+		info.cipher_key = (u32)(res.a2 & 0xffff);
+		if (copy_to_user((void __user *)arg, &info, sizeof(info)))
+			ret = -EFAULT;
+		break;
+	}
+	case GPSDL_IOC_SEND_FRAG:
+		arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL,
+			      GPS_SMC_MVCD_SEND_DSP_FRAG, GPS_MVCD_DSP_L1,
+			      arg, 0, 0, 0, 0, &res);
+		gps_smc(GPS_SMC_USRT_CLEAR_NODATA, GPS_DATA_LINK_ID0, 0, NULL);
+		if (res.a1 == 1)
+			ret = -EIO;
+		break;
+	default:
+		ret = -ENOTTY;
+		break;
+	}
+	mutex_unlock(&gnss->io_lock);
+	return ret;
+}
+
+static const struct file_operations gps_cdev_fops = {
+	.owner		= THIS_MODULE,
+	.open		= gps_cdev_open,
+	.release	= gps_cdev_release,
+	.read		= gps_cdev_read,
+	.write		= gps_cdev_write,
+	.unlocked_ioctl	= gps_cdev_ioctl,
+	.llseek		= noop_llseek,
+};
 
 static int mtk_gnss_probe(struct platform_device *pdev)
 {
@@ -671,7 +880,16 @@ static int mtk_gnss_probe(struct platform_device *pdev)
 		dev_warn(dev, "no MCUB irq in DT; RAMCODE handshake disabled\n");
 	}
 
+	mutex_init(&gnss->io_lock);
 	platform_set_drvdata(pdev, gnss);
+
+	/* expose the data-link char device /dev/gpsdl0 (link0) */
+	gnss->miscdev.minor = MISC_DYNAMIC_MINOR;
+	gnss->miscdev.name = "gpsdl0";
+	gnss->miscdev.fops = &gps_cdev_fops;
+	if (misc_register(&gnss->miscdev))
+		dev_warn(dev, "failed to register /dev/gpsdl0\n");
+
 	dev_info(dev, "MediaTek connsys GNSS probe (milestone 1)\n");
 
 	if (probe_power)
@@ -679,6 +897,13 @@ static int mtk_gnss_probe(struct platform_device *pdev)
 
 	dev_info(dev, "probe_power not set; skipping SMC power test\n");
 	return 0;
+}
+
+static void mtk_gnss_remove(struct platform_device *pdev)
+{
+	struct mtk_gnss *gnss = platform_get_drvdata(pdev);
+
+	misc_deregister(&gnss->miscdev);
 }
 
 static const struct of_device_id mtk_gnss_of_match[] = {
@@ -689,6 +914,7 @@ MODULE_DEVICE_TABLE(of, mtk_gnss_of_match);
 
 static struct platform_driver mtk_gnss_driver = {
 	.probe = mtk_gnss_probe,
+	.remove = mtk_gnss_remove,
 	.driver = {
 		.name = "mtk-connsys-gnss",
 		.of_match_table = mtk_gnss_of_match,
