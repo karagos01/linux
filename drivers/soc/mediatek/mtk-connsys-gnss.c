@@ -59,6 +59,46 @@
 #define GPS_SMC_GET_MCUB_INFO		0x13	/* a0=ret a1=flag a2=d0 a3=d1 */
 #define GPS_SMC_CLEAR_MCUB_D2A		0x14	/* x2=link x3=d2a_flag */
 
+/*
+ * GPS data-link DMA transport SMCs (enum conn_smc_opid). The TF-A owns the
+ * GPS EMI ring layout (it programmed the conn_infra EMI remap in common_on),
+ * so these take only the channel, a relative sub-buffer offset and the ring
+ * lengths - no absolute address. Arg layout of SET_DMA_START (from the stock
+ * plat/v051 gps_dl_hw_dep_set_dma_start):
+ *   x2 = channel, x3 = sub_buf_offset (= data_start - buf_start, bus remap),
+ *   x4 = bus_id, x5 = len_to_wrap, x6 = transfer_max_len, x7 = is_1byte.
+ * Lengths are in 4-byte words unless 1-byte mode is selected.
+ */
+#define GPS_SMC_SET_DMA_START		0x16	/* see arg layout above */
+#define GPS_SMC_GET_DMA_LEFT_LEN	0x1b	/* x2=channel; a0=left len (words) */
+#define GPS_SMC_SET_DMA_STOP		0x1c	/* x2=channel */
+#define GPS_SMC_GET_DMA_INT_STATUS	0x1e	/* x2=channel; a0!=0 = done */
+
+/* enum gps_dl_hal_dma_ch_index / gps_dl_hal_dma_ch_bus_id (link0 only here) */
+#define GPS_DL_DMA_LINK0_A2D		0	/* AP -> DSP */
+#define GPS_DL_DMA_LINK0_D2A		1	/* DSP -> AP */
+#define GPS_DL_DMA_BUS_ID0_A2D		0
+#define GPS_DL_DMA_BUS_ID0_D2A		1
+
+/* v051 per-link ring size (connac3); the reserved region adds 4K padding */
+#define GPS_DL_RX_BUF_SIZE		(8 * 1024)
+
+/*
+ * MVCD "DSP code download" SMCs. The GNSS DSP RAM image lives in TF-A; the AP
+ * only drives the handshake. GET_DSP_BOOT_UP_INFO returns the image geometry
+ * (fragment count etc.), SEND_DSP_FRAGEMENT pushes fragment N to the DSP (no
+ * data argument - TF-A sources the bytes and streams them over the USRT/DMA
+ * data link, which is why the D2A ring must be draining while this runs).
+ *   x2 = dsp_type (0 = L1), x3 = fragment index (for SEND).
+ */
+#define GPS_SMC_MVCD_GET_DSP_BOOTUP	0x1f
+#define GPS_SMC_MVCD_SEND_DSP_FRAG	0x20
+#define GPS_MVCD_DSP_L1			0
+
+/* USRT flow-control SMCs used around each fragment (x2 = link id) */
+#define GPS_SMC_USRT_POLL_RX_EMPTY	0x15
+#define GPS_SMC_USRT_CLEAR_NODATA	0x1a
+
 /* enum dsp_ctrl_enum / link ids passed to the TF-A DSP control SMCs */
 #define GPS_L1_DSP_ON			0
 #define GPS_L1_DSP_OFF			1
@@ -141,6 +181,137 @@ static u32 gps_mcub_get(unsigned long link, u32 *d0, u32 *d1)
 	if (d1)
 		*d1 = res.a3;
 	return (u32)res.a1;
+}
+
+/* GDL ring free/wrap helpers (read index pinned at 0: pure receive window) */
+#define GPS_DL_RX_WORDS		(GPS_DL_RX_BUF_SIZE / 4)
+
+/*
+ * Arm the link0 D2A (DSP->AP) receive DMA. The TF-A knows the ring base, so we
+ * pass a relative sub_buf_offset (the current write offset in bytes) plus the
+ * wrap and max lengths in 4-byte words (DMA runs in 4-byte mode). Returns the
+ * TF-A result (a0).
+ */
+static unsigned long gps_dma_d2a_arm(unsigned long woff_bytes)
+{
+	struct arm_smccc_res res;
+	unsigned long len_to_wrap = (GPS_DL_RX_BUF_SIZE - woff_bytes) / 4;
+	unsigned long free_words = GPS_DL_RX_WORDS - (woff_bytes / 4);
+
+	arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL, GPS_SMC_SET_DMA_START,
+		      GPS_DL_DMA_LINK0_D2A, woff_bytes, GPS_DL_DMA_BUS_ID0_D2A,
+		      len_to_wrap, free_words, 0 /* is_1byte */, &res);
+	return res.a0;
+}
+
+static unsigned long gps_dma_left_words(unsigned long channel)
+{
+	/* TF-A returns the left length in a0 (the gps_smc return value) */
+	return gps_smc(GPS_SMC_GET_DMA_LEFT_LEN, channel, 0, NULL);
+}
+
+static void gps_dma_stop(unsigned long channel)
+{
+	gps_smc(GPS_SMC_SET_DMA_STOP, channel, 0, NULL);
+}
+
+/*
+ * Service the data-link DMA channels the way the stock gps_dma IRQ thread does
+ * after each fragment: read+ack the A2D (ch0) interrupt and stop it, then read
+ * the D2A/other channels' interrupt status. This keeps the DMA engine's done
+ * flags acknowledged so the next transfer can arm.
+ */
+static void gps_dma_service_irq(void)
+{
+	int ch;
+
+	gps_smc(GPS_SMC_GET_DMA_INT_STATUS, GPS_DL_DMA_LINK0_A2D, 0, NULL);
+	gps_dma_stop(GPS_DL_DMA_LINK0_A2D);
+	for (ch = 1; ch < 4; ch++)
+		gps_smc(GPS_SMC_GET_DMA_INT_STATUS, ch, 0, NULL);
+}
+
+/*
+ * Download the GNSS L1 DSP RAM image through the MVCD handshake. TF-A owns the
+ * image and streams each fragment over the USRT data link; the DSP emits a
+ * small progress record per fragment over the D2A ring, which the AP must keep
+ * draining (claim EMI, arm the D2A DMA at the running write offset, read how
+ * much arrived, stop, release EMI, clear the USRT nodata IRQ) or the USRT RX
+ * FIFO backs up and the DSP stalls. This mirrors the exact per-fragment SMC
+ * cycle the stock data-link driver runs. The DSP posts RAMCODE_READY over the
+ * MCUB mailbox (serviced by our IRQ) once it has the full image.
+ */
+static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
+{
+	struct arm_smccc_res res;
+	u32 frag_num, code_size, cipher;
+	unsigned long woff = 0;		/* D2A ring write offset, bytes */
+	unsigned int i;
+
+	arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL, GPS_SMC_MVCD_GET_DSP_BOOTUP,
+		      GPS_MVCD_DSP_L1, 0, 0, 0, 0, 0, &res);
+	if (res.a1 == 0) {
+		dev_err(gnss->dev, "GPS MVCD: no bootup info from TF-A\n");
+		return;
+	}
+	frag_num  = (u32)(res.a1 & 0xffff);
+	code_size = (u32)((res.a1 >> 16) & 0xffff);
+	cipher    = (u32)(res.a2 & 0xffff);
+	dev_info(gnss->dev,
+		 "GPS MVCD: L1 image frag_num %u code_size %#x cipher %#x\n",
+		 frag_num, code_size, cipher);
+	if (!frag_num || frag_num > 256)
+		return;
+
+	/* make sure the USRT RX path starts from empty */
+	gps_smc(GPS_SMC_USRT_POLL_RX_EMPTY, GPS_DATA_LINK_ID0, 0, NULL);
+
+	for (i = 0; i < frag_num; i++) {
+		unsigned long free_words, left;
+
+		/* --- drain whatever the previous fragment produced --- */
+		gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
+		{
+			unsigned long arm_ret = gps_dma_d2a_arm(woff);
+			unsigned long ist;
+
+			udelay(200);	/* let any pending USRT RX drain in */
+			left = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
+			ist = gps_smc(GPS_SMC_GET_DMA_INT_STATUS,
+				      GPS_DL_DMA_LINK0_D2A, 0, NULL);
+			if (i < 4 || i == frag_num - 1)
+				dev_info(gnss->dev,
+					 "GPS MVCD dbg frag %u: arm_ret %#lx woff %#lx left %lu intsta %#lx\n",
+					 i, arm_ret, woff, left, ist);
+		}
+		gps_dma_stop(GPS_DL_DMA_LINK0_D2A);
+		gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
+		gps_smc(GPS_SMC_USRT_CLEAR_NODATA, GPS_DATA_LINK_ID0, 0, NULL);
+
+		/* advance the write offset by the bytes received this round */
+		free_words = GPS_DL_RX_WORDS - (woff / 4);
+		if (left < free_words) {
+			woff += (free_words - left) * 4;
+			if (woff >= GPS_DL_RX_BUF_SIZE)
+				woff -= GPS_DL_RX_BUF_SIZE;
+		}
+
+		/* --- push the next fragment, then ack the DMA IRQ --- */
+		arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL,
+			      GPS_SMC_MVCD_SEND_DSP_FRAG, GPS_MVCD_DSP_L1, i,
+			      0, 0, 0, 0, &res);
+		if (res.a1 == 1) {
+			dev_err(gnss->dev,
+				"GPS MVCD: fragment %u rejected by TF-A\n", i);
+			return;
+		}
+		gps_dma_service_irq();
+
+		/* pace to roughly match the stock ~1ms/fragment cadence */
+		usleep_range(700, 1100);
+	}
+	dev_info(gnss->dev, "GPS MVCD: sent %u fragment(s), d2a woff %#lx\n",
+		 frag_num, woff);
 }
 
 /*
@@ -320,6 +491,14 @@ static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
 		dev_err(dev, "GPS L1 DSP ON: no ACK (DSP did not boot)\n");
 
 	gps_usrt_ctrl(GPS_DATA_LINK_ID0, true);
+
+	/*
+	 * Download the L1 DSP RAM image over the data link. Each fragment is
+	 * paired with a D2A receive-DMA drain cycle (see gps_mvcd_download_l1)
+	 * so the DSP never back-pressures. The DSP reports RAMCODE_READY over
+	 * the MCUB mailbox (serviced by the IRQ above) once the image is in.
+	 */
+	gps_mvcd_download_l1(gnss);
 
 	if (wait_for_completion_timeout(&gnss->ramcode, msecs_to_jiffies(3000)))
 		dev_info(dev, "GPS DSP RAMCODE_READY: GNSS firmware is running!\n");
