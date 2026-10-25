@@ -167,6 +167,20 @@ static const u8 gps_l1_init_frame[] = {
 	0x01, 0x00, 0x4e, 0x4f, 0x43, 0x16, 0xaa, 0x0f,
 };
 
+/*
+ * The DSP replies to the image descriptor with numbered D2A messages and waits
+ * for the AP to answer the last one over A2D just before it runs the RAM code.
+ * This 15-byte aaf0 frame (seq byte 0x32, matching the DSP's 2nd message) is
+ * that answer; it is byte-identical across boots. (The larger reference-time /
+ * assistance frame the stock HAL sends afterwards is dynamic but post-RAMCODE,
+ * so it is not needed here.) Padded to a 4-byte boundary for the word-mode DMA;
+ * the DSP delimits the frame by its own aa0f trailer and ignores the pad.
+ */
+static const u8 gps_l1_ack_frame[] = {
+	0xaa, 0xf0, 0x09, 0x00, 0x05, 0xfe, 0x32, 0x00, 0x00, 0x01, 0x00, 0x3f,
+	0x01, 0xaa, 0x0f, 0x00,
+};
+
 static bool probe_power;
 module_param(probe_power, bool, 0444);
 MODULE_PARM_DESC(probe_power,
@@ -252,11 +266,11 @@ static void gps_dma_stop(unsigned long channel)
  * them (sub_buf_offset 0, bus_id A2D, transfer length = frame size in words)
  * and wait for it to drain. Returns 0 on success.
  */
-static int gps_a2d_send_init_frame(struct mtk_gnss *gnss)
+static int gps_a2d_send(struct mtk_gnss *gnss, const u8 *frame, size_t len)
 {
 	struct arm_smccc_res res;
 	void __iomem *tx;
-	unsigned long words = sizeof(gps_l1_init_frame) / 4;	/* 116/4 = 29 */
+	unsigned long words = DIV_ROUND_UP(len, 4);
 	int i;
 
 	tx = ioremap(GPS_EMI_TX0_PHYS, GPS_DL_RX_BUF_SIZE);
@@ -264,10 +278,10 @@ static int gps_a2d_send_init_frame(struct mtk_gnss *gnss)
 		dev_err(gnss->dev, "GPS: cannot map TX ring\n");
 		return -ENOMEM;
 	}
-	memcpy_toio(tx, gps_l1_init_frame, sizeof(gps_l1_init_frame));
+	memcpy_toio(tx, frame, len);
 	wmb();	/* frame visible in EMI before the DMA reads it */
 
-	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
+	/* EMI usage is claimed by the caller for the whole download */
 	arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL, GPS_SMC_SET_DMA_START,
 		      GPS_DL_DMA_LINK0_A2D, 0 /* sub_buf_offset */,
 		      GPS_DL_DMA_BUS_ID0_A2D, GPS_DL_RX_WORDS /* len_to_wrap */,
@@ -281,11 +295,10 @@ static int gps_a2d_send_init_frame(struct mtk_gnss *gnss)
 		udelay(50);
 	}
 	gps_dma_stop(GPS_DL_DMA_LINK0_A2D);
-	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
 	iounmap(tx);
 
-	dev_info(gnss->dev, "GPS: sent %zu-byte L1 init frame (a2d done after %d polls)\n",
-		 sizeof(gps_l1_init_frame), i);
+	dev_info(gnss->dev, "GPS: sent %zu-byte A2D frame (done after %d polls)\n",
+		 len, i);
 	return 0;
 }
 
@@ -324,16 +337,24 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 	/* make sure the USRT RX path starts from empty */
 	gps_smc(GPS_SMC_USRT_POLL_RX_EMPTY, GPS_DATA_LINK_ID0, 0, NULL);
 
-	/* the DSP needs the image-descriptor frame before it accepts frags */
-	gps_a2d_send_init_frame(gnss);
-
-	/* arm the D2A receive DMA once and leave it running for the whole
-	 * download so the DSP's per-fragment records stream in without gaps
-	 */
+	/* claim EMI for the whole download (A2D sends + the D2A drain) */
 	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
+
+	/* the DSP needs the image-descriptor frame before it accepts frags */
+	gps_a2d_send(gnss, gps_l1_init_frame, sizeof(gps_l1_init_frame));
+
+	/*
+	 * Keep the D2A receive DMA armed continuously and send one fragment at a
+	 * time, waiting for the DSP's per-fragment record to land (left_len drops)
+	 * before pushing the next. This paces us to the DSP exactly as the stock
+	 * flow does and keeps its record stream from stalling.
+	 */
 	gps_dma_d2a_arm(0);
 
 	for (i = 0; i < frag_num; i++) {
+		unsigned long prev = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
+		int w;
+
 		arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL,
 			      GPS_SMC_MVCD_SEND_DSP_FRAG, GPS_MVCD_DSP_L1, i,
 			      0, 0, 0, 0, &res);
@@ -344,26 +365,36 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 		}
 		gps_smc(GPS_SMC_USRT_CLEAR_NODATA, GPS_DATA_LINK_ID0, 0, NULL);
 
-		if (i < 3 || i == frag_num - 1) {
+		/* wait up to ~3ms for this fragment's D2A record to arrive */
+		for (w = 0; w < 60; w++) {
 			unsigned long left =
 				gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
-			dev_info(gnss->dev,
-				 "GPS MVCD dbg frag %u: d2a left %lu (rx %lu B)\n",
-				 i, left, (GPS_DL_RX_WORDS - left) * 4);
+			if (left < prev)
+				break;
+			udelay(50);
 		}
-		/* pace to roughly match the stock ~1ms/fragment cadence */
-		usleep_range(700, 1100);
+		if (i < 5 || i == frag_num - 1)
+			dev_info(gnss->dev,
+				 "GPS MVCD dbg frag %u: left %lu->%lu (wait %d)\n",
+				 i, prev,
+				 gps_dma_left_words(GPS_DL_DMA_LINK0_D2A), w);
 	}
-
 	{
 		unsigned long left = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
 
 		woff = (GPS_DL_RX_WORDS - left) * 4;
 	}
-	gps_dma_stop(GPS_DL_DMA_LINK0_D2A);
-	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
 	dev_info(gnss->dev, "GPS MVCD: sent %u fragment(s), d2a rx %#lx B\n",
 		 frag_num, woff);
+
+	/*
+	 * Answer the DSP's last boot message so it starts running the RAM code.
+	 * Keep the D2A DMA armed across this so the final records still drain.
+	 */
+	gps_a2d_send(gnss, gps_l1_ack_frame, sizeof(gps_l1_ack_frame));
+
+	gps_dma_stop(GPS_DL_DMA_LINK0_D2A);
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
 
 	/* dump what the DSP actually wrote into the D2A RX ring */
 	{
