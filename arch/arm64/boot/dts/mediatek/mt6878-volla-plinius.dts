@@ -13,6 +13,7 @@
 #include <dt-bindings/pinctrl/mt65xx.h>
 #include <dt-bindings/power/mediatek,mt6878-power.h>
 #include <dt-bindings/spmi/spmi.h>
+#include <dt-bindings/thermal/mediatek,lvts-thermal.h>
 
 /*
  * The SoC dtsi carries the CMF Phone 1 carveouts, Plinius gets its own
@@ -681,5 +682,54 @@
 			<3774667 30>, <3755678 25>, <3738580 20>,
 			<3710409 15>, <3691199 10>, <3619774 5>,
 			<3400000 0>;
+	};
+};
+
+&soc {
+	lvts_mcu: thermal-sensor@10315000 {
+		compatible = "mediatek,mt6878-lvts-mcu";
+		reg = <0x10315000 0x1000>;
+		interrupts = <GIC_SPI 218 IRQ_TYPE_LEVEL_HIGH 0>;
+		#thermal-sensor-cells = <1>;
+	};
+
+	lvts_ap: thermal-sensor@10316000 {
+		compatible = "mediatek,mt6878-lvts-ap";
+		reg = <0x10316000 0x1000>;
+		interrupts = <GIC_SPI 219 IRQ_TYPE_LEVEL_HIGH 0>;
+		#thermal-sensor-cells = <1>;
+	};
+};
+
+/ {
+	thermal-zones {
+		/* Monitoring only: a single high "hot" trip, no shutdown, no cooling. */
+		cpu-thermal {
+			polling-delay = <1000>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_mcu MT6878_MCU_LVTS1_0>;
+
+			trips {
+				trip-hot {
+					temperature = <110000>;
+					hysteresis = <2000>;
+					type = "hot";
+				};
+			};
+		};
+
+		ap-thermal {
+			polling-delay = <1000>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6878_AP_LVTS5_0>;
+
+			trips {
+				trip-hot {
+					temperature = <110000>;
+					hysteresis = <2000>;
+					type = "hot";
+				};
+			};
+		};
 	};
 };
