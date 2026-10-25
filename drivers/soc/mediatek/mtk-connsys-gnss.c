@@ -160,6 +160,11 @@ struct mtk_gnss {
 	struct mtk_connsys *cs;
 	void __iomem *conn;
 	int irq_mcub;			/* link0 MCUB mailbox IRQ (SPI 381) */
+	int irq_data;			/* link0 USRT has-data IRQ (SPI 379, idx 0) */
+	int irq_nodata;			/* link0 USRT nodata IRQ (SPI 380, idx 1) */
+	int irq_dma;			/* GPS DMA done IRQ (SPI 129, idx 6) */
+	bool d2a_armed;			/* D2A receive DMA currently armed */
+	unsigned long dl_woff;		/* D2A ring write offset driven by the IRQs */
 	struct completion ramcode;	/* completed when the DSP posts RAMCODE_READY */
 
 	/* /dev/gpsdl0 data-link char device (link0) */
@@ -329,6 +334,8 @@ static int gps_a2d_send(struct mtk_gnss *gnss, const u8 *frame, size_t len)
 	memcpy_toio(tx, frame, len);
 	wmb();	/* frame visible in EMI before the DMA reads it */
 
+	/* serialise against the reactive D2A IRQ handlers (shared A2D/EMI state) */
+	mutex_lock(&gnss->io_lock);
 	/* claim EMI around this A2D transfer, as stock toggles it per transfer */
 	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
 	arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL, GPS_SMC_SET_DMA_START,
@@ -344,13 +351,38 @@ static int gps_a2d_send(struct mtk_gnss *gnss, const u8 *frame, size_t len)
 		udelay(50);
 	}
 	gps_dma_stop(GPS_DL_DMA_LINK0_A2D);
-	gps_dma_irq_svc();
+	gps_smc(GPS_SMC_GET_DMA_INT_STATUS, GPS_DL_DMA_LINK0_A2D, 0, NULL);
 	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
+	mutex_unlock(&gnss->io_lock);
 	iounmap(tx);
 
 	dev_info(gnss->dev, "GPS: sent %zu-byte A2D frame (done after %d polls)\n",
 		 len, i);
 	return 0;
+}
+
+/* storm guard: cap total reactive-IRQ handling during a download */
+static atomic_t g_gps_irq_budget;
+
+/* drain one D2A burst (called under io_lock from the IRQ handlers and the
+ * download teardown): read how much arrived, stop, release EMI, advance the
+ * write offset by (0x80 - left) words and disarm.
+ */
+static void gps_d2a_drain_locked(struct mtk_gnss *gnss)
+{
+	unsigned long left;
+
+	if (!gnss->d2a_armed)
+		return;
+	left = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
+	gps_dma_stop(GPS_DL_DMA_LINK0_D2A);
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
+	if (left < 0x80) {
+		gnss->dl_woff += (0x80 - left) * 4;
+		if (gnss->dl_woff >= GPS_DL_RX_BUF_SIZE)
+			gnss->dl_woff -= GPS_DL_RX_BUF_SIZE;
+	}
+	gnss->d2a_armed = false;
 }
 
 /*
@@ -401,23 +433,25 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 	 *   drained (and EMI toggled) BEFORE each 0x20, and is NOT armed while
 	 *   the fragment is pushed - the opposite of what I did before.
 	 */
+	/* Hand the D2A draining to the reactive IRQs (data/nodata/dma): arm the
+	 * receive DMA once, then just push fragments at the stock ~1ms cadence
+	 * while the IRQ handlers drain each record with hardware timing.
+	 */
+	gnss->dl_woff = 0;
+	gnss->d2a_armed = true;
+	atomic_set(&g_gps_irq_budget, 100000);
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
+	gps_dma_d2a_arm(0);
+	if (gnss->irq_data >= 0)
+		enable_irq(gnss->irq_data);
+	if (gnss->irq_nodata >= 0)
+		enable_irq(gnss->irq_nodata);
+	if (gnss->irq_dma >= 0)
+		enable_irq(gnss->irq_dma);
+
 	for (i = 0; i < frag_num; i++) {
-		unsigned long left;
-
-		gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
-		gps_dma_d2a_arm(woff);
-		udelay(150);	/* let the FIFO->EMI transfer land (stock ~117us) */
-		left = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
-		gps_dma_stop(GPS_DL_DMA_LINK0_D2A);
-		gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
-		gps_smc(GPS_SMC_USRT_CLEAR_NODATA, GPS_DATA_LINK_ID0, 0, NULL);
-
-		/* D2A was armed for 0x80 words; received = 0x80 - left_len */
-		if (left < 0x80) {
-			woff += (0x80 - left) * 4;
-			if (woff >= GPS_DL_RX_BUF_SIZE)
-				woff -= GPS_DL_RX_BUF_SIZE;
-		}
+		unsigned long prev = gnss->dl_woff;
+		int w;
 
 		arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL,
 			      GPS_SMC_MVCD_SEND_DSP_FRAG, GPS_MVCD_DSP_L1, i,
@@ -425,59 +459,33 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 		if (res.a1 == 1) {
 			dev_err(gnss->dev,
 				"GPS MVCD: fragment %u rejected by TF-A\n", i);
-			return;
+			break;
 		}
-		gps_dma_irq_svc();
-
-		if (i < 6 || i == frag_num - 1)
-			dev_info(gnss->dev, "GPS MVCD dbg frag %u: woff %#lx left %lu\n",
-				 i, woff, left);
-		/* match stock's ~1ms/fragment cadence so each DSP record has landed
-		 * in the FIFO before the next iteration's drain reads it
+		/* lockstep like stock: wait for this fragment's record to drain
+		 * (dl_woff advances via the IRQs) before sending the next, so the
+		 * DSP's un-acked record buffer never fills. ~6ms fallback timeout.
 		 */
-		usleep_range(900, 1200);
-	}
-	dev_info(gnss->dev, "GPS MVCD: sent %u fragment(s), d2a rx %#lx B\n",
-		 frag_num, woff);
-
-	/* diagnostic: is the conn_infra<->GPS GALS path sleep-protected (blocked)
-	 * while the DSP is stalled? SLP_CTRL bits: RX 0x10, TX 0x01 set = protected
-	 */
-	dev_info(gnss->dev,
-		 "SLP conn2gps ctl %#x sta %#x | gps2conn ctl %#x sta %#x\n",
-		 readl(gnss->conn + 0x1470), readl(gnss->conn + 0x1474),
-		 readl(gnss->conn + 0x1480), readl(gnss->conn + 0x1484));
-
-	/*
-	 * Look inside the stalled DSP: request a few internal registers over the
-	 * MCUB mailbox (0x9ff0 = PC, read twice to see if it advances; 0x5028/9,
-	 * 0x0100/1 status; 0x4882/6 USRT). The DSP answers via a D2A REG_READ_READY
-	 * MCUB event, which our IRQ logs as "flag 0x0002 d0 <value>". No answer =
-	 * the DSP is hung, not just waiting.
-	 */
-	{
-		static const u16 probe[] = { 0x9ff0, 0x9ff0, 0x9ff1, 0x5028,
-					     0x5029, 0x0100, 0x0101, 0x4882,
-					     0x4886 };
-		unsigned int k;
-
-		dev_info(gnss->dev, "probing stalled DSP registers via MCUB...\n");
-		for (k = 0; k < ARRAY_SIZE(probe); k++) {
-			dev_info(gnss->dev, "  req dsp reg %#06x\n", probe[k]);
-			gps_smc(GPS_SMC_MCUB_DSP_READ_REQ, GPS_DATA_LINK_ID0,
-				probe[k], NULL);
-			msleep(20);
+		for (w = 0; w < 60; w++) {
+			if (gnss->dl_woff != prev)
+				break;
+			usleep_range(100, 200);
 		}
+		if (i < 6 || i == frag_num - 1 || (i % 20) == 0)
+			dev_info(gnss->dev, "GPS MVCD frag %u: dl_woff %#lx (wait %d)\n",
+				 i, gnss->dl_woff, w);
 	}
 
-	/*
-	 * Answer the DSP's last boot message so it starts running the RAM code.
-	 * Keep the D2A DMA armed across this so the final records still drain.
+	/* let the last few per-fragment records drain via the IRQs */
+	msleep(50);
+	woff = gnss->dl_woff;
+	dev_info(gnss->dev, "GPS MVCD: sent %u fragment(s), d2a rx %#lx B (budget left %d)\n",
+		 frag_num, woff, atomic_read(&g_gps_irq_budget));
+
+	/* answer the DSP's last boot message so it starts running the RAM code;
+	 * the D2A IRQs stay enabled so the final records and any RAMCODE-time
+	 * traffic keep draining. The caller waits for RAMCODE then disables them.
 	 */
 	gps_a2d_send(gnss, gps_l1_ack_frame, sizeof(gps_l1_ack_frame));
-
-	gps_dma_stop(GPS_DL_DMA_LINK0_D2A);
-	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
 
 	/* dump what the DSP actually wrote into the D2A RX ring */
 	{
@@ -521,6 +529,63 @@ static irqreturn_t mtk_gnss_mcub_thread(int irq, void *data)
 	}
 
 	return handled ? IRQ_HANDLED : IRQ_NONE;
+}
+
+/*
+ * Reactive D2A receive draining, as the stock gps_dma IRQ thread does, so the
+ * per-record drain/ack lands with hardware timing (a polling loop misses the
+ * window). Three link0 IRQs cooperate under io_lock:
+ *   - USRT has-data (SPI 379): the DSP has bytes -> arm the D2A DMA.
+ *   - USRT nodata  (SPI 380): end of burst -> stop, read how much arrived,
+ *     advance the write offset, clear the nodata IRQ, disarm.
+ *   - GPS DMA done (SPI 129): the D2A DMA completed -> same drain; also ack the
+ *     A2D (ch0) interrupt.
+ * dl_woff is the running D2A write offset; the DSP's progress records stream in
+ * one per fragment this way, exactly like stock.
+ */
+static irqreturn_t mtk_gnss_data_thread(int irq, void *data)
+{
+	struct mtk_gnss *gnss = data;
+
+	if (atomic_dec_if_positive(&g_gps_irq_budget) < 0)
+		return IRQ_HANDLED;
+	mutex_lock(&gnss->io_lock);
+	if (!gnss->d2a_armed) {
+		gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
+		gps_dma_d2a_arm(gnss->dl_woff);
+		gnss->d2a_armed = true;
+	}
+	mutex_unlock(&gnss->io_lock);
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t mtk_gnss_nodata_thread(int irq, void *data)
+{
+	struct mtk_gnss *gnss = data;
+
+	if (atomic_dec_if_positive(&g_gps_irq_budget) < 0)
+		return IRQ_HANDLED;
+	mutex_lock(&gnss->io_lock);
+	gps_d2a_drain_locked(gnss);
+	gps_smc(GPS_SMC_USRT_CLEAR_NODATA, GPS_DATA_LINK_ID0, 0, NULL);
+	mutex_unlock(&gnss->io_lock);
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t mtk_gnss_dma_thread(int irq, void *data)
+{
+	struct mtk_gnss *gnss = data;
+
+	if (atomic_dec_if_positive(&g_gps_irq_budget) < 0)
+		return IRQ_HANDLED;
+	mutex_lock(&gnss->io_lock);
+	if (gps_smc(GPS_SMC_GET_DMA_INT_STATUS, GPS_DL_DMA_LINK0_D2A, 0, NULL))
+		gps_d2a_drain_locked(gnss);
+	/* ack the A2D (ch0) completion too */
+	gps_smc(GPS_SMC_GET_DMA_INT_STATUS, GPS_DL_DMA_LINK0_A2D, 0, NULL);
+	gps_dma_stop(GPS_DL_DMA_LINK0_A2D);
+	mutex_unlock(&gnss->io_lock);
+	return IRQ_HANDLED;
 }
 
 /*
@@ -691,11 +756,21 @@ static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
 	gps_dsp_on(gnss);
 	gps_mvcd_download_l1(gnss);
 
-	if (wait_for_completion_timeout(&gnss->ramcode, msecs_to_jiffies(3000)))
+	if (wait_for_completion_timeout(&gnss->ramcode, msecs_to_jiffies(5000)))
 		dev_info(dev, "GPS DSP RAMCODE_READY: GNSS firmware is running!\n");
 	else
-		dev_warn(dev, "GPS DSP: no RAMCODE_READY within 3s\n");
+		dev_warn(dev, "GPS DSP: no RAMCODE_READY within 5s\n");
 
+	/* reactive D2A IRQs were left enabled through the RAMCODE handshake */
+	if (gnss->irq_data >= 0)
+		disable_irq(gnss->irq_data);
+	if (gnss->irq_nodata >= 0)
+		disable_irq(gnss->irq_nodata);
+	if (gnss->irq_dma >= 0)
+		disable_irq(gnss->irq_dma);
+	mutex_lock(&gnss->io_lock);
+	gps_d2a_drain_locked(gnss);
+	mutex_unlock(&gnss->io_lock);
 	if (gnss->irq_mcub >= 0)
 		disable_irq(gnss->irq_mcub);
 
@@ -955,6 +1030,26 @@ static int mtk_gnss_probe(struct platform_device *pdev)
 	} else {
 		dev_warn(dev, "no MCUB irq in DT; RAMCODE handshake disabled\n");
 	}
+
+	/* link0 data/nodata (idx 0/1) + GPS DMA done (idx 6) for reactive RX */
+	gnss->irq_data = platform_get_irq(pdev, 0);
+	gnss->irq_nodata = platform_get_irq(pdev, 1);
+	gnss->irq_dma = platform_get_irq(pdev, 6);
+	if (gnss->irq_data >= 0)
+		devm_request_threaded_irq(dev, gnss->irq_data, NULL,
+					  mtk_gnss_data_thread,
+					  IRQF_ONESHOT | IRQF_NO_AUTOEN,
+					  "gps_data0", gnss);
+	if (gnss->irq_nodata >= 0)
+		devm_request_threaded_irq(dev, gnss->irq_nodata, NULL,
+					  mtk_gnss_nodata_thread,
+					  IRQF_ONESHOT | IRQF_NO_AUTOEN,
+					  "gps_nodata0", gnss);
+	if (gnss->irq_dma >= 0)
+		devm_request_threaded_irq(dev, gnss->irq_dma, NULL,
+					  mtk_gnss_dma_thread,
+					  IRQF_ONESHOT | IRQF_NO_AUTOEN,
+					  "gps_dma", gnss);
 
 	mutex_init(&gnss->io_lock);
 	platform_set_drvdata(pdev, gnss);
