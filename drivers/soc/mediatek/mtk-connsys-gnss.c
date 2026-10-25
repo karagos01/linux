@@ -269,11 +269,18 @@ static unsigned long gps_dma_d2a_arm(unsigned long woff_bytes)
 {
 	struct arm_smccc_res res;
 	unsigned long len_to_wrap = (GPS_DL_RX_BUF_SIZE - woff_bytes) / 4;
-	unsigned long free_words = GPS_DL_RX_WORDS - (woff_bytes / 4);
 
+	/*
+	 * transfer_max_len is a FIXED 0x80 words (512 bytes) per burst on stock
+	 * (captured: a6 is constant 0x80 for every D2A arm, independent of the
+	 * offset/wrap), NOT the whole ring. Arming with the full free size - as I
+	 * did before - changes when the DMA signals completion and desyncs the
+	 * DSP's record stream after a couple of fragments.
+	 */
 	arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL, GPS_SMC_SET_DMA_START,
 		      GPS_DL_DMA_LINK0_D2A, woff_bytes, GPS_DL_DMA_BUS_ID0_D2A,
-		      len_to_wrap, free_words, 0 /* is_1byte */, &res);
+		      len_to_wrap, 0x80 /* transfer_max_len */, 0 /* is_1byte */,
+		      &res);
 	return res.a0;
 }
 
@@ -395,18 +402,19 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 	 *   the fragment is pushed - the opposite of what I did before.
 	 */
 	for (i = 0; i < frag_num; i++) {
-		unsigned long free_words, left;
+		unsigned long left;
 
 		gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
 		gps_dma_d2a_arm(woff);
+		udelay(150);	/* let the FIFO->EMI transfer land (stock ~117us) */
 		left = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
 		gps_dma_stop(GPS_DL_DMA_LINK0_D2A);
 		gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
 		gps_smc(GPS_SMC_USRT_CLEAR_NODATA, GPS_DATA_LINK_ID0, 0, NULL);
 
-		free_words = GPS_DL_RX_WORDS - (woff / 4);
-		if (left < free_words) {
-			woff += (free_words - left) * 4;
+		/* D2A was armed for 0x80 words; received = 0x80 - left_len */
+		if (left < 0x80) {
+			woff += (0x80 - left) * 4;
 			if (woff >= GPS_DL_RX_BUF_SIZE)
 				woff -= GPS_DL_RX_BUF_SIZE;
 		}
@@ -424,6 +432,10 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 		if (i < 6 || i == frag_num - 1)
 			dev_info(gnss->dev, "GPS MVCD dbg frag %u: woff %#lx left %lu\n",
 				 i, woff, left);
+		/* match stock's ~1ms/fragment cadence so each DSP record has landed
+		 * in the FIFO before the next iteration's drain reads it
+		 */
+		usleep_range(900, 1200);
 	}
 	dev_info(gnss->dev, "GPS MVCD: sent %u fragment(s), d2a rx %#lx B\n",
 		 frag_num, woff);
