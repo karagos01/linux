@@ -63,6 +63,7 @@
 #define GPS_SMC_USRT_CTRL		0xd	/* x2=link x3=on x4=dma x5=1byte */
 #define GPS_SMC_GET_MCUB_INFO		0x13	/* a0=ret a1=flag a2=d0 a3=d1 */
 #define GPS_SMC_CLEAR_MCUB_D2A		0x14	/* x2=link x3=d2a_flag */
+#define GPS_SMC_MCUB_DSP_READ_REQ	0x18	/* x2=link x3=dsp reg addr */
 
 /*
  * GPS data-link DMA transport SMCs (enum conn_smc_opid). The TF-A owns the
@@ -435,6 +436,28 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 		 "SLP conn2gps ctl %#x sta %#x | gps2conn ctl %#x sta %#x\n",
 		 readl(gnss->conn + 0x1470), readl(gnss->conn + 0x1474),
 		 readl(gnss->conn + 0x1480), readl(gnss->conn + 0x1484));
+
+	/*
+	 * Look inside the stalled DSP: request a few internal registers over the
+	 * MCUB mailbox (0x9ff0 = PC, read twice to see if it advances; 0x5028/9,
+	 * 0x0100/1 status; 0x4882/6 USRT). The DSP answers via a D2A REG_READ_READY
+	 * MCUB event, which our IRQ logs as "flag 0x0002 d0 <value>". No answer =
+	 * the DSP is hung, not just waiting.
+	 */
+	{
+		static const u16 probe[] = { 0x9ff0, 0x9ff0, 0x9ff1, 0x5028,
+					     0x5029, 0x0100, 0x0101, 0x4882,
+					     0x4886 };
+		unsigned int k;
+
+		dev_info(gnss->dev, "probing stalled DSP registers via MCUB...\n");
+		for (k = 0; k < ARRAY_SIZE(probe); k++) {
+			dev_info(gnss->dev, "  req dsp reg %#06x\n", probe[k]);
+			gps_smc(GPS_SMC_MCUB_DSP_READ_REQ, GPS_DATA_LINK_ID0,
+				probe[k], NULL);
+			msleep(20);
+		}
+	}
 
 	/*
 	 * Answer the DSP's last boot message so it starts running the RAM code.
