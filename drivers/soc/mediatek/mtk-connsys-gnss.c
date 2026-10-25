@@ -379,6 +379,10 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 		arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL,
 			      GPS_SMC_MVCD_SEND_DSP_FRAG, GPS_MVCD_DSP_L1, i,
 			      0, 0, 0, 0, &res);
+		if (i < 6 || i == frag_num - 1)
+			dev_info(gnss->dev,
+				 "GPS MVCD frag %u: 0x20 ret a0=%#lx a1=%#lx a2=%#lx\n",
+				 i, res.a0, res.a1, res.a2);
 		if (res.a1 == 1) {
 			dev_err(gnss->dev,
 				"GPS MVCD: fragment %u rejected by TF-A\n", i);
