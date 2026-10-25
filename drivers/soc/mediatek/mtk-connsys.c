@@ -1015,7 +1015,8 @@ int mtk_connsys_power_on(struct mtk_connsys *cs, enum mtk_connsys_radio radio)
 	if (cs->radios & BIT(radio))
 		goto out;
 
-	if (radio != MTK_CONNSYS_WIFI && radio != MTK_CONNSYS_BT) {
+	if (radio != MTK_CONNSYS_WIFI && radio != MTK_CONNSYS_BT &&
+	    radio != MTK_CONNSYS_GPS) {
 		ret = -EOPNOTSUPP;
 		goto out;
 	}

@@ -72,6 +72,18 @@ config MTK_CONNSYS
 	  like the MT6878. This is required by the WiFi driver of these
 	  SoCs.
 
+config MTK_CONNSYS_GNSS
+	tristate "MediaTek connsys GNSS (GPS) subsystem"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on HAVE_ARM_SMCCC && OF
+	depends on MTK_CONNSYS
+	help
+	  Say yes here to bring up the GPS subsystem of the MediaTek
+	  connectivity combo (connsys) on SoCs like the MT6878. The
+	  sensitive power sequencing is performed by the resident TF-A
+	  through an SMC service; this driver orchestrates it and talks
+	  to the GPS MCU. Currently a bring-up (milestone) driver.
+
 config MTK_CCCI
 	tristate "MediaTek modem control and communication (CCCI)"
 	depends on ARCH_MEDIATEK || COMPILE_TEST

@@ -28,4 +28,7 @@
 /* IOMMU related SMC call */
 #define MTK_SIP_KERNEL_IOMMU_CONTROL	MTK_SIP_SMC_CMD(0x514)
 
+/* Connectivity (connsys) subsystem control, served by the resident TF-A */
+#define MTK_SIP_KERNEL_GPS_CONTROL	MTK_SIP_SMC_CMD(0x537)
+
 #endif

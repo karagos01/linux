@@ -106,6 +106,14 @@
 		local-bd-address = [1a a6 ab c6 9e 58];
 	};
 
+	gnss: gps@18c00000 {
+		compatible = "mediatek,mt6878-gps";
+		reg = <0x0 0x18c00000 0x0 0x100000>,
+		      <0x0 0x18000000 0x0 0x100000>;
+		reg-names = "conn_gps", "conn_infra";
+		mediatek,connsys = <&consys>;
+	};
+
 	modem@10209000 {
 		compatible = "mediatek,mt6878-ccci";
 		reg = <0x0 0x10209000 0x0 0x1000>,
