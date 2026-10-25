@@ -84,6 +84,14 @@
 #define GPS_DL_RX_BUF_SIZE		(8 * 1024)
 
 /*
+ * link0 A2D (AP->DSP) TX ring base in the GPS reserved EMI. From the v051
+ * reserved_mem layout: icap(0x50000) + padding(0x1000) puts tx[0] at
+ * base + 0x51000. The AP writes the TX frame here and the DMA streams it to
+ * the DSP over the USRT.
+ */
+#define GPS_EMI_TX0_PHYS		(GPS_EMI_PHYS_BASE + 0x51000)
+
+/*
  * MVCD "DSP code download" SMCs. The GNSS DSP RAM image lives in TF-A; the AP
  * only drives the handshake. GET_DSP_BOOT_UP_INFO returns the image geometry
  * (fragment count etc.), SEND_DSP_FRAGEMENT pushes fragment N to the DSP (no
@@ -135,6 +143,28 @@ struct mtk_gnss {
 	void __iomem *conn;
 	int irq_mcub;			/* link0 MCUB mailbox IRQ (SPI 381) */
 	struct completion ramcode;	/* completed when the DSP posts RAMCODE_READY */
+};
+
+/*
+ * The GNSS DSP RAM-code download handshake: the DSP will not act on the MVCD
+ * fragments until userspace (mnld/libmnl) has sent it an "image descriptor"
+ * control frame over the A2D data link just before the fragment loop. The
+ * frame is aaf0-framed (aaf0 ... aa0f) and carries the L1 image geometry -
+ * code_size 0xa609, start 0x2400, exec 0x6404, cipher 0x3bf2, frag_num 106,
+ * all of which TF-A reports as stable across boots - so it can be replayed
+ * verbatim. Captured from stock UT (mnld write() to /dev/gpsdl0, 116 bytes).
+ */
+static const u8 gps_l1_init_frame[] = {
+	0xaa, 0xf0, 0x6e, 0x00, 0x08, 0xfe, 0x1a, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0xc3, 0x01, 0xa5, 0x02, 0x00, 0x00, 0x00, 0x00, 0x09, 0xa6, 0x00, 0x24,
+	0x04, 0x64, 0xf2, 0x3b, 0x6a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00,
+	0x9d, 0x00, 0x6f, 0x3c, 0x88, 0x89, 0x00, 0x00, 0x02, 0x00, 0xdc, 0x00,
+	0xc1, 0x00, 0x28, 0x00, 0x5c, 0x4a, 0x1e, 0x00, 0xc5, 0x37, 0x28, 0x00,
+	0x5c, 0x4a, 0x8f, 0x65, 0x07, 0x00, 0x01, 0x00, 0x28, 0x00, 0xff, 0x00,
+	0x80, 0x00, 0x47, 0x00, 0x64, 0x00, 0x50, 0x00, 0xd8, 0x00, 0x50, 0x00,
+	0xbb, 0x00, 0x03, 0x00, 0x3c, 0x00, 0x6f, 0x00, 0x89, 0x00, 0x88, 0x00,
+	0x02, 0x00, 0xfb, 0x00, 0x00, 0x00, 0x78, 0x68, 0x00, 0x0a, 0x00, 0x00,
+	0x01, 0x00, 0x4e, 0x4f, 0x43, 0x16, 0xaa, 0x0f,
 };
 
 static bool probe_power;
@@ -216,19 +246,47 @@ static void gps_dma_stop(unsigned long channel)
 }
 
 /*
- * Service the data-link DMA channels the way the stock gps_dma IRQ thread does
- * after each fragment: read+ack the A2D (ch0) interrupt and stop it, then read
- * the D2A/other channels' interrupt status. This keeps the DMA engine's done
- * flags acknowledged so the next transfer can arm.
+ * Send the captured L1 image-descriptor control frame to the DSP over the A2D
+ * (AP->DSP) data link, exactly as mnld does just before the fragment loop.
+ * Place the frame bytes in the TX ring EMI, then arm the A2D DMA to stream
+ * them (sub_buf_offset 0, bus_id A2D, transfer length = frame size in words)
+ * and wait for it to drain. Returns 0 on success.
  */
-static void gps_dma_service_irq(void)
+static int gps_a2d_send_init_frame(struct mtk_gnss *gnss)
 {
-	int ch;
+	struct arm_smccc_res res;
+	void __iomem *tx;
+	unsigned long words = sizeof(gps_l1_init_frame) / 4;	/* 116/4 = 29 */
+	int i;
 
-	gps_smc(GPS_SMC_GET_DMA_INT_STATUS, GPS_DL_DMA_LINK0_A2D, 0, NULL);
+	tx = ioremap(GPS_EMI_TX0_PHYS, GPS_DL_RX_BUF_SIZE);
+	if (!tx) {
+		dev_err(gnss->dev, "GPS: cannot map TX ring\n");
+		return -ENOMEM;
+	}
+	memcpy_toio(tx, gps_l1_init_frame, sizeof(gps_l1_init_frame));
+	wmb();	/* frame visible in EMI before the DMA reads it */
+
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
+	arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL, GPS_SMC_SET_DMA_START,
+		      GPS_DL_DMA_LINK0_A2D, 0 /* sub_buf_offset */,
+		      GPS_DL_DMA_BUS_ID0_A2D, GPS_DL_RX_WORDS /* len_to_wrap */,
+		      words /* transfer_max_len */, 0 /* is_1byte */, &res);
+
+	/* wait for the A2D transfer to complete (int status a0 != 0) */
+	for (i = 0; i < 100; i++) {
+		if (gps_smc(GPS_SMC_GET_DMA_INT_STATUS, GPS_DL_DMA_LINK0_A2D,
+			    0, NULL))
+			break;
+		udelay(50);
+	}
 	gps_dma_stop(GPS_DL_DMA_LINK0_A2D);
-	for (ch = 1; ch < 4; ch++)
-		gps_smc(GPS_SMC_GET_DMA_INT_STATUS, ch, 0, NULL);
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
+	iounmap(tx);
+
+	dev_info(gnss->dev, "GPS: sent %zu-byte L1 init frame (a2d done after %d polls)\n",
+		 sizeof(gps_l1_init_frame), i);
+	return 0;
 }
 
 /*
@@ -266,37 +324,16 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 	/* make sure the USRT RX path starts from empty */
 	gps_smc(GPS_SMC_USRT_POLL_RX_EMPTY, GPS_DATA_LINK_ID0, 0, NULL);
 
+	/* the DSP needs the image-descriptor frame before it accepts frags */
+	gps_a2d_send_init_frame(gnss);
+
+	/* arm the D2A receive DMA once and leave it running for the whole
+	 * download so the DSP's per-fragment records stream in without gaps
+	 */
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
+	gps_dma_d2a_arm(0);
+
 	for (i = 0; i < frag_num; i++) {
-		unsigned long free_words, left;
-
-		/* --- drain whatever the previous fragment produced --- */
-		gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
-		{
-			unsigned long arm_ret = gps_dma_d2a_arm(woff);
-			unsigned long ist;
-
-			udelay(200);	/* let any pending USRT RX drain in */
-			left = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
-			ist = gps_smc(GPS_SMC_GET_DMA_INT_STATUS,
-				      GPS_DL_DMA_LINK0_D2A, 0, NULL);
-			if (i < 4 || i == frag_num - 1)
-				dev_info(gnss->dev,
-					 "GPS MVCD dbg frag %u: arm_ret %#lx woff %#lx left %lu intsta %#lx\n",
-					 i, arm_ret, woff, left, ist);
-		}
-		gps_dma_stop(GPS_DL_DMA_LINK0_D2A);
-		gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
-		gps_smc(GPS_SMC_USRT_CLEAR_NODATA, GPS_DATA_LINK_ID0, 0, NULL);
-
-		/* advance the write offset by the bytes received this round */
-		free_words = GPS_DL_RX_WORDS - (woff / 4);
-		if (left < free_words) {
-			woff += (free_words - left) * 4;
-			if (woff >= GPS_DL_RX_BUF_SIZE)
-				woff -= GPS_DL_RX_BUF_SIZE;
-		}
-
-		/* --- push the next fragment, then ack the DMA IRQ --- */
 		arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL,
 			      GPS_SMC_MVCD_SEND_DSP_FRAG, GPS_MVCD_DSP_L1, i,
 			      0, 0, 0, 0, &res);
@@ -305,13 +342,42 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 				"GPS MVCD: fragment %u rejected by TF-A\n", i);
 			return;
 		}
-		gps_dma_service_irq();
+		gps_smc(GPS_SMC_USRT_CLEAR_NODATA, GPS_DATA_LINK_ID0, 0, NULL);
 
+		if (i < 3 || i == frag_num - 1) {
+			unsigned long left =
+				gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
+			dev_info(gnss->dev,
+				 "GPS MVCD dbg frag %u: d2a left %lu (rx %lu B)\n",
+				 i, left, (GPS_DL_RX_WORDS - left) * 4);
+		}
 		/* pace to roughly match the stock ~1ms/fragment cadence */
 		usleep_range(700, 1100);
 	}
-	dev_info(gnss->dev, "GPS MVCD: sent %u fragment(s), d2a woff %#lx\n",
+
+	{
+		unsigned long left = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
+
+		woff = (GPS_DL_RX_WORDS - left) * 4;
+	}
+	gps_dma_stop(GPS_DL_DMA_LINK0_D2A);
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
+	dev_info(gnss->dev, "GPS MVCD: sent %u fragment(s), d2a rx %#lx B\n",
 		 frag_num, woff);
+
+	/* dump what the DSP actually wrote into the D2A RX ring */
+	{
+		void __iomem *rx = ioremap(GPS_EMI_PHYS_BASE + 0x57000, 64);
+
+		if (rx) {
+			u8 buf[48];
+
+			memcpy_fromio(buf, rx, sizeof(buf));
+			print_hex_dump(KERN_INFO, "gps d2a rx: ", DUMP_PREFIX_OFFSET,
+				       16, 1, buf, sizeof(buf), false);
+			iounmap(rx);
+		}
+	}
 }
 
 /*
