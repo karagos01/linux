@@ -1453,7 +1453,6 @@ static irqreturn_t ccci_ccif_irq(int irq, void *data)
 	int i;
 
 	writel(bits, ccci->ap_ccif + CCIF_ACK);
-	trace_printk("ccif irq %#x\n", ch);
 	for_each_set_bit(i, &bits, CCIF_NUM_QUEUES)
 		set_bit(i, &ccci->pending_ch);
 	queue_work(system_highpri_wq, &ccci->rx_work);
