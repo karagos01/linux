@@ -6,7 +6,10 @@
 /dts-v1/;
 #include "mt6878.dtsi"
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/iio/adc/mediatek,mt6375_adc.h>
 #include <dt-bindings/input/input.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/mfd/mt6375.h>
 #include <dt-bindings/pinctrl/mt65xx.h>
 #include <dt-bindings/power/mediatek,mt6878-power.h>
 #include <dt-bindings/spmi/spmi.h>
@@ -621,4 +624,62 @@
 
 &usbphy {
 	status = "okay";
+};
+
+&i2c5 {
+	status = "okay";
+
+	pmic@34 {
+		compatible = "mediatek,mt6375";
+		reg = <0x34>;
+		interrupts-extended = <&pio 15 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+
+		mt6375_adc: adc {
+			compatible = "mediatek,mt6375-adc";
+			#io-channel-cells = <1>;
+		};
+
+		charger {
+			compatible = "mediatek,mt6375-charger";
+			interrupts = <MT6375_FL_PWR_RDY>,
+				     <MT6375_FL_DETACH>,
+				     <MT6375_FL_BC12_DN>;
+			interrupt-names = "attach", "detach", "bc12_done";
+		};
+
+		gauge {
+			compatible = "mediatek,mt6375-gauge";
+			io-channels = <&mt6375_adc MT6375_ADC_VBAT>,
+				      <&mt6375_adc MT6375_ADC_IBAT>;
+			io-channel-names = "vbat", "ibat";
+			monitored-battery = <&battery>;
+		};
+	};
+};
+
+/ {
+	/*
+	 * Open-circuit-voltage / capacity table derived from the stock
+	 * battery0-profile-t1 (25 degC) OCV curve; charge-full-design taken
+	 * from the same profile's Qmax.
+	 */
+	battery: battery {
+		compatible = "simple-battery";
+		device-chemistry = "lithium-ion";
+		charge-full-design-microamp-hours = <3022000>;
+		voltage-max-design-microvolt = <4322000>;
+		voltage-min-design-microvolt = <3400000>;
+		factory-internal-resistance-micro-ohms = <120000>;
+		ocv-capacity-celsius = <25>;
+		ocv-capacity-table-0 = <4322000 100>, <4259456 95>,
+			<4201235 90>, <4147838 85>, <4095360 80>,
+			<4051790 75>, <3996275 70>, <3963626 65>,
+			<3914300 60>, <3867020 55>, <3840800 50>,
+			<3819158 45>, <3801540 40>, <3789828 35>,
+			<3774667 30>, <3755678 25>, <3738580 20>,
+			<3710409 15>, <3691199 10>, <3619774 5>,
+			<3400000 0>;
+	};
 };
