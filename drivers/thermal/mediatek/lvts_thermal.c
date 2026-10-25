@@ -96,6 +96,8 @@
 #define LVTS_COEFF_B_MT7988			204650
 #define LVTS_COEFF_A_MT8196			391460
 #define LVTS_COEFF_B_MT8196			-391460
+#define LVTS_COEFF_A_MT6878			219960
+#define LVTS_COEFF_B_MT6878			-219960
 
 #define LVTS_MSR_OFFSET_MT8196		-984
 
@@ -336,6 +338,19 @@ static u32 lvts_temp_to_raw_mt8196(int temperature, int temp_factor)
 	raw_temp = temperature - golden_temp_offset;
 
 	return div_s64((s64)temp_factor << 14, raw_temp);
+}
+
+static int lvts_raw_to_temp_mt6878(u32 raw_temp, int temp_factor)
+{
+	int temperature;
+
+	if (!raw_temp)
+		return golden_temp_offset;
+
+	temperature = div_s64((s64)temp_factor << 14, raw_temp);
+	temperature += golden_temp_offset;
+
+	return temperature;
 }
 
 static int lvts_get_temp(struct thermal_zone_device *tz, int *temp)
@@ -914,6 +929,19 @@ static int lvts_calibration_read(struct device *dev, struct lvts_domain *lvts_td
 		kfree(efuse);
 	}
 
+	/*
+	 * Some platforms (e.g. MT6878) cannot expose the eFuse calibration to
+	 * the kernel. Fall back to a zeroed buffer so the golden-temp check
+	 * sees invalid data and every sensor uses the per-SoC default
+	 * calibration instead of faulting on a missing cell.
+	 */
+	if (!lvts_td->calib_len) {
+		lvts_td->calib = devm_kzalloc(dev, 256, GFP_KERNEL);
+		if (!lvts_td->calib)
+			return -ENOMEM;
+		lvts_td->calib_len = 256;
+	}
+
 	return 0;
 }
 
@@ -1458,7 +1486,11 @@ static int lvts_probe(struct platform_device *pdev)
 	if (!lvts_data)
 		return -ENODEV;
 
-	lvts_td->clk = devm_clk_get_enabled(dev, NULL);
+	/*
+	 * Some SoCs (e.g. MT6878) keep the thermal clock ungated and have no
+	 * dedicated gate, so the clock is optional.
+	 */
+	lvts_td->clk = devm_clk_get_optional_enabled(dev, NULL);
 	if (IS_ERR(lvts_td->clk))
 		return dev_err_probe(dev, PTR_ERR(lvts_td->clk), "Failed to retrieve clock\n");
 
@@ -1470,7 +1502,8 @@ static int lvts_probe(struct platform_device *pdev)
 	if (IS_ERR(lvts_td->base))
 		return dev_err_probe(dev, PTR_ERR(lvts_td->base), "Failed to map io resource\n");
 
-	lvts_td->reset = devm_reset_control_get_by_index(dev, 0);
+	/* Likewise the reset line is optional: MT6878 does not expose one. */
+	lvts_td->reset = devm_reset_control_get_optional_exclusive(dev, NULL);
 	if (IS_ERR(lvts_td->reset))
 		return dev_err_probe(dev, PTR_ERR(lvts_td->reset), "Failed to get reset control\n");
 
@@ -2015,6 +2048,11 @@ static const struct lvts_platform_ops lvts_platform_ops_mt8196 = {
 	.lvts_temp_to_raw = lvts_temp_to_raw_mt8196,
 };
 
+static const struct lvts_platform_ops lvts_platform_ops_mt6878 = {
+	.lvts_raw_to_temp = lvts_raw_to_temp_mt6878,
+	.lvts_temp_to_raw = lvts_temp_to_raw_mt8196,
+};
+
 static const struct lvts_data mt7987_lvts_ap_data = {
 	.lvts_ctrl	= mt7987_lvts_ap_data_ctrl,
 	.num_lvts_ctrl	= ARRAY_SIZE(mt7987_lvts_ap_data_ctrl),
@@ -2171,6 +2209,165 @@ static const struct lvts_data mt8196_lvts_ap_data = {
 	.ops = &lvts_platform_ops_mt8196,
 };
 
+static const struct lvts_ctrl_data mt6878_lvts_mcu_data_ctrl[] = {
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6878_MCU_LVTS1_0,
+			  .cal_offsets = { 6, 7 } },
+			{ .dt_id = MT6878_MCU_LVTS1_1,
+			  .cal_offsets = { 4, 5 } },
+			{ .dt_id = MT6878_MCU_LVTS1_2,
+			  .cal_offsets = { 10, 11 } },
+			{ .dt_id = MT6878_MCU_LVTS1_3,
+			  .cal_offsets = { 8, 9 } },
+		},
+		VALID_SENSOR_MAP(1, 1, 1, 1),
+		.offset = 0x0,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6878_MCU_LVTS2_0,
+			  .cal_offsets = { 14, 15 } },
+			{ .dt_id = MT6878_MCU_LVTS2_1,
+			  .cal_offsets = { 12, 13 } },
+			{ .dt_id = MT6878_MCU_LVTS2_2,
+			  .cal_offsets = { 18, 19 } },
+			{ .dt_id = MT6878_MCU_LVTS2_3,
+			  .cal_offsets = { 16, 17 } },
+		},
+		VALID_SENSOR_MAP(1, 1, 1, 1),
+		.offset = 0x100,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6878_MCU_LVTS3_0,
+			  .cal_offsets = { 22, 23 } },
+			{ .dt_id = MT6878_MCU_LVTS3_1,
+			  .cal_offsets = { 20, 21 } },
+			{ .dt_id = MT6878_MCU_LVTS3_2,
+			  .cal_offsets = { 26, 27 } },
+			{ .dt_id = MT6878_MCU_LVTS3_3,
+			  .cal_offsets = { 24, 25 } },
+		},
+		VALID_SENSOR_MAP(1, 1, 1, 1),
+		.offset = 0x200,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6878_MCU_LVTS4_0,
+			  .cal_offsets = { 30, 31 } },
+			{ .dt_id = MT6878_MCU_LVTS4_1,
+			  .cal_offsets = { 28, 29 } },
+		},
+		VALID_SENSOR_MAP(1, 1, 0, 0),
+		.offset = 0x300,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+};
+
+static const struct lvts_ctrl_data mt6878_lvts_ap_data_ctrl[] = {
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6878_AP_LVTS5_0,
+			  .cal_offsets = { 34, 35 } },
+			{ .dt_id = MT6878_AP_LVTS5_1,
+			  .cal_offsets = { 32, 33 } },
+			{ .dt_id = MT6878_AP_LVTS5_2,
+			  .cal_offsets = { 38, 39 } },
+		},
+		VALID_SENSOR_MAP(1, 1, 1, 0),
+		.offset = 0x0,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6878_AP_LVTS6_0,
+			  .cal_offsets = { 36, 37 } },
+			{ .dt_id = MT6878_AP_LVTS6_1,
+			  .cal_offsets = { 42, 43 } },
+		},
+		VALID_SENSOR_MAP(1, 1, 0, 0),
+		.offset = 0x100,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6878_AP_LVTS7_0,
+			  .cal_offsets = { 46, 47 } },
+			{ .dt_id = MT6878_AP_LVTS7_1,
+			  .cal_offsets = { 44, 45 } },
+			{ .dt_id = MT6878_AP_LVTS7_2,
+			  .cal_offsets = { 50, 51 } },
+			{ .dt_id = MT6878_AP_LVTS7_3,
+			  .cal_offsets = { 48, 49 } },
+		},
+		VALID_SENSOR_MAP(1, 1, 1, 1),
+		.offset = 0x200,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+};
+
+static const struct lvts_ctrl_data mt6878_lvts_gpu_data_ctrl[] = {
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6878_GPU_LVTS8_0,
+			  .cal_offsets = { 40, 41 } },
+		},
+		VALID_SENSOR_MAP(1, 0, 0, 0),
+		.offset = 0x0,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+};
+
+
+static const struct lvts_data mt6878_lvts_mcu_data = {
+	.lvts_ctrl	= mt6878_lvts_mcu_data_ctrl,
+	.conn_cmd	= default_conn_cmds,
+	.init_cmd	= default_init_cmds,
+	.num_lvts_ctrl	= ARRAY_SIZE(mt6878_lvts_mcu_data_ctrl),
+	.num_conn_cmd	= ARRAY_SIZE(default_conn_cmds),
+	.num_init_cmd	= ARRAY_SIZE(default_init_cmds),
+	.temp_factor	= LVTS_COEFF_A_MT6878,
+	.temp_offset	= LVTS_COEFF_B_MT6878,
+	.gt_calib_bit_offset = 0,
+	.def_calibration = 14437,
+	.num_cal_offsets = LVTS_NUM_CAL_OFFSETS_MT8196,
+	.ops = &lvts_platform_ops_mt6878,
+};
+
+static const struct lvts_data mt6878_lvts_ap_data = {
+	.lvts_ctrl	= mt6878_lvts_ap_data_ctrl,
+	.conn_cmd	= default_conn_cmds,
+	.init_cmd	= default_init_cmds,
+	.num_lvts_ctrl	= ARRAY_SIZE(mt6878_lvts_ap_data_ctrl),
+	.num_conn_cmd	= ARRAY_SIZE(default_conn_cmds),
+	.num_init_cmd	= ARRAY_SIZE(default_init_cmds),
+	.temp_factor	= LVTS_COEFF_A_MT6878,
+	.temp_offset	= LVTS_COEFF_B_MT6878,
+	.gt_calib_bit_offset = 0,
+	.def_calibration = 14437,
+	.num_cal_offsets = LVTS_NUM_CAL_OFFSETS_MT8196,
+	.ops = &lvts_platform_ops_mt6878,
+};
+
+static const struct lvts_data mt6878_lvts_gpu_data = {
+	.lvts_ctrl	= mt6878_lvts_gpu_data_ctrl,
+	.conn_cmd	= default_conn_cmds,
+	.init_cmd	= default_init_cmds,
+	.num_lvts_ctrl	= ARRAY_SIZE(mt6878_lvts_gpu_data_ctrl),
+	.num_conn_cmd	= ARRAY_SIZE(default_conn_cmds),
+	.num_init_cmd	= ARRAY_SIZE(default_init_cmds),
+	.temp_factor	= LVTS_COEFF_A_MT6878,
+	.temp_offset	= LVTS_COEFF_B_MT6878,
+	.gt_calib_bit_offset = 0,
+	.def_calibration = 14437,
+	.num_cal_offsets = LVTS_NUM_CAL_OFFSETS_MT8196,
+	.ops = &lvts_platform_ops_mt6878,
+};
+
 static const struct of_device_id lvts_of_match[] = {
 	{ .compatible = "mediatek,mt7987-lvts-ap", .data = &mt7987_lvts_ap_data },
 	{ .compatible = "mediatek,mt7988-lvts-ap", .data = &mt7988_lvts_ap_data },
@@ -2183,6 +2380,9 @@ static const struct of_device_id lvts_of_match[] = {
 	{ .compatible = "mediatek,mt8195-lvts-ap", .data = &mt8195_lvts_ap_data },
 	{ .compatible = "mediatek,mt8196-lvts-mcu", .data = &mt8196_lvts_mcu_data },
 	{ .compatible = "mediatek,mt8196-lvts-ap", .data = &mt8196_lvts_ap_data },
+	{ .compatible = "mediatek,mt6878-lvts-mcu", .data = &mt6878_lvts_mcu_data },
+	{ .compatible = "mediatek,mt6878-lvts-ap", .data = &mt6878_lvts_ap_data },
+	{ .compatible = "mediatek,mt6878-lvts-gpu", .data = &mt6878_lvts_gpu_data },
 	{},
 };
 MODULE_DEVICE_TABLE(of, lvts_of_match);
