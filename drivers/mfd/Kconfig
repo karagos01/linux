@@ -1135,6 +1135,19 @@ config MFD_MT6370
 	  voltage supply, one general purpose LDO, and the USB Type-C & PD
 	  controller complies with the latest USB Type-C and PD standards.
 
+config MFD_MT6375
+	tristate "MediaTek MT6375 SubPMIC"
+	select MFD_CORE
+	select REGMAP_I2C
+	select REGMAP_IRQ
+	depends on I2C
+	help
+	  Say Y here to enable MT6375 SubPMIC functional support.
+	  It is a companion PMIC bundling a single-cell switching battery
+	  charger with BC1.2 detection, an auxiliary ADC, a coulomb-counter
+	  fuel gauge and a USB Type-C & PD port controller, all reached over
+	  a banked I2C register map.
+
 	  This driver can also be built as a module. If so, the module
 	  will be called "mt6370".
 
