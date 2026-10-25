@@ -41,6 +41,7 @@
 #define GPS_SMC_COMMON_ON_PART2		0x3	/* EMI remap: x2 = 20msb of 36-bit phys */
 #define GPS_SMC_COMMON_ON_PART3		0x4
 #define GPS_SMC_COMMON_ON_PART4		0x5
+#define GPS_SMC_SET_ADIE_CHIPID		0x4a	/* x2 = A-die chip id (0x6637) */
 #define GPS_SMC_COMMON_ON_FAIL_HANDLER	0x8
 #define GPS_SMC_COMMON_ON_INNER_FAIL	0x9
 #define GPS_SMC_COMMON_ON_PART5		0xa
@@ -229,6 +230,13 @@ static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
 
 	/* part3 */
 	gps_smc(GPS_SMC_COMMON_ON_PART3, 1, 0, NULL);
+
+	/*
+	 * Tell TF-A the A-die chip id (MT6637). The stock data-link driver built
+	 * with the conninfra driver does this between part3 and part4; TF-A needs
+	 * it to finish the A-die clock setup the GPS DSP runs on.
+	 */
+	gps_smc(GPS_SMC_SET_ADIE_CHIPID, 0x6637, 0, NULL);
 
 	/* emi_usage_init: software bookkeeping only (EMI claimed at routing) */
 
