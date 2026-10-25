@@ -1194,6 +1194,18 @@ config MEDIATEK_MT6370_ADC
 	help
 	  Say yes here to enable MediaTek MT6370 ADC support.
 
+config MEDIATEK_MT6375_ADC
+	tristate "MediaTek MT6375 ADC devices"
+	depends on MFD_MT6375
+	help
+	  Say yes here to enable the MT6375 SubPMIC ADC support. It reports the
+	  battery, system and charger input voltages and currents, the junction
+	  temperature and the USB D+/D- and Type-C CC/SBU lines through the IIO
+	  framework.
+
+	  This driver can also be built as a module. If so, the module will be
+	  called "mt6375-adc".
+
 	  This ADC driver provides 9 channels for system monitoring (charger
 	  current, voltage, and temperature).
 
