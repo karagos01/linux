@@ -38,10 +38,28 @@
 /* op ids of the MTK_SIP_KERNEL_GPS_CONTROL service (enum conn_smc_opid) */
 #define GPS_SMC_COMMON_ON_SET_FLAG	0x0
 #define GPS_SMC_COMMON_ON_PART1		0x2
+#define GPS_SMC_COMMON_ON_PART2		0x3	/* EMI remap: x2 = 20msb of 36-bit phys */
+#define GPS_SMC_COMMON_ON_PART3		0x4
+#define GPS_SMC_COMMON_ON_PART4		0x5
 #define GPS_SMC_COMMON_ON_FAIL_HANDLER	0x8
+#define GPS_SMC_COMMON_ON_INNER_FAIL	0x9
+#define GPS_SMC_COMMON_ON_PART5		0xa
+#define GPS_SMC_COMMON_OFF_PART1	0xf
+#define GPS_SMC_COMMON_OFF_PART2	0x10
+#define GPS_SMC_SW_REQUEST_EMI_USAGE	0x11
+#define GPS_SMC_COMMON_OFF_PART3	0x12
 
 /* magic the TF-A expects in x2 of the SET_FLAG call */
 #define GPS_SMC_SET_FLAG_MAGIC		0xdb9db9
+
+/*
+ * GPS reserved EMI, carved by the (stock) bootloader at this fixed base; the
+ * secure common_on programs the conn_infra EMI remap with its top 20 bits
+ * (of the 36-bit physical address, aligned to a 64KB boundary). Matches the
+ * stock "emi-addr" of the gps@18c00000 node.
+ */
+#define GPS_EMI_PHYS_BASE		0x88a00000ULL
+#define GPS_EMI_REMAP_BASE_MASK		0xfffff0000ULL
 
 /* conn_infra registers, offsets into the "conn_infra" window (0x18000000) */
 #define CONN_INFRA_WAKEUP_GPS		0x601ac	/* host CSR, BIT0 = force on */
@@ -114,10 +132,20 @@ static void mtk_gnss_conninfra_release(struct mtk_gnss *gnss)
 	       gnss->conn + CONN_INFRA_WAKEUP_GPS);
 }
 
+/*
+ * Run the full GPS "common on" secure sequence (TF-A does the sensitive work;
+ * we orchestrate the SMCs in the exact order the stock data-link driver uses
+ * for this SoC configuration: CONNAC2 + TFA, no in-kernel conninfra driver,
+ * so the A-die chip-id and A-die top-clock steps are all handled inside TF-A
+ * and drop out of the host sequence). On success the whole GPS power domain
+ * is up; we then tear it back down with "common off" so the probe is a clean,
+ * self-contained bring-up test.
+ */
 static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
 {
 	struct device *dev = gnss->dev;
-	unsigned long ret, ver = 0;
+	unsigned long ver = 0;
+	u32 emi_20msb;
 	int err;
 
 	/* Shared supplies and A-die (refcounted against WiFi/BT). */
@@ -134,26 +162,66 @@ static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
 	/* tell TF-A the AP requests the GPS common domain on */
 	gps_smc(GPS_SMC_COMMON_ON_SET_FLAG, GPS_SMC_SET_FLAG_MAGIC, 1, NULL);
 
-	/* let the 32k clock settle, as the downstream flow does */
+	/* let the 3T 32k clock settle, as the downstream flow does */
 	udelay(200);
 
-	/* part1 polls conn_infra and returns its version in a1 */
-	ret = gps_smc(GPS_SMC_COMMON_ON_PART1, 0, 0, &ver);
-	if (ret == 0)
-		dev_info(dev,
-			 "GPS secure power path alive: conn_infra ver %#010lx\n",
-			 ver);
-	else
-		dev_err(dev, "GPS common_on part1 failed (smc ret %#lx)\n", ret);
+	/* part1: TF-A polls conn_infra and returns its version in a1 */
+	if ((int)gps_smc(GPS_SMC_COMMON_ON_PART1, 0, 0, &ver) == -1) {
+		dev_err(dev, "GPS common_on part1 failed\n");
+		goto err_flag;
+	}
+	dev_info(dev, "GPS common_on part1 ok: conn_infra ver %#010lx\n", ver);
 
-	/* unwind whatever part1 powered and release the AP flag and the wake */
-	gps_smc(GPS_SMC_COMMON_ON_FAIL_HANDLER, 0, 0, NULL);
+	/* peri remap: no-op on this SoC (conn2ap GPS peri not remapped) */
+
+	/* EMI remap (part2): program the conn_infra remap with the GPS
+	 * reserved-memory base (top 20 bits of the 36-bit, 64KB-aligned addr).
+	 */
+	emi_20msb = (u32)((GPS_EMI_PHYS_BASE & GPS_EMI_REMAP_BASE_MASK) >> 16);
+	gps_smc(GPS_SMC_COMMON_ON_PART2, emi_20msb, 0, NULL);
+
+	/* part3 */
+	gps_smc(GPS_SMC_COMMON_ON_PART3, 1, 0, NULL);
+
+	/* emi_usage_init: software bookkeeping only (EMI claimed at routing) */
+
+	/* part4 */
+	if ((int)gps_smc(GPS_SMC_COMMON_ON_PART4, 0, 0, NULL) == -1) {
+		dev_err(dev, "GPS common_on part4 failed\n");
+		gps_smc(GPS_SMC_COMMON_ON_INNER_FAIL, 0, 0, NULL);
+		goto err_flag;
+	}
+
+	/* bus_debug_flag: no-op on this SoC */
+
+	/* part5 */
+	if ((int)gps_smc(GPS_SMC_COMMON_ON_PART5, 0, 0, NULL) == -1) {
+		dev_err(dev, "GPS common_on part5 failed\n");
+		gps_smc(GPS_SMC_COMMON_ON_FAIL_HANDLER, 0, 0, NULL);
+		goto err_flag;
+	}
+
+	dev_info(dev,
+		 "GPS common_on COMPLETE: full secure power domain up (ver %#010lx)\n",
+		 ver);
+
+	/* --- common off: tear the domain back down --- */
+	gps_smc(GPS_SMC_COMMON_OFF_PART1, 0, 0, NULL);
+	if (gps_smc(GPS_SMC_COMMON_OFF_PART2, 0, 0, NULL) != 0)
+		dev_warn(dev, "GPS common_off part2 (sleep prot) not clean\n");
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);	/* release EMI */
+	gps_smc(GPS_SMC_COMMON_OFF_PART3, 0, 0, NULL);
+
 	gps_smc(GPS_SMC_COMMON_ON_SET_FLAG, GPS_SMC_SET_FLAG_MAGIC, 0, NULL);
 	mtk_gnss_conninfra_release(gnss);
-
 	mtk_connsys_power_off(gnss->cs, MTK_CONNSYS_GPS);
+	return 0;
 
-	return ret == 0 ? 0 : -EIO;
+err_flag:
+	gps_smc(GPS_SMC_COMMON_ON_SET_FLAG, GPS_SMC_SET_FLAG_MAGIC, 0, NULL);
+	mtk_gnss_conninfra_release(gnss);
+	mtk_connsys_power_off(gnss->cs, MTK_CONNSYS_GPS);
+	return -EIO;
 }
 
 static int mtk_gnss_probe(struct platform_device *pdev)
