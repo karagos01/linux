@@ -172,6 +172,7 @@ struct mtk_gnss {
 	struct mutex io_lock;		/* serialises the char-dev transport */
 	bool link_open;			/* link0 powered up and data path live */
 	bool opening;			/* open() is bringing the link up */
+	wait_queue_head_t rx_wq;	/* blocking read() waits here for D2A data */
 	void __iomem *tx_ring;		/* A2D TX ring (GPS_EMI_TX0_PHYS) */
 	void __iomem *rx_ring;		/* D2A RX ring (GPS_EMI base + 0x57000) */
 	unsigned long rx_roff;		/* bytes already returned to userspace */
@@ -381,6 +382,7 @@ static void gps_d2a_drain_locked(struct mtk_gnss *gnss)
 		gnss->dl_woff += (0x80 - left) * 4;
 		if (gnss->dl_woff >= GPS_DL_RX_BUF_SIZE)
 			gnss->dl_woff -= GPS_DL_RX_BUF_SIZE;
+		wake_up_interruptible(&gnss->rx_wq);	/* fresh D2A data for read() */
 	}
 	gnss->d2a_armed = false;
 }
@@ -781,16 +783,33 @@ static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
 
 /* ---- /dev/gpsdl0 data-link char device (link0) ---- */
 
+/*
+ * The /dev/gpsdl0 ioctl ABI is the stock MediaTek gpsdl one so the unmodified
+ * mnld/libmnl userspace can drive this device: the ioctl magic is 0 and the
+ * command is the bare request number. Only the handful libmnl actually relies
+ * on are implemented (the rest return -EFAULT, exactly as the stock driver
+ * does for this SoC build, which mnld tolerates).
+ */
+#define GPSDL_IOC_GPS_IC_HW_VERSION		7
+#define GPSDL_IOC_GPS_IC_FW_VERSION		8
+#define GPSDL_IOC_D1_EFUSE_GET			9
+#define GPSDL_IOC_RTC_FLAG			10
+#define GPSDL_IOC_CO_CLOCK_FLAG			11
+#define GPSDL_IOC_QUERY_STATUS			13
+#define GPSDL_IOC_GET_GPS_LNA_PIN		16
+#define GPSDL_IOC_GPS_GET_MD_STATUS		21
+#define GPSDL_IOC_GPS_GET_DSP_BOOTUP_INFO	23
+#define GPSDL_IOC_GPS_DSP_MVCD_FRAGEMENT_NO	25
+#define GPSDL_IOC_GET_PLATFORM_CLOCK_FREQ	30
+
+/* struct copied out by GET_DSP_BOOTUP_INFO — stock field order (hw_api.h) */
 struct gps_bootup_info {
-	__u32 frag_num;
 	__u32 code_size;
 	__u32 start_addr;
 	__u32 exec_addr;
 	__u32 cipher_key;
+	__u32 frag_num;
 };
-
-#define GPSDL_IOC_GET_BOOTUP	_IOR('g', 1, struct gps_bootup_info)
-#define GPSDL_IOC_SEND_FRAG	_IO('g', 2)	/* arg = fragment index */
 
 static struct mtk_gnss *gps_from_file(struct file *filp)
 {
@@ -830,50 +849,36 @@ static int gps_cdev_open(struct inode *inode, struct file *filp)
 	if (gnss->irq_mcub >= 0)
 		enable_irq(gnss->irq_mcub);
 
-	gps_dsp_on(gnss);		/* also claims EMI */
+	gps_dsp_on(gnss);		/* DSP posts RESET_DONE over MCUB */
 
-	/* Download the DSP RAM image and bring the GNSS firmware up to
-	 * RAMCODE_READY (same path the probe self-test uses). This enables the
-	 * reactive D2A IRQs (data/nodata/dma); we LEAVE them enabled after
-	 * RAMCODE so the firmware's steady-state frames keep draining into the
-	 * RX ring, where read() picks them up as a pure consumer.
+	/*
+	 * Bring the link up to RESET_DONE and start the reactive D2A receive
+	 * drain, but do NOT download the RAM image here. On stock, userspace
+	 * (mnld/libmnl) drives the MVCD download itself over this char device:
+	 * ioctl GET_DSP_BOOTUP_INFO, write the 116-byte descriptor, ioctl
+	 * MVCD_FRAGEMENT_NO per fragment, write the ack frame. Our ioctl/write
+	 * handlers below replay exactly those steps against TF-A, while these
+	 * IRQs keep the per-fragment D2A records draining with hardware timing.
 	 */
-	gps_mvcd_download_l1(gnss);
-	if (!wait_for_completion_timeout(&gnss->ramcode, msecs_to_jiffies(5000))) {
-		dev_err(gnss->dev, "gpsdl0 open: no RAMCODE_READY within 5s\n");
-		if (gnss->irq_data >= 0)
-			disable_irq(gnss->irq_data);
-		if (gnss->irq_nodata >= 0)
-			disable_irq(gnss->irq_nodata);
-		if (gnss->irq_dma >= 0)
-			disable_irq(gnss->irq_dma);
-		mutex_lock(&gnss->io_lock);
-		gps_d2a_drain_locked(gnss);
-		mutex_unlock(&gnss->io_lock);
-		if (gnss->irq_mcub >= 0)
-			disable_irq(gnss->irq_mcub);
-		gps_dsp_off(gnss);
-		gps_common_off(gnss);
-		iounmap(gnss->rx_ring);
-		gnss->rx_ring = NULL;
-		err = -EIO;
-		goto fail_opening;
-	}
-
-	/* RAMCODE up. The reactive IRQs now own the D2A ring (producer pointer
-	 * dl_woff); lift the download storm-guard budget so they keep servicing
-	 * steady-state traffic, and start the read() consumer past the download
-	 * progress records already in the ring.
-	 */
+	gnss->dl_woff = 0;
+	gnss->rx_roff = 0;
+	gnss->d2a_armed = true;
 	atomic_set(&g_gps_irq_budget, INT_MAX);
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
+	gps_dma_d2a_arm(0);
+	if (gnss->irq_data >= 0)
+		enable_irq(gnss->irq_data);
+	if (gnss->irq_nodata >= 0)
+		enable_irq(gnss->irq_nodata);
+	if (gnss->irq_dma >= 0)
+		enable_irq(gnss->irq_dma);
+
 	mutex_lock(&gnss->io_lock);
-	gnss->rx_roff = gnss->dl_woff;
 	gnss->link_open = true;
 	gnss->opening = false;
 	mutex_unlock(&gnss->io_lock);
 
-	dev_info(gnss->dev,
-		 "gpsdl0 opened: GNSS firmware running (RAMCODE_READY)\n");
+	dev_info(gnss->dev, "gpsdl0 opened: link0 up (RESET_DONE), D2A draining\n");
 	return 0;
 
 fail_opening:
@@ -894,6 +899,7 @@ static int gps_cdev_release(struct inode *inode, struct file *filp)
 	}
 	gnss->link_open = false;
 	mutex_unlock(&gnss->io_lock);
+	wake_up_interruptible(&gnss->rx_wq);	/* release any blocked reader */
 
 	/* Stop the reactive IRQs before teardown. disable_irq() waits for the
 	 * threaded handler to finish, and that handler takes io_lock - so this
@@ -948,9 +954,10 @@ static ssize_t gps_cdev_write(struct file *filp, const char __user *ubuf,
 }
 
 /*
- * Return whatever D2A bytes the DSP has produced since the last read, without
- * blocking (userspace polls). Updates the DMA write offset from the left-len,
- * copies the fresh slice out of the RX ring and advances the read offset.
+ * Return D2A bytes the DSP has produced since the last read. Blocking by
+ * default (stock mnld/libmnl's reader thread does a blocking read), honouring
+ * O_NONBLOCK. The reactive D2A IRQs advance dl_woff (the producer pointer) as
+ * each burst drains and wake rx_wq; read() is the consumer tracking rx_roff.
  */
 static ssize_t gps_cdev_read(struct file *filp, char __user *ubuf,
 			     size_t count, loff_t *ppos)
@@ -961,26 +968,29 @@ static ssize_t gps_cdev_read(struct file *filp, char __user *ubuf,
 	size_t n;
 	int ret;
 
-	mutex_lock(&gnss->io_lock);
-	if (!gnss->link_open) {
+	for (;;) {
+		mutex_lock(&gnss->io_lock);
+		if (!gnss->link_open) {
+			mutex_unlock(&gnss->io_lock);
+			return -ENODEV;
+		}
+		woff = gnss->dl_woff;
+		if (woff >= gnss->rx_roff)
+			avail = woff - gnss->rx_roff;
+		else			/* ring wrapped: return up to the wrap */
+			avail = GPS_DL_RX_BUF_SIZE - gnss->rx_roff;
+		if (avail)
+			break;		/* data ready; keep io_lock held to copy */
 		mutex_unlock(&gnss->io_lock);
-		return -ENODEV;
+		if (filp->f_flags & O_NONBLOCK)
+			return 0;
+		ret = wait_event_interruptible(gnss->rx_wq,
+				gnss->dl_woff != gnss->rx_roff || !gnss->link_open);
+		if (ret)
+			return -ERESTARTSYS;
 	}
 
-	/* The reactive D2A IRQs own the DMA and advance dl_woff (the producer
-	 * pointer) as each burst completes; read() is a pure consumer tracking
-	 * rx_roff against it. (read/write serialise on io_lock with the IRQs.)
-	 */
-	woff = gnss->dl_woff;
-	if (woff >= gnss->rx_roff)
-		avail = woff - gnss->rx_roff;
-	else				/* ring wrapped: return up to the wrap */
-		avail = GPS_DL_RX_BUF_SIZE - gnss->rx_roff;
 	n = min3(avail, count, sizeof(bounce));
-	if (n == 0) {
-		mutex_unlock(&gnss->io_lock);
-		return 0;
-	}
 	/* RX ring is Device memory (ioremap): bounce via memcpy_fromio, never
 	 * copy_to_user straight from iomem (that faults on unaligned access).
 	 */
@@ -1001,48 +1011,70 @@ static long gps_cdev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 {
 	struct mtk_gnss *gnss = gps_from_file(filp);
 	struct arm_smccc_res res;
-	long ret = 0;
 
+	/* liveness check only; do NOT hold io_lock across the switch - the
+	 * fragment path must let the reactive D2A IRQ handlers (which take
+	 * io_lock) drain each record concurrently.
+	 */
 	mutex_lock(&gnss->io_lock);
 	if (!gnss->link_open) {
 		mutex_unlock(&gnss->io_lock);
 		return -ENODEV;
 	}
+	mutex_unlock(&gnss->io_lock);
 
 	switch (cmd) {
-	case GPSDL_IOC_GET_BOOTUP: {
+	case GPSDL_IOC_GPS_GET_DSP_BOOTUP_INFO: {
 		struct gps_bootup_info info;
 
 		arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL,
 			      GPS_SMC_MVCD_GET_DSP_BOOTUP, GPS_MVCD_DSP_L1,
 			      0, 0, 0, 0, 0, &res);
-		if (res.a1 == 0) {
-			ret = -EIO;
-			break;
-		}
-		info.frag_num   = (u32)(res.a1 & 0xffff);
+		if (res.a1 == 0)
+			return -EFAULT;
 		info.code_size  = (u32)((res.a1 >> 16) & 0xffff);
 		info.start_addr = (u32)((res.a1 >> 32) & 0xffff);
 		info.exec_addr  = (u32)((res.a1 >> 48) & 0xffff);
 		info.cipher_key = (u32)(res.a2 & 0xffff);
+		info.frag_num   = (u32)(res.a1 & 0xffff);
 		if (copy_to_user((void __user *)arg, &info, sizeof(info)))
-			ret = -EFAULT;
-		break;
+			return -EFAULT;
+		return 0;
 	}
-	case GPSDL_IOC_SEND_FRAG:
+	case GPSDL_IOC_GPS_DSP_MVCD_FRAGEMENT_NO: {
+		unsigned long prev = gnss->dl_woff;
+		int w;
+
+		/* arg = fragment index; TF-A streams that ciphered fragment. */
 		arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL,
 			      GPS_SMC_MVCD_SEND_DSP_FRAG, GPS_MVCD_DSP_L1,
 			      arg, 0, 0, 0, 0, &res);
-		gps_smc(GPS_SMC_USRT_CLEAR_NODATA, GPS_DATA_LINK_ID0, 0, NULL);
 		if (res.a1 == 1)
-			ret = -EIO;
-		break;
-	default:
-		ret = -ENOTTY;
-		break;
+			return -EFAULT;
+		/* lockstep: wait for this fragment's D2A record to drain (the
+		 * reactive IRQs advance dl_woff) before returning, so the DSP's
+		 * un-acked record buffer never fills. ~6 ms fallback.
+		 */
+		for (w = 0; w < 60; w++) {
+			if (gnss->dl_woff != prev)
+				break;
+			usleep_range(100, 200);
+		}
+		return 0;
 	}
-	mutex_unlock(&gnss->io_lock);
-	return ret;
+	/* Values libmnl expects, replicated from the stock driver / UT capture. */
+	case GPSDL_IOC_CO_CLOCK_FLAG:
+		return 33;		/* observed stock return */
+	case GPSDL_IOC_GET_PLATFORM_CLOCK_FREQ:
+		return 0;		/* observed stock return */
+	case GPSDL_IOC_GPS_GET_MD_STATUS:
+		return 0;
+	default:
+		/* The stock driver #if-0's the other info ioctls; they return
+		 * -EFAULT and mnld tolerates it.
+		 */
+		return -EFAULT;
+	}
 }
 
 static const struct file_operations gps_cdev_fops = {
@@ -1085,6 +1117,7 @@ static int mtk_gnss_probe(struct platform_device *pdev)
 
 	/* link0 MCUB mailbox IRQ = DT interrupt index 2 (SPI 381) */
 	init_completion(&gnss->ramcode);
+	init_waitqueue_head(&gnss->rx_wq);
 	gnss->irq_mcub = platform_get_irq(pdev, 2);
 	if (gnss->irq_mcub >= 0) {
 		int ret = devm_request_threaded_irq(dev, gnss->irq_mcub, NULL,
