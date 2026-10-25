@@ -44,6 +44,7 @@
 
 /* op ids of the MTK_SIP_KERNEL_GPS_CONTROL service (enum conn_smc_opid) */
 #define GPS_SMC_COMMON_ON_SET_FLAG	0x0
+#define GPS_SMC_WAKEUP_CONNINFRA	0x1	/* x2=1 force conn_infra top_off awake */
 #define GPS_SMC_COMMON_ON_PART1		0x2
 #define GPS_SMC_COMMON_ON_PART2		0x3	/* EMI remap: x2 = 20msb of 36-bit phys */
 #define GPS_SMC_COMMON_ON_PART3		0x4
@@ -287,6 +288,18 @@ static void gps_dma_stop(unsigned long channel)
 	gps_smc(GPS_SMC_SET_DMA_STOP, channel, 0, NULL);
 }
 
+/* Mimic the stock gps_dma IRQ servicing after a transfer: ack A2D (ch0) int +
+ * stop it, then read the other channels' int status. */
+static void gps_dma_irq_svc(void)
+{
+	int ch;
+
+	gps_smc(GPS_SMC_GET_DMA_INT_STATUS, GPS_DL_DMA_LINK0_A2D, 0, NULL);
+	gps_dma_stop(GPS_DL_DMA_LINK0_A2D);
+	for (ch = 1; ch < 4; ch++)
+		gps_smc(GPS_SMC_GET_DMA_INT_STATUS, ch, 0, NULL);
+}
+
 /*
  * Send the captured L1 image-descriptor control frame to the DSP over the A2D
  * (AP->DSP) data link, exactly as mnld does just before the fragment loop.
@@ -309,7 +322,8 @@ static int gps_a2d_send(struct mtk_gnss *gnss, const u8 *frame, size_t len)
 	memcpy_toio(tx, frame, len);
 	wmb();	/* frame visible in EMI before the DMA reads it */
 
-	/* EMI usage is claimed by the caller for the whole download */
+	/* claim EMI around this A2D transfer, as stock toggles it per transfer */
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
 	arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL, GPS_SMC_SET_DMA_START,
 		      GPS_DL_DMA_LINK0_A2D, 0 /* sub_buf_offset */,
 		      GPS_DL_DMA_BUS_ID0_A2D, GPS_DL_RX_WORDS /* len_to_wrap */,
@@ -323,6 +337,8 @@ static int gps_a2d_send(struct mtk_gnss *gnss, const u8 *frame, size_t len)
 		udelay(50);
 	}
 	gps_dma_stop(GPS_DL_DMA_LINK0_A2D);
+	gps_dma_irq_svc();
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
 	iounmap(tx);
 
 	dev_info(gnss->dev, "GPS: sent %zu-byte A2D frame (done after %d polls)\n",
@@ -365,54 +381,27 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 	/* make sure the USRT RX path starts from empty */
 	gps_smc(GPS_SMC_USRT_POLL_RX_EMPTY, GPS_DATA_LINK_ID0, 0, NULL);
 
-	/* claim EMI for the whole download (A2D sends + the D2A drain) */
-	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
-
-	/* the DSP needs the image-descriptor frame before it accepts frags */
+	/* the DSP needs the image-descriptor frame before it accepts frags
+	 * (gps_a2d_send toggles the EMI claim + runs the DMA-IRQ service itself)
+	 */
 	gps_a2d_send(gnss, gps_l1_init_frame, sizeof(gps_l1_init_frame));
 
 	/*
-	 * Proper per-burst RX reception, matching the stock data-link semantics
-	 * (gps_dl_hal_wait_and_handle_until_usrt_has_nodata_or_rx_dma_done): for
-	 * each fragment, arm the D2A DMA at the running write offset, push the
-	 * fragment, then wait for the burst to finish - either the DMA signals
-	 * done (int-status) or the DSP sets the USRT nodata flag - then STOP the
-	 * DMA, read how much arrived, advance the offset and clear the nodata IRQ.
-	 * The per-burst stop + nodata-clear is the acknowledgement the DSP waits
-	 * for before sending the next record.
+	 * Replay the stock per-fragment sequence EXACTLY (from the SMC trace):
+	 *   claim EMI, arm D2A @woff, read left-len, stop D2A, release EMI,
+	 *   clear nodata, advance woff by what the PREVIOUS fragment produced,
+	 *   then send this fragment, then run the DMA-IRQ service. The D2A is
+	 *   drained (and EMI toggled) BEFORE each 0x20, and is NOT armed while
+	 *   the fragment is pushed - the opposite of what I did before.
 	 */
 	for (i = 0; i < frag_num; i++) {
 		unsigned long free_words, left;
-		int w;
 
+		gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
 		gps_dma_d2a_arm(woff);
-
-		arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL,
-			      GPS_SMC_MVCD_SEND_DSP_FRAG, GPS_MVCD_DSP_L1, i,
-			      0, 0, 0, 0, &res);
-		if (i < 6 || i == frag_num - 1)
-			dev_info(gnss->dev,
-				 "GPS MVCD frag %u: 0x20 ret a0=%#lx a1=%#lx a2=%#lx\n",
-				 i, res.a0, res.a1, res.a2);
-		if (res.a1 == 1) {
-			dev_err(gnss->dev,
-				"GPS MVCD: fragment %u rejected by TF-A\n", i);
-			return;
-		}
-
-		/* wait for the burst: DMA done (0x1e) or USRT nodata (0x19) */
-		for (w = 0; w < 40; w++) {
-			if (gps_smc(GPS_SMC_GET_DMA_INT_STATUS,
-				    GPS_DL_DMA_LINK0_D2A, 0, NULL))
-				break;
-			if (gps_smc(GPS_SMC_USRT_HAS_NODATA,
-				    GPS_DATA_LINK_ID0, 0, NULL))
-				break;
-			udelay(50);
-		}
-
 		left = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
 		gps_dma_stop(GPS_DL_DMA_LINK0_D2A);
+		gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 0, 0, NULL);
 		gps_smc(GPS_SMC_USRT_CLEAR_NODATA, GPS_DATA_LINK_ID0, 0, NULL);
 
 		free_words = GPS_DL_RX_WORDS - (woff / 4);
@@ -421,10 +410,20 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 			if (woff >= GPS_DL_RX_BUF_SIZE)
 				woff -= GPS_DL_RX_BUF_SIZE;
 		}
+
+		arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL,
+			      GPS_SMC_MVCD_SEND_DSP_FRAG, GPS_MVCD_DSP_L1, i,
+			      0, 0, 0, 0, &res);
+		if (res.a1 == 1) {
+			dev_err(gnss->dev,
+				"GPS MVCD: fragment %u rejected by TF-A\n", i);
+			return;
+		}
+		gps_dma_irq_svc();
+
 		if (i < 6 || i == frag_num - 1)
-			dev_info(gnss->dev,
-				 "GPS MVCD dbg frag %u: woff %#lx left %lu wait %d\n",
-				 i, woff, left, w);
+			dev_info(gnss->dev, "GPS MVCD dbg frag %u: woff %#lx left %lu\n",
+				 i, woff, left);
 	}
 	dev_info(gnss->dev, "GPS MVCD: sent %u fragment(s), d2a rx %#lx B\n",
 		 frag_num, woff);
@@ -586,6 +585,10 @@ static int gps_common_on(struct mtk_gnss *gnss)
 	}
 
 	gps_smc(GPS_SMC_COMMON_ON_SET_FLAG, GPS_SMC_SET_FLAG_MAGIC, 1, NULL);
+	/* force the conn_infra top_off domain awake for the whole bring-up, as
+	 * stock does right after SET_FLAG (released again after the USRT is up)
+	 */
+	gps_smc(GPS_SMC_WAKEUP_CONNINFRA, 1, 0, NULL);
 	udelay(200);	/* let the 3T 32k clock settle */
 
 	if ((int)gps_smc(GPS_SMC_COMMON_ON_PART1, 0, 0, &ver) == -1) {
@@ -634,30 +637,22 @@ static void gps_common_off(struct mtk_gnss *gnss)
 /* Bring the L1 DSP up (claim EMI, power the DSP, poll its ACK, enable USRT). */
 static void gps_dsp_on(struct mtk_gnss *gnss)
 {
-	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
-
-	/* request the conn_infra->EMI route for the L1 DSP (direct reg, not SMC) */
-	dev_info(gnss->dev, "EMI_CTL_GPS_L1 before %#x\n",
-		 readl(gnss->conn + CONN_INFRA_CFG_EMI_CTL_GPS_L1));
-	writel(readl(gnss->conn + CONN_INFRA_CFG_EMI_CTL_GPS_L1) |
-	       CONN_INFRA_GPS_L1_INFRA_REQ,
-	       gnss->conn + CONN_INFRA_CFG_EMI_CTL_GPS_L1);
-	dev_info(gnss->dev, "EMI_CTL_GPS_L1 after %#x\n",
-		 readl(gnss->conn + CONN_INFRA_CFG_EMI_CTL_GPS_L1));
-
+	/* stock does NOT claim EMI here; that is deferred to data-routing time */
 	gps_smc(GPS_SMC_PWR_STAT_CTRL, GPS_L1_DSP_ON, 0, NULL);
 	if (gps_smc(GPS_SMC_SET_DSP_ON_POLL_ACK, GPS_DATA_LINK_ID0, 0, NULL))
 		dev_info(gnss->dev, "GPS L1 DSP ON: DSP booted and ACKed\n");
 	else
 		dev_err(gnss->dev, "GPS L1 DSP ON: no ACK (DSP did not boot)\n");
 	gps_usrt_ctrl(GPS_DATA_LINK_ID0, true);
+
+	/* release the conn_infra top_off force-wakeup now the USRT is up (stock
+	 * issues WAKEUP_CONNINFRA(0) here, before the fragment download)
+	 */
+	gps_smc(GPS_SMC_WAKEUP_CONNINFRA, 0, 0, NULL);
 }
 
 static void gps_dsp_off(struct mtk_gnss *gnss)
 {
-	writel(readl(gnss->conn + CONN_INFRA_CFG_EMI_CTL_GPS_L1) &
-	       ~CONN_INFRA_GPS_L1_INFRA_REQ,
-	       gnss->conn + CONN_INFRA_CFG_EMI_CTL_GPS_L1);
 	gps_usrt_ctrl(GPS_DATA_LINK_ID0, false);
 	gps_smc(GPS_SMC_PWR_STAT_CTRL, GPS_L1_DSP_OFF, 0, NULL);
 	gps_smc(GPS_SMC_SET_CFG_DSP_MEM_OFF, GPS_L1_DSP_OFF, GPS_DATA_LINK_ID0, NULL);
