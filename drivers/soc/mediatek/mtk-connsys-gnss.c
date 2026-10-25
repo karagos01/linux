@@ -110,6 +110,7 @@
 
 /* USRT flow-control SMCs used around each fragment (x2 = link id) */
 #define GPS_SMC_USRT_POLL_RX_EMPTY	0x15
+#define GPS_SMC_USRT_HAS_NODATA		0x19	/* a0!=0 = DSP set the nodata flag */
 #define GPS_SMC_USRT_CLEAR_NODATA	0x1a
 
 /* enum dsp_ctrl_enum / link ids passed to the TF-A DSP control SMCs */
@@ -360,16 +361,20 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 	gps_a2d_send(gnss, gps_l1_init_frame, sizeof(gps_l1_init_frame));
 
 	/*
-	 * Keep the D2A receive DMA armed continuously and send one fragment at a
-	 * time, waiting for the DSP's per-fragment record to land (left_len drops)
-	 * before pushing the next. This paces us to the DSP exactly as the stock
-	 * flow does and keeps its record stream from stalling.
+	 * Proper per-burst RX reception, matching the stock data-link semantics
+	 * (gps_dl_hal_wait_and_handle_until_usrt_has_nodata_or_rx_dma_done): for
+	 * each fragment, arm the D2A DMA at the running write offset, push the
+	 * fragment, then wait for the burst to finish - either the DMA signals
+	 * done (int-status) or the DSP sets the USRT nodata flag - then STOP the
+	 * DMA, read how much arrived, advance the offset and clear the nodata IRQ.
+	 * The per-burst stop + nodata-clear is the acknowledgement the DSP waits
+	 * for before sending the next record.
 	 */
-	gps_dma_d2a_arm(0);
-
 	for (i = 0; i < frag_num; i++) {
-		unsigned long prev = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
+		unsigned long free_words, left;
 		int w;
+
+		gps_dma_d2a_arm(woff);
 
 		arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL,
 			      GPS_SMC_MVCD_SEND_DSP_FRAG, GPS_MVCD_DSP_L1, i,
@@ -379,26 +384,32 @@ static void gps_mvcd_download_l1(struct mtk_gnss *gnss)
 				"GPS MVCD: fragment %u rejected by TF-A\n", i);
 			return;
 		}
-		gps_smc(GPS_SMC_USRT_CLEAR_NODATA, GPS_DATA_LINK_ID0, 0, NULL);
 
-		/* wait up to ~3ms for this fragment's D2A record to arrive */
-		for (w = 0; w < 60; w++) {
-			unsigned long left =
-				gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
-			if (left < prev)
+		/* wait for the burst: DMA done (0x1e) or USRT nodata (0x19) */
+		for (w = 0; w < 40; w++) {
+			if (gps_smc(GPS_SMC_GET_DMA_INT_STATUS,
+				    GPS_DL_DMA_LINK0_D2A, 0, NULL))
+				break;
+			if (gps_smc(GPS_SMC_USRT_HAS_NODATA,
+				    GPS_DATA_LINK_ID0, 0, NULL))
 				break;
 			udelay(50);
 		}
-		if (i < 5 || i == frag_num - 1)
-			dev_info(gnss->dev,
-				 "GPS MVCD dbg frag %u: left %lu->%lu (wait %d)\n",
-				 i, prev,
-				 gps_dma_left_words(GPS_DL_DMA_LINK0_D2A), w);
-	}
-	{
-		unsigned long left = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
 
-		woff = (GPS_DL_RX_WORDS - left) * 4;
+		left = gps_dma_left_words(GPS_DL_DMA_LINK0_D2A);
+		gps_dma_stop(GPS_DL_DMA_LINK0_D2A);
+		gps_smc(GPS_SMC_USRT_CLEAR_NODATA, GPS_DATA_LINK_ID0, 0, NULL);
+
+		free_words = GPS_DL_RX_WORDS - (woff / 4);
+		if (left < free_words) {
+			woff += (free_words - left) * 4;
+			if (woff >= GPS_DL_RX_BUF_SIZE)
+				woff -= GPS_DL_RX_BUF_SIZE;
+		}
+		if (i < 6 || i == frag_num - 1)
+			dev_info(gnss->dev,
+				 "GPS MVCD dbg frag %u: woff %#lx left %lu wait %d\n",
+				 i, woff, left, w);
 	}
 	dev_info(gnss->dev, "GPS MVCD: sent %u fragment(s), d2a rx %#lx B\n",
 		 frag_num, woff);
