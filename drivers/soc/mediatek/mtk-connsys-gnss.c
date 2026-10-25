@@ -48,6 +48,14 @@
 #define GPS_SMC_COMMON_OFF_PART2	0x10
 #define GPS_SMC_SW_REQUEST_EMI_USAGE	0x11
 #define GPS_SMC_COMMON_OFF_PART3	0x12
+#define GPS_SMC_PWR_STAT_CTRL		0xb	/* x2 = dsp_ctrl_enum */
+#define GPS_SMC_SET_DSP_ON_POLL_ACK	0xc	/* x2 = link id; a0 != 0 = ACK */
+#define GPS_SMC_SET_CFG_DSP_MEM_OFF	0xe	/* x2 = dsp_ctrl_enum, x3 = link */
+
+/* enum dsp_ctrl_enum / link ids passed to the TF-A DSP control SMCs */
+#define GPS_L1_DSP_ON			0
+#define GPS_L1_DSP_OFF			1
+#define GPS_DATA_LINK_ID0		0
 
 /* magic the TF-A expects in x2 of the SET_FLAG call */
 #define GPS_SMC_SET_FLAG_MAGIC		0xdb9db9
@@ -204,6 +212,23 @@ static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
 	dev_info(dev,
 		 "GPS common_on COMPLETE: full secure power domain up (ver %#010lx)\n",
 		 ver);
+
+	/*
+	 * Bring the GPS L1 DSP up: TF-A sets its power state and polls for the
+	 * DSP's ACK (a0 != 0). A successful ACK means the DSP has booted from
+	 * the firmware the bootloader pre-staged in the connsys EMI and is now
+	 * alive - the first end-to-end sign of life from the GPS core itself.
+	 * (USRT/DMA data routing is a later step; here we just prove boot.)
+	 */
+	gps_smc(GPS_SMC_PWR_STAT_CTRL, GPS_L1_DSP_ON, 0, NULL);
+	if (gps_smc(GPS_SMC_SET_DSP_ON_POLL_ACK, GPS_DATA_LINK_ID0, 0, NULL))
+		dev_info(dev, "GPS L1 DSP ON: DSP booted and ACKed\n");
+	else
+		dev_err(dev, "GPS L1 DSP ON: no ACK (DSP did not boot)\n");
+
+	/* turn the DSP back off before unwinding the common domain */
+	gps_smc(GPS_SMC_PWR_STAT_CTRL, GPS_L1_DSP_OFF, 0, NULL);
+	gps_smc(GPS_SMC_SET_CFG_DSP_MEM_OFF, GPS_L1_DSP_OFF, GPS_DATA_LINK_ID0, NULL);
 
 	/* --- common off: tear the domain back down --- */
 	gps_smc(GPS_SMC_COMMON_OFF_PART1, 0, 0, NULL);
