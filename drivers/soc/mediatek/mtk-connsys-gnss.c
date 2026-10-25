@@ -907,6 +907,34 @@ static int mtk_gnss_probe(struct platform_device *pdev)
 
 	dev_info(dev, "MediaTek connsys GNSS probe (milestone 1)\n");
 
+	/*
+	 * Debug: fingerprint the LK-staged connsys/GNSS firmware blob in EMI
+	 * (0x880e0000) so we can diff it against a stock boot and tell whether
+	 * the LK->U-Boot->kernel chain left it intact for TF-A/the DSP.
+	 */
+	{
+		void __iomem *fw = ioremap(0x880e0000, 0x40000);
+
+		if (fw) {
+			u8 hdr[32];
+			u32 i, sum = 0, nz = 0;
+
+			memcpy_fromio(hdr, fw, sizeof(hdr));
+			for (i = 0; i < 0x3d298; i += 4) {
+				u32 w = readl(fw + i);
+
+				sum += w;
+				if (w)
+					nz++;
+			}
+			dev_info(dev, "GPS fw@0x880e0000: sum %#010x nonzero-words %u/%u\n",
+				 sum, nz, 0x3d298 / 4);
+			print_hex_dump(KERN_INFO, "GPS fw hdr: ", DUMP_PREFIX_OFFSET,
+				       16, 1, hdr, sizeof(hdr), false);
+			iounmap(fw);
+		}
+	}
+
 	if (probe_power)
 		return mtk_gnss_power_probe(gnss);
 
