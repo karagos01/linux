@@ -25,7 +25,9 @@
  * Copyright (C) 2026 ...
  */
 
+#include <linux/completion.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
@@ -91,6 +93,8 @@ struct mtk_gnss {
 	struct device *dev;
 	struct mtk_connsys *cs;
 	void __iomem *conn;
+	int irq_mcub;			/* link0 MCUB mailbox IRQ (SPI 381) */
+	struct completion ramcode;	/* completed when the DSP posts RAMCODE_READY */
 };
 
 static bool probe_power;
@@ -137,6 +141,35 @@ static u32 gps_mcub_get(unsigned long link, u32 *d0, u32 *d1)
 	if (d1)
 		*d1 = res.a3;
 	return (u32)res.a1;
+}
+
+/*
+ * Link0 MCUB mailbox IRQ: the DSP raises it when it posts a DSP->AP (d2a)
+ * event. Drain all pending flags (clearing each, as a level IRQ requires),
+ * and signal completion when the DSP reports its RAM code is running. This is
+ * the real-time servicing the DSP's ROM->RAM-code handshake needs, which a
+ * synchronous poll cannot provide.
+ */
+static irqreturn_t mtk_gnss_mcub_thread(int irq, void *data)
+{
+	struct mtk_gnss *gnss = data;
+	u32 flag, d0 = 0, d1 = 0;
+	bool handled = false;
+
+	while ((flag = gps_mcub_get(GPS_DATA_LINK_ID0, &d0, &d1))) {
+		handled = true;
+		dev_info(gnss->dev, "MCUB d2a: flag %#06x d0 %#06x d1 %#06x\n",
+			 flag, d0, d1);
+		if ((flag & 0xffff0000) == 0xdead0000) {
+			dev_err(gnss->dev, "GPS DSP posted a dead flag\n");
+			break;
+		}
+		gps_smc(GPS_SMC_CLEAR_MCUB_D2A, GPS_DATA_LINK_ID0, flag, NULL);
+		if (flag & GPS_MCUB_D2A_RAMCODE_READY)
+			complete(&gnss->ramcode);
+	}
+
+	return handled ? IRQ_HANDLED : IRQ_NONE;
 }
 
 /*
@@ -267,53 +300,34 @@ static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
 	 * alive - the first end-to-end sign of life from the GPS core itself.
 	 * (USRT/DMA data routing is a later step; here we just prove boot.)
 	 */
+	/*
+	 * Enable the MCUB mailbox IRQ so the DSP's DSP->AP events (RESET_DONE,
+	 * then RAMCODE_READY) are serviced in real time, claim EMI, bring the
+	 * L1 DSP up, enable the USRT, and wait for the DSP to report its RAM
+	 * code is running. The real IRQ servicing is what the DSP's ROM->RAM
+	 * handshake needs (a synchronous poll does not drive it).
+	 */
+	reinit_completion(&gnss->ramcode);
+	if (gnss->irq_mcub >= 0)
+		enable_irq(gnss->irq_mcub);
+
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);	/* claim EMI */
+
 	gps_smc(GPS_SMC_PWR_STAT_CTRL, GPS_L1_DSP_ON, 0, NULL);
 	if (gps_smc(GPS_SMC_SET_DSP_ON_POLL_ACK, GPS_DATA_LINK_ID0, 0, NULL))
 		dev_info(dev, "GPS L1 DSP ON: DSP booted and ACKed\n");
 	else
 		dev_err(dev, "GPS L1 DSP ON: no ACK (DSP did not boot)\n");
 
-	/*
-	 * Enable the USRT so the DSP finishes its boot handshake, then poll the
-	 * MCUB mailbox for the DSP->AP events: RESET_DONE (ROM up) and
-	 * RAMCODE_READY (firmware running). Seeing them is the first bidirectional
-	 * AP<->DSP communication over the data link.
-	 */
-	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);	/* claim EMI */
 	gps_usrt_ctrl(GPS_DATA_LINK_ID0, true);
-	{
-		bool saw_reset = false, saw_ram = false;
-		u32 flag, d0 = 0, d1 = 0;
-		int i;
 
-		for (i = 0; i < 1500; i++) {
-			flag = gps_mcub_get(GPS_DATA_LINK_ID0, &d0, &d1);
-			if (flag) {
-				dev_info(dev,
-					 "GPS DSP MCUB d2a: flag %#06x d0 %#06x d1 %#06x\n",
-					 flag, d0, d1);
-				if ((flag & 0xffff0000) == 0xdead0000) {
-					dev_err(dev, "GPS DSP posted a dead flag\n");
-					break;
-				}
-				gps_smc(GPS_SMC_CLEAR_MCUB_D2A,
-					GPS_DATA_LINK_ID0, flag, NULL);
-				if (flag & GPS_MCUB_D2A_RESET_DONE)
-					saw_reset = true;
-				if (flag & GPS_MCUB_D2A_RAMCODE_READY)
-					saw_ram = true;
-				if (saw_reset && saw_ram)
-					break;
-			}
-			usleep_range(1000, 1100);
-		}
-		if (saw_reset || saw_ram)
-			dev_info(dev,
-				 "GPS DSP ALIVE via MCUB (reset_done=%d ramcode_ready=%d)\n",
-				 saw_reset, saw_ram);
-		else
-			dev_warn(dev, "GPS DSP posted no MCUB boot event in 1.5s\n");
-	}
+	if (wait_for_completion_timeout(&gnss->ramcode, msecs_to_jiffies(3000)))
+		dev_info(dev, "GPS DSP RAMCODE_READY: GNSS firmware is running!\n");
+	else
+		dev_warn(dev, "GPS DSP: no RAMCODE_READY within 3s\n");
+
+	if (gnss->irq_mcub >= 0)
+		disable_irq(gnss->irq_mcub);
 
 	/* turn the USRT and the DSP back off before unwinding the common domain */
 	gps_usrt_ctrl(GPS_DATA_LINK_ID0, false);
@@ -366,6 +380,20 @@ static int mtk_gnss_probe(struct platform_device *pdev)
 	gnss->conn = devm_ioremap(dev, res->start, resource_size(res));
 	if (!gnss->conn)
 		return dev_err_probe(dev, -ENOMEM, "failed to map conn_infra\n");
+
+	/* link0 MCUB mailbox IRQ = DT interrupt index 2 (SPI 381) */
+	init_completion(&gnss->ramcode);
+	gnss->irq_mcub = platform_get_irq(pdev, 2);
+	if (gnss->irq_mcub >= 0) {
+		int ret = devm_request_threaded_irq(dev, gnss->irq_mcub, NULL,
+						    mtk_gnss_mcub_thread,
+						    IRQF_ONESHOT | IRQF_NO_AUTOEN,
+						    "gps_mb0", gnss);
+		if (ret)
+			return dev_err_probe(dev, ret, "request MCUB irq\n");
+	} else {
+		dev_warn(dev, "no MCUB irq in DT; RAMCODE handshake disabled\n");
+	}
 
 	platform_set_drvdata(pdev, gnss);
 	dev_info(dev, "MediaTek connsys GNSS probe (milestone 1)\n");
