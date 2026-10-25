@@ -52,10 +52,20 @@
 #define GPS_SMC_SET_DSP_ON_POLL_ACK	0xc	/* x2 = link id; a0 != 0 = ACK */
 #define GPS_SMC_SET_CFG_DSP_MEM_OFF	0xe	/* x2 = dsp_ctrl_enum, x3 = link */
 
+#define GPS_SMC_USRT_CTRL		0xd	/* x2=link x3=on x4=dma x5=1byte */
+#define GPS_SMC_GET_MCUB_INFO		0x13	/* a0=ret a1=flag a2=d0 a3=d1 */
+#define GPS_SMC_CLEAR_MCUB_D2A		0x14	/* x2=link x3=d2a_flag */
+
 /* enum dsp_ctrl_enum / link ids passed to the TF-A DSP control SMCs */
 #define GPS_L1_DSP_ON			0
 #define GPS_L1_DSP_OFF			1
 #define GPS_DATA_LINK_ID0		0
+
+/* MCUB mailbox DSP->AP (D2A) flag bits (gps_dsp_fsm.h) */
+#define GPS_MCUB_D2A_RAMCODE_READY	0x1
+#define GPS_MCUB_D2A_REG_READ_READY	0x2
+#define GPS_MCUB_D2A_REQUEST_ACTION	0x4
+#define GPS_MCUB_D2A_RESET_DONE		0x8
 
 /* magic the TF-A expects in x2 of the SET_FLAG call */
 #define GPS_SMC_SET_FLAG_MAGIC		0xdb9db9
@@ -97,6 +107,35 @@ static unsigned long gps_smc(unsigned long opid, unsigned long a2,
 	if (out_a1)
 		*out_a1 = res.a1;
 	return res.a0;
+}
+
+/* USRT control needs four args (link, on, dma_mode, 1byte_mode) */
+static void gps_usrt_ctrl(unsigned long link, bool on)
+{
+	struct arm_smccc_res res;
+
+	/* driver default runtime cfg: DMA mode on, not 1-byte */
+	arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL, GPS_SMC_USRT_CTRL,
+		      link, on, 1, 0, 0, 0, &res);
+}
+
+/*
+ * Read the GPS MCUB mailbox (DSP->AP). TF-A returns HW_OKAY (0) in a0 and the
+ * d2a flag/data words in a1..a3. Returns the flag (0 if none or on error).
+ */
+static u32 gps_mcub_get(unsigned long link, u32 *d0, u32 *d1)
+{
+	struct arm_smccc_res res;
+
+	arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL, GPS_SMC_GET_MCUB_INFO,
+		      link, 0, 0, 0, 0, 0, &res);
+	if (res.a0 != 0)		/* HW_OKAY == 0 */
+		return 0;
+	if (d0)
+		*d0 = res.a2;
+	if (d1)
+		*d1 = res.a3;
+	return (u32)res.a1;
 }
 
 /*
@@ -226,7 +265,50 @@ static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
 	else
 		dev_err(dev, "GPS L1 DSP ON: no ACK (DSP did not boot)\n");
 
-	/* turn the DSP back off before unwinding the common domain */
+	/*
+	 * Enable the USRT so the DSP finishes its boot handshake, then poll the
+	 * MCUB mailbox for the DSP->AP events: RESET_DONE (ROM up) and
+	 * RAMCODE_READY (firmware running). Seeing them is the first bidirectional
+	 * AP<->DSP communication over the data link.
+	 */
+	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);	/* claim EMI */
+	gps_usrt_ctrl(GPS_DATA_LINK_ID0, true);
+	{
+		bool saw_reset = false, saw_ram = false;
+		u32 flag, d0 = 0, d1 = 0;
+		int i;
+
+		for (i = 0; i < 1500; i++) {
+			flag = gps_mcub_get(GPS_DATA_LINK_ID0, &d0, &d1);
+			if (flag) {
+				dev_info(dev,
+					 "GPS DSP MCUB d2a: flag %#06x d0 %#06x d1 %#06x\n",
+					 flag, d0, d1);
+				if ((flag & 0xffff0000) == 0xdead0000) {
+					dev_err(dev, "GPS DSP posted a dead flag\n");
+					break;
+				}
+				gps_smc(GPS_SMC_CLEAR_MCUB_D2A,
+					GPS_DATA_LINK_ID0, flag, NULL);
+				if (flag & GPS_MCUB_D2A_RESET_DONE)
+					saw_reset = true;
+				if (flag & GPS_MCUB_D2A_RAMCODE_READY)
+					saw_ram = true;
+				if (saw_reset && saw_ram)
+					break;
+			}
+			usleep_range(1000, 1100);
+		}
+		if (saw_reset || saw_ram)
+			dev_info(dev,
+				 "GPS DSP ALIVE via MCUB (reset_done=%d ramcode_ready=%d)\n",
+				 saw_reset, saw_ram);
+		else
+			dev_warn(dev, "GPS DSP posted no MCUB boot event in 1.5s\n");
+	}
+
+	/* turn the USRT and the DSP back off before unwinding the common domain */
+	gps_usrt_ctrl(GPS_DATA_LINK_ID0, false);
 	gps_smc(GPS_SMC_PWR_STAT_CTRL, GPS_L1_DSP_OFF, 0, NULL);
 	gps_smc(GPS_SMC_SET_CFG_DSP_MEM_OFF, GPS_L1_DSP_OFF, GPS_DATA_LINK_ID0, NULL);
 
