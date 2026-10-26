@@ -799,7 +799,13 @@ static int mtk_gnss_power_probe(struct mtk_gnss *gnss)
 #define GPSDL_IOC_GET_GPS_LNA_PIN		16
 #define GPSDL_IOC_GPS_GET_MD_STATUS		21
 #define GPSDL_IOC_GPS_GET_DSP_BOOTUP_INFO	23
+/* 24 (0x18): newer-adie alias of GET_DSP_BOOTUP_INFO. libmnl's ATF path
+ * (MNL_Send_ATF_Cmd_AP) picks 0x18 instead of 0x17 when (u8)(adie_id-1)<0x3f.
+ */
+#define GPSDL_IOC_GPS_GET_DSP_BOOTUP_INFO_2	24
 #define GPSDL_IOC_GPS_DSP_MVCD_FRAGEMENT_NO	25
+/* 26 (0x1a): newer-adie alias of MVCD_FRAGEMENT_NO (same 0x18-vs-0x17 rule). */
+#define GPSDL_IOC_GPS_DSP_MVCD_FRAGEMENT_NO_2	26
 #define GPSDL_IOC_GET_PLATFORM_CLOCK_FREQ	30
 
 /* struct copied out by GET_DSP_BOOTUP_INFO — stock field order (hw_api.h) */
@@ -852,33 +858,35 @@ static int gps_cdev_open(struct inode *inode, struct file *filp)
 	gps_dsp_on(gnss);		/* DSP posts RESET_DONE over MCUB */
 
 	/*
-	 * Bring the link up to RESET_DONE and start the reactive D2A receive
-	 * drain, but do NOT download the RAM image here. On stock, userspace
-	 * (mnld/libmnl) drives the MVCD download itself over this char device:
-	 * ioctl GET_DSP_BOOTUP_INFO, write the 116-byte descriptor, ioctl
-	 * MVCD_FRAGEMENT_NO per fragment, write the ack frame. Our ioctl/write
-	 * handlers below replay exactly those steps against TF-A, while these
-	 * IRQs keep the per-fragment D2A records draining with hardware timing.
+	 * Boot the DSP RAM image IN-KERNEL, the connsys way (MVCD over SMC/TF-A),
+	 * and wait for RAMCODE_READY. This is the mechanism the stock kernel +
+	 * ATF use; the userspace nav library (libmnl) does NOT drive this on our
+	 * SoC — its UART-bootloader download path requires a data-link stage-1
+	 * handshake the SMC-booted connsys DSP does not answer. gps_mvcd_download_l1
+	 * arms the reactive D2A receive drain and enables the data/nodata/dma IRQs
+	 * itself, so the per-fragment records drain with hardware timing and the
+	 * measurement stream keeps flowing after RAMCODE for read() to deliver.
 	 */
-	gnss->dl_woff = 0;
 	gnss->rx_roff = 0;
-	gnss->d2a_armed = true;
+	gps_mvcd_download_l1(gnss);
+
+	if (wait_for_completion_timeout(&gnss->ramcode, msecs_to_jiffies(5000)))
+		dev_info(gnss->dev, "gpsdl0 opened: DSP RAMCODE_READY, measurements streaming\n");
+	else
+		dev_warn(gnss->dev, "gpsdl0 opened: no RAMCODE_READY within 5s\n");
+
+	/* Deliver only post-RAMCODE traffic (measurement frames) to read(); the
+	 * download-ack records that advanced dl_woff are consumed, not forwarded.
+	 */
+	gnss->rx_roff = gnss->dl_woff;
+	/* Refill the IRQ budget for the long nav session (download used a cap). */
 	atomic_set(&g_gps_irq_budget, INT_MAX);
-	gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
-	gps_dma_d2a_arm(0);
-	if (gnss->irq_data >= 0)
-		enable_irq(gnss->irq_data);
-	if (gnss->irq_nodata >= 0)
-		enable_irq(gnss->irq_nodata);
-	if (gnss->irq_dma >= 0)
-		enable_irq(gnss->irq_dma);
 
 	mutex_lock(&gnss->io_lock);
 	gnss->link_open = true;
 	gnss->opening = false;
 	mutex_unlock(&gnss->io_lock);
-
-	dev_info(gnss->dev, "gpsdl0 opened: link0 up (RESET_DONE), D2A draining\n");
+	wake_up_interruptible(&gnss->rx_wq);
 	return 0;
 
 fail_opening:
@@ -1023,8 +1031,11 @@ static long gps_cdev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 	}
 	mutex_unlock(&gnss->io_lock);
 
+	dev_dbg(gnss->dev, "ioctl cmd=0x%x arg=0x%lx\n", cmd, arg);
+
 	switch (cmd) {
-	case GPSDL_IOC_GPS_GET_DSP_BOOTUP_INFO: {
+	case GPSDL_IOC_GPS_GET_DSP_BOOTUP_INFO:
+	case GPSDL_IOC_GPS_GET_DSP_BOOTUP_INFO_2: {
 		struct gps_bootup_info info;
 
 		arm_smccc_smc(MTK_SIP_KERNEL_GPS_CONTROL,
@@ -1041,7 +1052,8 @@ static long gps_cdev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 			return -EFAULT;
 		return 0;
 	}
-	case GPSDL_IOC_GPS_DSP_MVCD_FRAGEMENT_NO: {
+	case GPSDL_IOC_GPS_DSP_MVCD_FRAGEMENT_NO:
+	case GPSDL_IOC_GPS_DSP_MVCD_FRAGEMENT_NO_2: {
 		unsigned long prev = gnss->dl_woff;
 		int w;
 
