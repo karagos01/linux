@@ -216,6 +216,11 @@ static const u8 gps_l1_ack_frame[] = {
 	0x01, 0xaa, 0x0f, 0x00,
 };
 
+static bool inkernel_boot;
+module_param(inkernel_boot, bool, 0644);
+MODULE_PARM_DESC(inkernel_boot,
+	"open() downloads the DSP RAM image in-kernel (MVCD/SMC) instead of letting userspace (mnld/libmnl) drive it");
+
 static bool probe_power;
 module_param(probe_power, bool, 0444);
 MODULE_PARM_DESC(probe_power,
@@ -857,29 +862,45 @@ static int gps_cdev_open(struct inode *inode, struct file *filp)
 
 	gps_dsp_on(gnss);		/* DSP posts RESET_DONE over MCUB */
 
-	/*
-	 * Boot the DSP RAM image IN-KERNEL, the connsys way (MVCD over SMC/TF-A),
-	 * and wait for RAMCODE_READY. This is the mechanism the stock kernel +
-	 * ATF use; the userspace nav library (libmnl) does NOT drive this on our
-	 * SoC — its UART-bootloader download path requires a data-link stage-1
-	 * handshake the SMC-booted connsys DSP does not answer. gps_mvcd_download_l1
-	 * arms the reactive D2A receive drain and enables the data/nodata/dma IRQs
-	 * itself, so the per-fragment records drain with hardware timing and the
-	 * measurement stream keeps flowing after RAMCODE for read() to deliver.
-	 */
 	gnss->rx_roff = 0;
-	gps_mvcd_download_l1(gnss);
+	gnss->dl_woff = 0;
 
-	if (wait_for_completion_timeout(&gnss->ramcode, msecs_to_jiffies(5000)))
-		dev_info(gnss->dev, "gpsdl0 opened: DSP RAMCODE_READY, measurements streaming\n");
-	else
-		dev_warn(gnss->dev, "gpsdl0 opened: no RAMCODE_READY within 5s\n");
+	if (inkernel_boot) {
+		/*
+		 * Optional: boot the DSP RAM image IN-KERNEL (MVCD over SMC/TF-A) and
+		 * wait for RAMCODE_READY. gps_mvcd_download_l1 arms the reactive D2A
+		 * drain and enables the data/nodata/dma IRQs itself.
+		 */
+		gps_mvcd_download_l1(gnss);
+		if (wait_for_completion_timeout(&gnss->ramcode, msecs_to_jiffies(5000)))
+			dev_info(gnss->dev, "gpsdl0 opened: DSP RAMCODE_READY (in-kernel boot)\n");
+		else
+			dev_warn(gnss->dev, "gpsdl0 opened: no RAMCODE_READY within 5s\n");
+		gnss->rx_roff = gnss->dl_woff;
+	} else {
+		/*
+		 * Default: bring the link up to RESET_DONE and start the reactive D2A
+		 * receive drain, but leave the MVCD download to userspace. This matches
+		 * stock mnld, which (captured over strace, see plinius-gps.md cont.24)
+		 * drives it on this char device: ioctl GET_DSP_BOOTUP_INFO (0x17), write
+		 * the 116-byte descriptor, ioctl MVCD_FRAGEMENT_NO (0x19) per fragment
+		 * while a reader thread drains the 12-byte acks, then write the start
+		 * frames and read the measurement stream. Our ioctl/read/write handlers
+		 * replay exactly those steps against TF-A.
+		 */
+		gnss->d2a_armed = true;
+		gps_smc(GPS_SMC_SW_REQUEST_EMI_USAGE, 1, 0, NULL);
+		gps_dma_d2a_arm(0);
+		if (gnss->irq_data >= 0)
+			enable_irq(gnss->irq_data);
+		if (gnss->irq_nodata >= 0)
+			enable_irq(gnss->irq_nodata);
+		if (gnss->irq_dma >= 0)
+			enable_irq(gnss->irq_dma);
+		dev_info(gnss->dev, "gpsdl0 opened: link0 up (RESET_DONE), userspace drives MVCD\n");
+	}
 
-	/* Deliver only post-RAMCODE traffic (measurement frames) to read(); the
-	 * download-ack records that advanced dl_woff are consumed, not forwarded.
-	 */
-	gnss->rx_roff = gnss->dl_woff;
-	/* Refill the IRQ budget for the long nav session (download used a cap). */
+	/* Budget for the long nav session (download, if run, used a cap). */
 	atomic_set(&g_gps_irq_budget, INT_MAX);
 
 	mutex_lock(&gnss->io_lock);
