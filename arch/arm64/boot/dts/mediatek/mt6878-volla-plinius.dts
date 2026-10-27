@@ -122,6 +122,15 @@
 			     <GIC_SPI 389 IRQ_TYPE_LEVEL_HIGH 0>,
 			     <GIC_SPI 129 IRQ_TYPE_LEVEL_HIGH 0>;
 		mediatek,connsys = <&consys>;
+		/*
+		 * GPIO186/187 = external GPS L1/L5 eLNA enable. Stock drives them
+		 * from its "gps_l1_lna_enable"/"gps_l5_lna_enable" pinctrl states;
+		 * mainline left them unclaimed so the eLNAs stayed off and the DSP
+		 * saw few/no satellites. Claim them as GPIO outputs driven high for
+		 * the whole time the GPS device is bound.
+		 */
+		pinctrl-names = "default";
+		pinctrl-0 = <&gps_elna_pins>;
 	};
 
 	modem@10209000 {
@@ -522,6 +531,15 @@
 				 <PINMUX_GPIO55__FUNC_GPIO55>;
 			input-enable;
 			bias-pull-up;
+		};
+	};
+
+	/* External GPS L1/L5 eLNA enable, held high while GPS is bound */
+	gps_elna_pins: gps-elna-pins {
+		pins-elna {
+			pinmux = <PINMUX_GPIO186__FUNC_GPIO186>,
+				 <PINMUX_GPIO187__FUNC_GPIO187>;
+			output-high;
 		};
 	};
 };
