@@ -447,7 +447,7 @@
 			status = "disabled";
 		};
 
-		ufsphy: ufsphy@112a0000 {
+		ufsphy: ufs-phy@112a0000 {
 			compatible = "mediatek,mt8183-ufsphy";
 			#phy-cells = <0>;
 			clocks = <&clk26m>, <&clk26m>;
@@ -457,7 +457,7 @@
 		};
 
 		ufshci: ufshci@112b0000 {
-			compatible = "mediatek,mt8183-ufshci";
+			compatible = "mediatek,mt6878-ufshci";
 			reg = <0x112b0000 0x2300>;
 			phys = <&ufsphy>;
 			interrupts = <GIC_SPI 393 IRQ_TYPE_LEVEL_HIGH 0>;
