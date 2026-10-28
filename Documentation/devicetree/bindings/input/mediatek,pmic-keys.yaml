@@ -50,6 +50,20 @@ properties:
     default: 0
     maximum: 2
 
+  interrupts:
+    description:
+      On the SPMI PMICs (e.g. MT6363) the key press and release interrupts
+      are wired on the controller node itself rather than on the per-key
+      child nodes.
+    minItems: 1
+    maxItems: 4
+
+  interrupt-names:
+    minItems: 1
+    maxItems: 4
+    items:
+      enum: [powerkey, powerkey_r, homekey, homekey_r]
+
 patternProperties:
   "^((power|home)|(key-[a-z0-9-]+|[a-z0-9-]+-key))$":
     $ref: input.yaml#
