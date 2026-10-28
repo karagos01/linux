@@ -66,6 +66,19 @@ config MTK_SCP
 
 	  It's safe to say N here.
 
+config MTK_SCP_RV55
+	tristate "MediaTek SCP (RV55 tinysys) bring-up support"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on HAVE_ARM_SMCCC
+	help
+	  Experimental bring-up for the RISC-V (Andes RV55) System Companion
+	  Processor found on MediaTek SoCs such as the MT6878, whose firmware is
+	  an MTK tinysys container staged by the bootloader and whose reset is
+	  controlled through the resident TF-A. This is distinct from MTK_SCP,
+	  which supports the older Cortex-M SCPs.
+
+	  It's safe to say N here.
+
 config OMAP_REMOTEPROC
 	tristate "OMAP remoteproc support"
 	depends on ARCH_OMAP4 || SOC_OMAP5 || SOC_DRA7XX

@@ -744,6 +744,30 @@
 		interrupts = <GIC_SPI 218 IRQ_TYPE_LEVEL_HIGH 0>;
 		#thermal-sensor-cells = <1>;
 	};
+
+	scp: scp@1c400000 {
+		compatible = "mediatek,mt6878-scp";
+		reg = <0x1c400000 0x100000>,
+		      <0x1cb24000 0x1000>,
+		      <0x1cb30000 0x1000>,
+		      <0x1cb40000 0x1000>,
+		      <0x1cba0000 0x1000>,
+		      <0x1cbb0000 0x1000>,
+		      <0x1cbc0000 0x1000>,
+		      <0x1cbd0000 0x1000>,
+		      <0x1cbe0000 0x1000>;
+		reg-names = "sram", "cfg", "cfg_core0", "cfg_core1",
+			    "mbox0", "mbox1", "mbox2", "mbox3", "mbox4";
+		interrupts = <GIC_SPI 516 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 517 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 518 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 519 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 520 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 521 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 522 IRQ_TYPE_LEVEL_HIGH 0>;
+		interrupt-names = "ipc0", "ipc1", "mbox0", "mbox1",
+				  "mbox2", "mbox3", "mbox4";
+	};
 };
 
 &cpu0 { #cooling-cells = <2>; };
