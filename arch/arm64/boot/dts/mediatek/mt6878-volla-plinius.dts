@@ -604,9 +604,13 @@
 	pmic@9 {
 		compatible = "mediatek,mt6685";
 		reg = <0x9 SPMI_USID>;
+		interrupts = <9 0 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
 
 		rtc {
 			compatible = "mediatek,mt6685-rtc";
+			interrupts = <0 IRQ_TYPE_LEVEL_HIGH>;
 		};
 	};
 
