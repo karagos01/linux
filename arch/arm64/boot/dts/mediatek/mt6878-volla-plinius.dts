@@ -604,6 +604,10 @@
 	pmic@9 {
 		compatible = "mediatek,mt6685";
 		reg = <0x9 SPMI_USID>;
+
+		rtc {
+			compatible = "mediatek,mt6685-rtc";
+		};
 	};
 
 	pmic@5 {
