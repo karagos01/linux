@@ -307,7 +307,7 @@
 			hw-voter-regmap = <&hwv>;
 		};
 
-		pio: pinctrl {
+		pio: pinctrl@10005000 {
 			compatible = "mediatek,mt6878-pinctrl";
 			reg = <0x10005000 0x1000>,
 			      <0x11d10000 0x1000>,
