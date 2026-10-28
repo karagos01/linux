@@ -396,26 +396,25 @@
 			#clock-cells = <1>;
 		};
 
-		ssusb: usb0@11201000 {
-			compatible = "mediatek,mtu3";
+		ssusb: usb@11201000 {
+			compatible = "mediatek,mt6878-mtu3", "mediatek,mtu3";
 			reg = <0x11201000 0x2e00>,
 			      <0x11203e00 0x100>;
 			reg-names = "mac", "ippc";
 			interrupts = <GIC_SPI 384 IRQ_TYPE_LEVEL_HIGH 0>;
-			phy-cells = <1>;
 			phys = <&u2port PHY_TYPE_USB2>;
 			clocks = <&topckgen CLK_TOP_USB_TOP_SEL>,
 				 <&topckgen CLK_TOP_USB_XHCI_SEL>,
 				 <&pericfg_ao CLK_PERAOP_SSUSB0_FRMCNT>;
-			clock-names = "sys_ck", "host_ck", "frmcnt_ck";
+			clock-names = "sys_ck", "xhci_ck", "frmcnt_ck";
 			#address-cells = <1>;
 			#size-cells = <1>;
 			ranges;
 			mediatek,syscon-wakeup = <&pericfg_ao 0x214 105>;
 			wakeup-source;
 
-			usb_host: xhci0@11200000 {
-				compatible = "mediatek,mtk-xhci";
+			usb_host: usb@11200000 {
+				compatible = "mediatek,mt6878-xhci", "mediatek,mtk-xhci";
 				reg = <0x11200000 0x1000>;
 				reg-names = "mac";
 				interrupts = <GIC_SPI 385 IRQ_TYPE_LEVEL_HIGH 0>;
