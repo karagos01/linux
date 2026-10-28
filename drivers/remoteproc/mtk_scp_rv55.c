@@ -37,16 +37,58 @@
 #define SCP_NR_MBOX			5
 
 /*
- * The "ready" IPI (IPI_IN_SCP_READY_1, tinysys channel 22) lands on mailbox 1.
- * Its slot offset and interrupt bit are derived from this firmware's pin
- * layout (verified on-device: the ready + logger bits latch as 0x02400000).
- * The one-word payload is the SCP image size.
+ * Pins are laid out within a mailbox by the firmware's send-then-recv order;
+ * for this SoC every pin's slot byte offset works out to pin_index * 8. All
+ * SCP<->sensorhub traffic uses mailbox 1. Values verified on-device (the ready
+ * + logger recv bits latch as 0x02400000).
  */
-#define SCP_READY_MBOX			1
-#define SCP_READY_BIT			25
-#define SCP_READY_SLOT			0xc8
+#define SCP_SENSOR_MBOX			1
+#define SCP_PIN_OFF(bit)		((bit) * 8)
+
+/* SCP->AP recv pins on mailbox 1 */
+#define SCP_READY_BIT			25	/* IPI_IN_SCP_READY_1, payload = image size */
+#define SCP_SENSOR_NOTIFY_BIT		27	/* IPI_IN_SENSOR_NOTIFY */
+
+/* AP->SCP send pins on mailbox 1 */
+#define SCP_SENSOR_NOTIFY_OUT_BIT	13	/* IPI_OUT_SENSOR_NOTIFY */
+
+/* sensor_comm notify commands */
+#define SCP_SENSOR_NOTIFY_READY		4
 
 #define SCP_READY_TIMEOUT_MS		10000
+
+/*
+ * sensor_comm notify packet (28 bytes): a small header plus five data words.
+ * The 5-byte header is covered by a CRC-8 the SCP checks, so the layout and
+ * checksum must match the firmware exactly.
+ */
+struct scp_sensor_notify {
+	u8 sequence;
+	u8 sensor_type;
+	u8 command;
+	u8 length;
+	u8 crc8;
+	u8 pad[3];
+	s32 value[5];
+} __packed;
+
+/* CRC-8, polynomial 0x8c (reflected), init 0 — the SCP's tiny_crc8 */
+static u8 scp_crc8(const u8 *p, size_t len)
+{
+	static const u8 tbl[32] = {
+		0x00, 0x5e, 0xbc, 0xe2, 0x61, 0x3f, 0xdd, 0x83,
+		0xc2, 0x9c, 0x7e, 0x20, 0xa3, 0xfd, 0x1f, 0x41,
+		0x00, 0x9d, 0x23, 0xbe, 0x46, 0xdb, 0x65, 0xf8,
+		0x8c, 0x11, 0xaf, 0x32, 0xca, 0x57, 0xe9, 0x74,
+	};
+	u8 crc = 0;
+
+	while (len--) {
+		crc ^= *p++;
+		crc = tbl[crc & 0x0f] ^ tbl[16 + ((crc >> 4) & 0x0f)];
+	}
+	return crc;
+}
 
 struct scp_region_info {
 	u32 ap_loader_start;
@@ -72,9 +114,49 @@ struct mt6878_scp {
 	void __iomem *sram;
 	struct scp_mbox mbox[SCP_NR_MBOX];
 	atomic_t ready;
+	atomic_t sensor_ready;
 	u32 image_size;
+	u8 seq;
+	struct work_struct sensor_init;
 	struct delayed_work report;
 };
+
+/* Write a message into a send pin's slot and ring the SCP's doorbell. */
+static void scp_mbox_send(struct scp_mbox *mb, unsigned int bit,
+			  const void *data, size_t len)
+{
+	const u32 *w = data;
+	size_t i;
+
+	for (i = 0; i < DIV_ROUND_UP(len, 4); i++)
+		writel(w[i], mb->base + SCP_PIN_OFF(bit) + i * 4);
+	/* flush the slot before the trigger the SCP will react to */
+	wmb();
+	writel(BIT(bit), mb->base + SCP_MBOX_SET_IRQ);
+}
+
+static void scp_send_sensor_ready(struct mt6878_scp *scp)
+{
+	struct scp_sensor_notify n = {
+		.sequence = ++scp->seq,
+		.sensor_type = 0,
+		.command = SCP_SENSOR_NOTIFY_READY,
+		.length = 0,
+	};
+
+	n.crc8 = scp_crc8((u8 *)&n, 4);
+	scp_mbox_send(&scp->mbox[SCP_SENSOR_MBOX], SCP_SENSOR_NOTIFY_OUT_BIT,
+		      &n, sizeof(n));
+	dev_info(scp->dev, "sent sensorhub host-ready (seq %u)\n", n.sequence);
+}
+
+static void scp_sensor_init_work(struct work_struct *work)
+{
+	struct mt6878_scp *scp =
+		container_of(work, struct mt6878_scp, sensor_init);
+
+	scp_send_sensor_ready(scp);
+}
 
 static irqreturn_t scp_mbox_isr(int irq, void *data)
 {
@@ -85,14 +167,29 @@ static irqreturn_t scp_mbox_isr(int irq, void *data)
 	if (!status)
 		return IRQ_NONE;
 
-	if (mb->id == SCP_READY_MBOX && (status & BIT(SCP_READY_BIT))) {
-		scp->image_size = readl(mb->base + SCP_READY_SLOT);
-		if (atomic_xchg(&scp->ready, 1) == 0)
-			dev_info(scp->dev,
-				 "SCP ready: image size %#x (mbox%d bit %d)\n",
-				 scp->image_size, mb->id, SCP_READY_BIT);
-	} else {
-		dev_dbg(scp->dev, "mbox%d recv status %#x\n", mb->id, status);
+	if (mb->id == SCP_SENSOR_MBOX && (status & BIT(SCP_READY_BIT))) {
+		scp->image_size = readl(mb->base + SCP_PIN_OFF(SCP_READY_BIT));
+		if (atomic_xchg(&scp->ready, 1) == 0) {
+			dev_info(scp->dev, "SCP ready: image size %#x\n",
+				 scp->image_size);
+			/* the SCP is up; greet its sensor hub from a thread */
+			schedule_work(&scp->sensor_init);
+		}
+	}
+
+	if (mb->id == SCP_SENSOR_MBOX && (status & BIT(SCP_SENSOR_NOTIFY_BIT))) {
+		struct scp_sensor_notify n;
+		u32 *w = (u32 *)&n;
+		int i;
+
+		for (i = 0; i < sizeof(n) / 4; i++)
+			w[i] = readl(mb->base + SCP_PIN_OFF(SCP_SENSOR_NOTIFY_BIT) + i * 4);
+		dev_info(scp->dev,
+			 "sensor NOTIFY: cmd %u type %u len %u val0 %d\n",
+			 n.command, n.sensor_type, n.length, n.value[0]);
+		if (n.command == SCP_SENSOR_NOTIFY_READY &&
+		    atomic_xchg(&scp->sensor_ready, 1) == 0)
+			dev_info(scp->dev, "sensor hub ready\n");
 	}
 
 	/*
@@ -119,13 +216,16 @@ static void mt6878_scp_report(struct work_struct *work)
 	struct mt6878_scp *scp =
 		container_of(to_delayed_work(work), struct mt6878_scp, report);
 
-	if (atomic_read(&scp->ready))
-		dev_info(scp->dev, "SCP ready (image size %#x)\n",
+	if (!atomic_read(&scp->ready))
+		dev_warn(scp->dev, "SCP did not signal ready within %d ms\n",
+			 SCP_READY_TIMEOUT_MS);
+	else if (atomic_read(&scp->sensor_ready))
+		dev_info(scp->dev, "SCP ready (image %#x), sensor hub ready\n",
 			 scp->image_size);
 	else
-		dev_warn(scp->dev,
-			 "SCP did not signal ready within %d ms\n",
-			 SCP_READY_TIMEOUT_MS);
+		dev_info(scp->dev,
+			 "SCP ready (image %#x), sensor hub did not answer\n",
+			 scp->image_size);
 }
 
 static int mt6878_scp_request_mbox(struct platform_device *pdev,
@@ -183,6 +283,8 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	scp->dev = dev;
 	atomic_set(&scp->ready, 0);
+	atomic_set(&scp->sensor_ready, 0);
+	INIT_WORK(&scp->sensor_init, scp_sensor_init_work);
 	INIT_DELAYED_WORK(&scp->report, mt6878_scp_report);
 	platform_set_drvdata(pdev, scp);
 
@@ -230,6 +332,7 @@ static void mt6878_scp_remove(struct platform_device *pdev)
 {
 	struct mt6878_scp *scp = platform_get_drvdata(pdev);
 
+	cancel_work_sync(&scp->sensor_init);
 	cancel_delayed_work_sync(&scp->report);
 }
 
