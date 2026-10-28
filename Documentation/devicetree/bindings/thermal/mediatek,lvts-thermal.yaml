@@ -18,6 +18,8 @@ description: |
 properties:
   compatible:
     enum:
+      - mediatek,mt6878-lvts-ap
+      - mediatek,mt6878-lvts-mcu
       - mediatek,mt7987-lvts-ap
       - mediatek,mt7988-lvts-ap
       - mediatek,mt8186-lvts
@@ -94,14 +96,29 @@ allOf:
         nvmem-cell-names:
           minItems: 2
 
+  # The MT6878 cannot expose its eFuse calibration to the kernel (the data
+  # lives in the device-info block, not an nvmem cell), and its LVTS clock
+  # and reset are managed outside this node, so those are all optional there.
+  # Every other SoC provides them.
+  - if:
+      not:
+        properties:
+          compatible:
+            contains:
+              enum:
+                - mediatek,mt6878-lvts-ap
+                - mediatek,mt6878-lvts-mcu
+    then:
+      required:
+        - clocks
+        - resets
+        - nvmem-cells
+        - nvmem-cell-names
+
 required:
   - compatible
   - reg
   - interrupts
-  - clocks
-  - resets
-  - nvmem-cells
-  - nvmem-cell-names
 
 additionalProperties: false
 
