@@ -797,23 +797,9 @@
 
 		watchdog: watchdog@1c00a000 {
 			compatible = "mediatek,mt6878-wdt",
-				     "mediatek,mt6589-wdt",
-				     "syscon";
+				     "mediatek,mt6589-wdt";
 			reg = <0x1c00a000 0x100>;
-
-			reboot-mode {
-				compatible = "syscon-reboot-mode";
-				offset = <0x24>;
-				mask = <0xf>;
-				mode-charger = <0x1>;
-				mode-recovery = <0x2>;
-				mode-bootloader = <0x3>;
-				mode-dm-verity-dev-corrupt = <0x4>;
-				mode-kpoc = <0x5>;
-				mode-ddr-reserve = <0x6>;
-				mode-meta = <0x7>;
-				mode-rpmbpk = <0x8>;
-			};
+			#reset-cells = <1>;
 		};
 	};
 
