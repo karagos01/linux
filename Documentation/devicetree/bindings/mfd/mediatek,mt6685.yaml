@@ -15,6 +15,11 @@ description:
   the connectivity A-die. It is a multi-function device whose sub-functions
   are described in child nodes.
 
+  The MT6685 aggregates its sub-function interrupts (such as the RTC alarm)
+  into one SCK_TOP interrupt group that it raises on its SPMI interrupt line.
+  When that line is wired up the PMIC acts as an interrupt controller for its
+  sub-functions, which reference their interrupt by its number in the group.
+
 properties:
   compatible:
     const: mediatek,mt6685
@@ -22,14 +27,49 @@ properties:
   reg:
     maxItems: 1
 
+  interrupts:
+    maxItems: 1
+    description:
+      The SPMI interrupt line on which the PMIC raises its aggregated
+      SCK_TOP interrupt group.
+
+  interrupt-controller: true
+
+  "#interrupt-cells":
+    const: 2
+    description:
+      The first cell is the sub-function interrupt number within the SCK_TOP
+      group, the second cell is the trigger type.
+
+  rtc:
+    type: object
+    $ref: /schemas/rtc/rtc.yaml#
+    unevaluatedProperties: false
+    description:
+      MT6685 Real Time Clock.
+
+    properties:
+      compatible:
+        const: mediatek,mt6685-rtc
+
+      interrupts:
+        maxItems: 1
+
+    required:
+      - compatible
+
 required:
   - compatible
   - reg
 
-additionalProperties: true
+dependencies:
+  interrupt-controller: ["#interrupt-cells", interrupts]
+
+additionalProperties: false
 
 examples:
   - |
+    #include <dt-bindings/interrupt-controller/irq.h>
     #include <dt-bindings/spmi/spmi.h>
 
     spmi {
@@ -39,5 +79,13 @@ examples:
         pmic@9 {
             compatible = "mediatek,mt6685";
             reg = <0x9 SPMI_USID>;
+            interrupts = <9 0 IRQ_TYPE_LEVEL_HIGH>;
+            interrupt-controller;
+            #interrupt-cells = <2>;
+
+            rtc {
+                compatible = "mediatek,mt6685-rtc";
+                interrupts = <0 IRQ_TYPE_LEVEL_HIGH>;
+            };
         };
     };
