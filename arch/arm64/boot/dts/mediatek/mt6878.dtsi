@@ -734,7 +734,7 @@
 		};
 
 		usbphy: t-phy@11f40000 {
-			compatible = "mediatek,mt6785-tphy", "mediatek,generic-tphy-v2";
+			compatible = "mediatek,mt6878-tphy", "mediatek,generic-tphy-v2";
 			#address-cells = <1>;
 			#size-cells = <1>;
 			ranges = <0x0 0x11f40000 0x1000>;
