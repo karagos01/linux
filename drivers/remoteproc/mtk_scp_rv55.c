@@ -11,10 +11,13 @@
  * This driver boots the RV55 (reset-release via the SMC above), speaks the
  * tinysys sensor-hub protocol over the hardware mailbox (CTRL/NOTIFY packets
  * with a CRC-8 header), hands the SCP the shared-DRAM ring layout and a host
- * timebase, enumerates the sensor list, enables the accelerometer, and exposes
- * its live samples as a standard IIO device (in_accel_{x,y,z}_raw, with a scale
- * to m/s^2). The generic rpmsg layer and the remaining sensors are not wired up
- * yet.
+ * timebase, enumerates the sensor list, and exposes the accelerometer as a
+ * standard IIO device. The sensor is enabled at bring-up and streams
+ * continuously; besides feeding the IIO interface this keeps the SCP out of the
+ * deep idle state it enters with no active sensor, in which it stops acking
+ * mailbox traffic. The latest sample is available through in_accel_*_raw and the
+ * full timestamped stream through the kfifo capture buffer (/dev/iio:deviceN).
+ * The generic rpmsg layer and the remaining sensors are not wired up yet.
  */
 #include <linux/arm-smccc.h>
 #include <linux/atomic.h>
@@ -31,6 +34,8 @@
 #include <linux/timekeeping.h>
 #include <linux/workqueue.h>
 #include <linux/iio/iio.h>
+#include <linux/iio/buffer.h>
+#include <linux/iio/kfifo_buf.h>
 #include <asm/arch_timer.h>
 
 /* region-info descriptor the bootloader leaves at SCP SRAM + 0x4 */
@@ -81,8 +86,9 @@
 
 /*
  * Steady sampling rate at which the accelerometer is enabled once the sensor
- * hub is up; the latest DATA-ring sample is cached for sysfs reads. The gain
- * (raw / gain = m/s^2) is read back from the sensor list, with a fallback.
+ * hub is up; the latest DATA-ring sample is cached for sysfs reads and the whole
+ * stream is pushed to the capture buffer. The gain (raw / gain = m/s^2) is read
+ * back from the sensor list, with a fallback.
  */
 #define SCP_ACCEL_PERIOD_NS		100000000LL	/* 10 Hz */
 #define SCP_ACCEL_DEFAULT_GAIN		1000
@@ -299,12 +305,19 @@ static struct mt6878_scp *iio_to_scp(struct iio_dev *indio)
 	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE) |	\
 				    BIT(IIO_CHAN_INFO_SAMP_FREQ),	\
 	.scan_index = idx,					\
+	.scan_type = {						\
+		.sign = 's',					\
+		.realbits = 32,					\
+		.storagebits = 32,				\
+		.endianness = IIO_CPU,				\
+	},							\
 }
 
 static const struct iio_chan_spec scp_accel_channels[] = {
 	SCP_ACCEL_CHANNEL(X, 0),
 	SCP_ACCEL_CHANNEL(Y, 1),
 	SCP_ACCEL_CHANNEL(Z, 2),
+	IIO_CHAN_SOFT_TIMESTAMP(3),
 };
 
 static int scp_read_raw(struct iio_dev *indio,
@@ -515,22 +528,30 @@ static int scp_query_sensor_list(struct mt6878_scp *scp)
 	return 0;
 }
 
-/* Enable a sensor at a given sample period / max report latency (nanoseconds). */
-static int scp_sensor_enable(struct mt6878_scp *scp, u8 type,
-			     s64 delay_ns, s64 latency_ns)
+/*
+ * Enable a sensor at a given sample period / max report latency (nanoseconds).
+ * Sent fire-and-forget (like disable): the SCP does not always ack an ENABLE,
+ * and the arrival of DATA-ring records is the real "it started" signal, so there
+ * is nothing useful to wait for here.
+ */
+static void scp_sensor_enable(struct mt6878_scp *scp, u8 type,
+			      s64 delay_ns, s64 latency_ns)
 {
 	struct {
 		struct scp_sensor_ctrl c;
 		struct scp_sensor_batch b;
 	} __packed pkt = {};
 
+	pkt.c.sequence = ++scp->seq;
 	pkt.c.sensor_type = type;
 	pkt.c.command = SCP_SENSOR_CTRL_ENABLE;
 	pkt.c.length = sizeof(pkt.b);
 	pkt.b.delay = delay_ns;
 	pkt.b.latency = latency_ns;
 
-	return scp_ctrl_send(scp, &pkt.c, sizeof(pkt));
+	pkt.c.crc8 = scp_crc8((u8 *)&pkt.c, 4);
+	scp_mbox_send(&scp->mbox[SCP_SENSOR_MBOX], SCP_SENSOR_CTRL_OUT_BIT,
+		      &pkt, sizeof(pkt));
 }
 
 /*
@@ -559,6 +580,7 @@ static void scp_sensor_disable(struct mt6878_scp *scp, u8 type)
 static void scp_drain_data_work(struct work_struct *work)
 {
 	struct mt6878_scp *scp = container_of(work, struct mt6878_scp, drain);
+	struct iio_dev *indio = scp->indio;
 	u32 bufsz = readl(scp->data_ring + 8);
 	u32 wp = scp->data_wp;
 	u32 rp = readl(scp->data_ring + 0);
@@ -578,7 +600,7 @@ static void scp_drain_data_work(struct work_struct *work)
 		if (rec.sensor_type != SCP_SENSOR_TYPE_ACCEL)
 			continue;
 
-		/* publish the newest sample for IIO sysfs reads */
+		/* cache the newest sample for sysfs in_accel_*_raw reads */
 		spin_lock_irqsave(&scp->sample_lock, flags);
 		scp->accel[0] = rec.value[0];
 		scp->accel[1] = rec.value[1];
@@ -594,6 +616,20 @@ static void scp_drain_data_work(struct work_struct *work)
 				 "accel streaming to IIO: x=%d y=%d z=%d (acc %u)\n",
 				 rec.value[0], rec.value[1], rec.value[2],
 				 rec.accuracy);
+
+		/* and push it to the capture buffer if one is open */
+		if (iio_buffer_enabled(indio)) {
+			struct {
+				s32 chan[3];
+				s64 ts __aligned(8);
+			} sample;
+
+			sample.chan[0] = rec.value[0];
+			sample.chan[1] = rec.value[1];
+			sample.chan[2] = rec.value[2];
+			iio_push_to_buffers_with_timestamp(indio, &sample,
+							   rec.timestamp);
+		}
 	}
 
 	/* publish the advanced read pointer so the SCP can reuse the space */
@@ -627,12 +663,14 @@ static void scp_sensorhub_work(struct work_struct *work)
 
 	scp_query_sensor_list(scp);
 
-	/* Enable the accelerometer; DATA-ring samples feed the IIO device. */
-	if (scp_sensor_enable(scp, SCP_SENSOR_TYPE_ACCEL, SCP_ACCEL_PERIOD_NS, 0))
-		dev_warn(scp->dev, "accel enable failed\n");
-	else
-		dev_info(scp->dev, "accelerometer enabled (%d Hz)\n",
-			 (int)(NSEC_PER_SEC / SCP_ACCEL_PERIOD_NS));
+	/*
+	 * Enable the accelerometer now and keep it running: its DATA-ring samples
+	 * feed the IIO device, and the steady traffic keeps the SCP from dropping
+	 * into the deep idle state where it stops acking mailbox commands.
+	 */
+	scp_sensor_enable(scp, SCP_SENSOR_TYPE_ACCEL, SCP_ACCEL_PERIOD_NS, 0);
+	dev_info(scp->dev, "accelerometer enabled (%d Hz), streaming to IIO\n",
+		 (int)(NSEC_PER_SEC / SCP_ACCEL_PERIOD_NS));
 }
 
 static irqreturn_t scp_mbox_isr(int irq, void *data)
@@ -822,9 +860,10 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 		return ret;
 
 	/*
-	 * Expose the accelerometer as an IIO device. It is registered up front;
-	 * in_accel_*_raw returns -EAGAIN until the sensor hub comes up and the
-	 * first DATA-ring sample has been cached.
+	 * Expose the accelerometer as an IIO device with a kfifo capture buffer.
+	 * It is registered up front; in_accel_*_raw returns -EAGAIN and the buffer
+	 * stays empty until the sensor hub comes up and the first DATA-ring sample
+	 * has been cached.
 	 */
 	scp->indio = devm_iio_device_alloc(dev, sizeof(scp));
 	if (!scp->indio)
@@ -835,6 +874,9 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 	scp->indio->info = &scp_accel_info;
 	scp->indio->channels = scp_accel_channels;
 	scp->indio->num_channels = ARRAY_SIZE(scp_accel_channels);
+	ret = devm_iio_kfifo_buffer_setup(dev, scp->indio, NULL);
+	if (ret)
+		return dev_err_probe(dev, ret, "cannot set up IIO buffer\n");
 	ret = devm_iio_device_register(dev, scp->indio);
 	if (ret)
 		return dev_err_probe(dev, ret, "cannot register IIO device\n");
