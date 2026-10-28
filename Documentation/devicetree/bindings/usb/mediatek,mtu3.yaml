@@ -22,6 +22,7 @@ properties:
     items:
       - enum:
           - mediatek,mt2712-mtu3
+          - mediatek,mt6878-mtu3
           - mediatek,mt8173-mtu3
           - mediatek,mt8183-mtu3
           - mediatek,mt8186-mtu3
@@ -70,14 +71,18 @@ properties:
       - description: Frame count clock
 
   clock-names:
+    # The driver fetches every clock by name, so the order is free and a SoC
+    # need only list the clocks it actually wires (sys_ck is required).
     minItems: 1
+    maxItems: 6
     items:
-      - const: sys_ck  # required, others are optional
-      - const: ref_ck
-      - const: mcu_ck
-      - const: dma_ck
-      - const: xhci_ck
-      - const: frmcnt_ck
+      enum:
+        - sys_ck
+        - ref_ck
+        - mcu_ck
+        - dma_ck
+        - xhci_ck
+        - frmcnt_ck
 
   phys:
     description:
