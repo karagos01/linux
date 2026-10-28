@@ -11,9 +11,10 @@
  * This driver boots the RV55 (reset-release via the SMC above), speaks the
  * tinysys sensor-hub protocol over the hardware mailbox (CTRL/NOTIFY packets
  * with a CRC-8 header), hands the SCP the shared-DRAM ring layout and a host
- * timebase, enumerates the sensor list, and then enables the accelerometer and
- * streams its live samples out of the DATA ring. The generic rpmsg layer and
- * the remaining sensors are not wired up yet.
+ * timebase, enumerates the sensor list, enables the accelerometer, and exposes
+ * its live samples as a standard IIO device (in_accel_{x,y,z}_raw, with a scale
+ * to m/s^2). The generic rpmsg layer and the remaining sensors are not wired up
+ * yet.
  */
 #include <linux/arm-smccc.h>
 #include <linux/atomic.h>
@@ -25,9 +26,11 @@
 #include <linux/platform_device.h>
 #include <linux/rtc.h>
 #include <linux/sched/clock.h>
+#include <linux/spinlock.h>
 #include <linux/time.h>
 #include <linux/timekeeping.h>
 #include <linux/workqueue.h>
+#include <linux/iio/iio.h>
 #include <asm/arch_timer.h>
 
 /* region-info descriptor the bootloader leaves at SCP SRAM + 0x4 */
@@ -77,11 +80,12 @@
 #define SCP_SENSOR_TYPE_ACCEL		1
 
 /*
- * Demonstration burst for the accelerometer: a slow, log-readable rate, and a
- * cap after which the driver disables the sensor again so the log stays quiet.
+ * Steady sampling rate at which the accelerometer is enabled once the sensor
+ * hub is up; the latest DATA-ring sample is cached for sysfs reads. The gain
+ * (raw / gain = m/s^2) is read back from the sensor list, with a fallback.
  */
-#define SCP_ACCEL_PERIOD_NS		200000000LL	/* 5 Hz */
-#define SCP_ACCEL_SAMPLE_CAP		50
+#define SCP_ACCEL_PERIOD_NS		100000000LL	/* 10 Hz */
+#define SCP_ACCEL_DEFAULT_GAIN		1000
 
 /* share-memory payload types */
 #define SCP_SHM_PAYLOAD_DATA		0
@@ -269,9 +273,72 @@ struct mt6878_scp {
 	/* live DATA-ring drain */
 	struct work_struct drain;
 	u32 data_wp;
-	u32 samples;
+
+	/* IIO accelerometer: latest cached sample */
+	struct iio_dev *indio;
+	spinlock_t sample_lock;
+	s32 accel[3];
+	u8 accel_accuracy;
+	s64 accel_ts;
+	u32 accel_gain;
+	bool accel_valid;
 
 	struct delayed_work report;
+};
+
+static struct mt6878_scp *iio_to_scp(struct iio_dev *indio)
+{
+	return *(struct mt6878_scp **)iio_priv(indio);
+}
+
+#define SCP_ACCEL_CHANNEL(mod, idx) {				\
+	.type = IIO_ACCEL,					\
+	.modified = 1,						\
+	.channel2 = IIO_MOD_##mod,				\
+	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),		\
+	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE) |	\
+				    BIT(IIO_CHAN_INFO_SAMP_FREQ),	\
+	.scan_index = idx,					\
+}
+
+static const struct iio_chan_spec scp_accel_channels[] = {
+	SCP_ACCEL_CHANNEL(X, 0),
+	SCP_ACCEL_CHANNEL(Y, 1),
+	SCP_ACCEL_CHANNEL(Z, 2),
+};
+
+static int scp_read_raw(struct iio_dev *indio,
+			struct iio_chan_spec const *chan,
+			int *val, int *val2, long mask)
+{
+	struct mt6878_scp *scp = iio_to_scp(indio);
+	unsigned long flags;
+
+	switch (mask) {
+	case IIO_CHAN_INFO_RAW:
+		spin_lock_irqsave(&scp->sample_lock, flags);
+		if (!scp->accel_valid) {
+			spin_unlock_irqrestore(&scp->sample_lock, flags);
+			return -EAGAIN;
+		}
+		*val = scp->accel[chan->scan_index];
+		spin_unlock_irqrestore(&scp->sample_lock, flags);
+		return IIO_VAL_INT;
+	case IIO_CHAN_INFO_SCALE:
+		/* physical [m/s^2] = raw / gain */
+		*val = 1;
+		*val2 = scp->accel_gain;
+		return IIO_VAL_FRACTIONAL;
+	case IIO_CHAN_INFO_SAMP_FREQ:
+		*val = NSEC_PER_SEC / SCP_ACCEL_PERIOD_NS;
+		return IIO_VAL_INT;
+	default:
+		return -EINVAL;
+	}
+}
+
+static const struct iio_info scp_accel_info = {
+	.read_raw = scp_read_raw,
 };
 
 /* Write a message into a send pin's slot and ring the SCP's doorbell. */
@@ -440,6 +507,8 @@ static int scp_query_sensor_list(struct mt6878_scp *scp)
 		dev_info(scp->dev,
 			 "sensor type %2u gain %u name '%.16s' vendor '%.16s'\n",
 			 rec.sensor_type, rec.gain, rec.name, rec.vendor);
+		if (rec.sensor_type == SCP_SENSOR_TYPE_ACCEL)
+			scp->accel_gain = rec.gain;
 		count++;
 	}
 	dev_info(scp->dev, "sensor hub lists %d sensor(s) (wp=%u)\n", count, wp);
@@ -465,9 +534,9 @@ static int scp_sensor_enable(struct mt6878_scp *scp, u8 type,
 }
 
 /*
- * Best-effort disable: the SCP acts on the command (the stream stops) but does
- * not reliably ack a DISABLE issued while it is still draining the burst, so
- * fire it without waiting rather than log a spurious timeout.
+ * Best-effort disable (used on unbind): the SCP acts on the command (the stream
+ * stops) but does not reliably ack a DISABLE issued while samples are still in
+ * flight, so fire it without waiting rather than log a spurious timeout.
  */
 static void scp_sensor_disable(struct mt6878_scp *scp, u8 type)
 {
@@ -499,6 +568,8 @@ static void scp_drain_data_work(struct work_struct *work)
 
 	while (rp != wp) {
 		struct scp_sensor_data rec;
+		unsigned long flags;
+		bool first;
 
 		memcpy_fromio(&rec, scp->data_ring + SCP_SHM_HDR_SIZE + rp,
 			      sizeof(rec));
@@ -506,15 +577,23 @@ static void scp_drain_data_work(struct work_struct *work)
 
 		if (rec.sensor_type != SCP_SENSOR_TYPE_ACCEL)
 			continue;
-		if (scp->samples < SCP_ACCEL_SAMPLE_CAP)
+
+		/* publish the newest sample for IIO sysfs reads */
+		spin_lock_irqsave(&scp->sample_lock, flags);
+		scp->accel[0] = rec.value[0];
+		scp->accel[1] = rec.value[1];
+		scp->accel[2] = rec.value[2];
+		scp->accel_accuracy = rec.accuracy;
+		scp->accel_ts = rec.timestamp;
+		first = !scp->accel_valid;
+		scp->accel_valid = true;
+		spin_unlock_irqrestore(&scp->sample_lock, flags);
+
+		if (first)
 			dev_info(scp->dev,
-				 "accel #%u: x=%d y=%d z=%d (acc %u, t=%lld)\n",
-				 scp->samples, rec.value[0], rec.value[1],
-				 rec.value[2], rec.accuracy, rec.timestamp);
-		if (++scp->samples == SCP_ACCEL_SAMPLE_CAP) {
-			dev_info(scp->dev, "accel burst done, disabling\n");
-			scp_sensor_disable(scp, SCP_SENSOR_TYPE_ACCEL);
-		}
+				 "accel streaming to IIO: x=%d y=%d z=%d (acc %u)\n",
+				 rec.value[0], rec.value[1], rec.value[2],
+				 rec.accuracy);
 	}
 
 	/* publish the advanced read pointer so the SCP can reuse the space */
@@ -548,11 +627,12 @@ static void scp_sensorhub_work(struct work_struct *work)
 
 	scp_query_sensor_list(scp);
 
-	/* Enable the accelerometer and let the DATA ring stream live samples. */
+	/* Enable the accelerometer; DATA-ring samples feed the IIO device. */
 	if (scp_sensor_enable(scp, SCP_SENSOR_TYPE_ACCEL, SCP_ACCEL_PERIOD_NS, 0))
 		dev_warn(scp->dev, "accel enable failed\n");
 	else
-		dev_info(scp->dev, "accelerometer enabled, draining DATA ring\n");
+		dev_info(scp->dev, "accelerometer enabled (%d Hz)\n",
+			 (int)(NSEC_PER_SEC / SCP_ACCEL_PERIOD_NS));
 }
 
 static irqreturn_t scp_mbox_isr(int irq, void *data)
@@ -712,6 +792,8 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 	atomic_set(&scp->sensor_ready, 0);
 	init_completion(&scp->ctrl_ack);
 	init_completion(&scp->notify_reply);
+	spin_lock_init(&scp->sample_lock);
+	scp->accel_gain = SCP_ACCEL_DEFAULT_GAIN;
 	INIT_WORK(&scp->sensor_init, scp_sensor_init_work);
 	INIT_WORK(&scp->sensorhub, scp_sensorhub_work);
 	INIT_WORK(&scp->drain, scp_drain_data_work);
@@ -740,6 +822,24 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 		return ret;
 
 	/*
+	 * Expose the accelerometer as an IIO device. It is registered up front;
+	 * in_accel_*_raw returns -EAGAIN until the sensor hub comes up and the
+	 * first DATA-ring sample has been cached.
+	 */
+	scp->indio = devm_iio_device_alloc(dev, sizeof(scp));
+	if (!scp->indio)
+		return -ENOMEM;
+	*(struct mt6878_scp **)iio_priv(scp->indio) = scp;
+	scp->indio->name = "mtk-scp-accel";
+	scp->indio->modes = INDIO_DIRECT_MODE;
+	scp->indio->info = &scp_accel_info;
+	scp->indio->channels = scp_accel_channels;
+	scp->indio->num_channels = ARRAY_SIZE(scp_accel_channels);
+	ret = devm_iio_device_register(dev, scp->indio);
+	if (ret)
+		return dev_err_probe(dev, ret, "cannot register IIO device\n");
+
+	/*
 	 * Release the RV55 from reset. Firmware and the region-info descriptor
 	 * were placed by the bootloader; the resident TF-A programs the
 	 * DRAM-reserve GPRs (these are secure-only) and deasserts core0. The SCP
@@ -762,6 +862,8 @@ static void mt6878_scp_remove(struct platform_device *pdev)
 {
 	struct mt6878_scp *scp = platform_get_drvdata(pdev);
 
+	if (atomic_read(&scp->sensor_ready))
+		scp_sensor_disable(scp, SCP_SENSOR_TYPE_ACCEL);
 	cancel_work_sync(&scp->sensor_init);
 	cancel_work_sync(&scp->sensorhub);
 	cancel_work_sync(&scp->drain);
