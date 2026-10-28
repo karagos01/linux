@@ -8,10 +8,12 @@
  * by mtk_scp.c, the reset/boot registers here are secure-only: the core is
  * released through the resident TF-A via an SiP SMC.
  *
- * This increment boots the RV55 and receives its "ready" IPI over the hardware
- * mailbox, decoding the reported image size. The full tinysys IPI/rpmsg layer
- * and the sensor hub on top are not implemented yet; inbound mailbox slots are
- * acknowledged but not otherwise consumed.
+ * This driver boots the RV55 (reset-release via the SMC above), speaks the
+ * tinysys sensor-hub protocol over the hardware mailbox (CTRL/NOTIFY packets
+ * with a CRC-8 header), hands the SCP the shared-DRAM ring layout and a host
+ * timebase, enumerates the sensor list, and then enables the accelerometer and
+ * streams its live samples out of the DATA ring. The generic rpmsg layer and
+ * the remaining sensors are not wired up yet.
  */
 #include <linux/arm-smccc.h>
 #include <linux/atomic.h>
@@ -66,8 +68,20 @@
 #define SCP_SENSOR_NOTIFY_LIST		5
 
 /* sensor_comm ctrl commands */
+#define SCP_SENSOR_CTRL_DISABLE		0
+#define SCP_SENSOR_CTRL_ENABLE		1
 #define SCP_SENSOR_CTRL_TIMESYNC	10
 #define SCP_SENSOR_CTRL_SHARE_MEMORY	11
+
+/* Android/MTK sensor type IDs (hf_sensor_type.h) */
+#define SCP_SENSOR_TYPE_ACCEL		1
+
+/*
+ * Demonstration burst for the accelerometer: a slow, log-readable rate, and a
+ * cap after which the driver disables the sensor again so the log stays quiet.
+ */
+#define SCP_ACCEL_PERIOD_NS		200000000LL	/* 5 Hz */
+#define SCP_ACCEL_SAMPLE_CAP		50
 
 /* share-memory payload types */
 #define SCP_SHM_PAYLOAD_DATA		0
@@ -146,6 +160,22 @@ struct scp_timesync {
 	s32 hour;
 	s32 day;
 	s32 month;
+} __packed;
+
+/* ENABLE batch payload (sensor_comm_batch): sample period and max report latency */
+struct scp_sensor_batch {
+	s64 delay;
+	s64 latency;
+} __packed;
+
+/* one DATA-ring record (share_mem_data), 36 bytes */
+struct scp_sensor_data {
+	u8 sensor_type;
+	u8 action;
+	u8 accuracy;
+	u8 pad;
+	s64 timestamp;
+	s32 value[6];
 } __packed;
 
 /* ring header at the start of each share-memory region (share_mem_base) */
@@ -235,6 +265,11 @@ struct mt6878_scp {
 	u32 notify_wp;
 	void __iomem *list_ring;
 	void __iomem *data_ring;
+
+	/* live DATA-ring drain */
+	struct work_struct drain;
+	u32 data_wp;
+	u32 samples;
 
 	struct delayed_work report;
 };
@@ -411,6 +446,82 @@ static int scp_query_sensor_list(struct mt6878_scp *scp)
 	return 0;
 }
 
+/* Enable a sensor at a given sample period / max report latency (nanoseconds). */
+static int scp_sensor_enable(struct mt6878_scp *scp, u8 type,
+			     s64 delay_ns, s64 latency_ns)
+{
+	struct {
+		struct scp_sensor_ctrl c;
+		struct scp_sensor_batch b;
+	} __packed pkt = {};
+
+	pkt.c.sensor_type = type;
+	pkt.c.command = SCP_SENSOR_CTRL_ENABLE;
+	pkt.c.length = sizeof(pkt.b);
+	pkt.b.delay = delay_ns;
+	pkt.b.latency = latency_ns;
+
+	return scp_ctrl_send(scp, &pkt.c, sizeof(pkt));
+}
+
+/*
+ * Best-effort disable: the SCP acts on the command (the stream stops) but does
+ * not reliably ack a DISABLE issued while it is still draining the burst, so
+ * fire it without waiting rather than log a spurious timeout.
+ */
+static void scp_sensor_disable(struct mt6878_scp *scp, u8 type)
+{
+	struct scp_sensor_ctrl c = {
+		.sequence = ++scp->seq,
+		.sensor_type = type,
+		.command = SCP_SENSOR_CTRL_DISABLE,
+	};
+
+	c.crc8 = scp_crc8((u8 *)&c, 4);
+	scp_mbox_send(&scp->mbox[SCP_SENSOR_MBOX], SCP_SENSOR_CTRL_OUT_BIT,
+		      &c, sizeof(c));
+}
+
+/*
+ * Drain the DATA ring up to the SCP's reported write pointer. rp/wp are byte
+ * offsets into the circular buffer (past the 16-byte header); the firmware
+ * never splits a record across the wrap, so each item can be read whole.
+ */
+static void scp_drain_data_work(struct work_struct *work)
+{
+	struct mt6878_scp *scp = container_of(work, struct mt6878_scp, drain);
+	u32 bufsz = readl(scp->data_ring + 8);
+	u32 wp = scp->data_wp;
+	u32 rp = readl(scp->data_ring + 0);
+
+	if (!bufsz || wp >= bufsz)
+		return;
+
+	while (rp != wp) {
+		struct scp_sensor_data rec;
+
+		memcpy_fromio(&rec, scp->data_ring + SCP_SHM_HDR_SIZE + rp,
+			      sizeof(rec));
+		rp = (rp + SCP_SHM_DATA_ITEM) % bufsz;
+
+		if (rec.sensor_type != SCP_SENSOR_TYPE_ACCEL)
+			continue;
+		if (scp->samples < SCP_ACCEL_SAMPLE_CAP)
+			dev_info(scp->dev,
+				 "accel #%u: x=%d y=%d z=%d (acc %u, t=%lld)\n",
+				 scp->samples, rec.value[0], rec.value[1],
+				 rec.value[2], rec.accuracy, rec.timestamp);
+		if (++scp->samples == SCP_ACCEL_SAMPLE_CAP) {
+			dev_info(scp->dev, "accel burst done, disabling\n");
+			scp_sensor_disable(scp, SCP_SENSOR_TYPE_ACCEL);
+		}
+	}
+
+	/* publish the advanced read pointer so the SCP can reuse the space */
+	writel(rp, scp->data_ring + 0);
+	wmb();
+}
+
 static void scp_sensorhub_work(struct work_struct *work)
 {
 	struct mt6878_scp *scp =
@@ -436,6 +547,12 @@ static void scp_sensorhub_work(struct work_struct *work)
 		dev_info(scp->dev, "timesync sent\n");
 
 	scp_query_sensor_list(scp);
+
+	/* Enable the accelerometer and let the DATA ring stream live samples. */
+	if (scp_sensor_enable(scp, SCP_SENSOR_TYPE_ACCEL, SCP_ACCEL_PERIOD_NS, 0))
+		dev_warn(scp->dev, "accel enable failed\n");
+	else
+		dev_info(scp->dev, "accelerometer enabled, draining DATA ring\n");
 }
 
 static irqreturn_t scp_mbox_isr(int irq, void *data)
@@ -488,6 +605,11 @@ static irqreturn_t scp_mbox_isr(int irq, void *data)
 		case SCP_SENSOR_NOTIFY_LIST:
 			scp->notify_wp = n.value[0];
 			complete(&scp->notify_reply);
+			break;
+		case SCP_SENSOR_NOTIFY_DATA:
+			/* value[0] = ring write position; drain outside IRQ */
+			scp->data_wp = n.value[0];
+			schedule_work(&scp->drain);
 			break;
 		default:
 			dev_dbg(scp->dev, "sensor NOTIFY cmd %u val0 %d\n",
@@ -592,6 +714,7 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 	init_completion(&scp->notify_reply);
 	INIT_WORK(&scp->sensor_init, scp_sensor_init_work);
 	INIT_WORK(&scp->sensorhub, scp_sensorhub_work);
+	INIT_WORK(&scp->drain, scp_drain_data_work);
 	INIT_DELAYED_WORK(&scp->report, mt6878_scp_report);
 	platform_set_drvdata(pdev, scp);
 
@@ -641,6 +764,7 @@ static void mt6878_scp_remove(struct platform_device *pdev)
 
 	cancel_work_sync(&scp->sensor_init);
 	cancel_work_sync(&scp->sensorhub);
+	cancel_work_sync(&scp->drain);
 	cancel_delayed_work_sync(&scp->report);
 	if (scp->list_ring)
 		iounmap(scp->list_ring);
