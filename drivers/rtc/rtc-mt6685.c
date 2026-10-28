@@ -14,6 +14,7 @@
  * path needs the MT6685 interrupt to be routed, which is not wired up yet.
  */
 
+#include <linux/interrupt.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -36,8 +37,17 @@
 #define RTC_BBPU_RELOAD			BIT(5)
 #define RTC_BBPU_PWREN			BIT(0)
 
+#define RTC_IRQ_STA			0x0a
+#define RTC_IRQ_STA_AL			BIT(0)
+#define RTC_IRQ_EN			0x0c
+#define RTC_IRQ_EN_AL			BIT(0)
+#define RTC_AL_MASK			0x10
+#define RTC_AL_MASK_DOW			BIT(4)
+
 #define RTC_TC_SEC			0x12
 /* MIN, HOUR, DOM, DOW, MTH, YEAR follow at a two-byte stride. */
+#define RTC_AL_SEC			0x20
+/* Alarm MIN, HOUR, DOM, DOW, MTH, YEAR follow at a two-byte stride. */
 #define RTC_WRTGR			0x42
 
 #define RTC_TC_SEC_MASK			0x3f
@@ -72,6 +82,7 @@ struct mt6685_rtc {
 	struct regmap		*regmap;
 	struct mutex		lock;		/* serialise register access */
 	u32			base;
+	int			irq;
 };
 
 /*
@@ -191,9 +202,133 @@ out:
 	return ret;
 }
 
+static int mt6685_rtc_al_irq_set(struct mt6685_rtc *rtc, bool enable)
+{
+	u32 val;
+	int ret;
+
+	ret = mt6685_rtc_read(rtc, RTC_IRQ_EN, &val);
+	if (ret < 0)
+		return ret;
+	if (enable)
+		val |= RTC_IRQ_EN_AL;
+	else
+		val &= ~RTC_IRQ_EN_AL;
+	return mt6685_rtc_write(rtc, RTC_IRQ_EN, val);
+}
+
+static int mt6685_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alm)
+{
+	struct mt6685_rtc *rtc = dev_get_drvdata(dev);
+	struct rtc_time *tm = &alm->time;
+	u32 data[RTC_OFFSET_COUNT], irqen;
+	int ret, i;
+
+	mutex_lock(&rtc->lock);
+	ret = mt6685_rtc_read(rtc, RTC_IRQ_EN, &irqen);
+	for (i = 0; ret >= 0 && i < RTC_OFFSET_COUNT; i++)
+		ret = mt6685_rtc_read(rtc, RTC_AL_SEC + i * 2, &data[i]);
+	mutex_unlock(&rtc->lock);
+	if (ret < 0)
+		return ret;
+
+	alm->enabled = !!(irqen & RTC_IRQ_EN_AL);
+	tm->tm_sec  = data[RTC_OFFSET_SEC]  & RTC_TC_SEC_MASK;
+	tm->tm_min  = data[RTC_OFFSET_MIN]  & RTC_TC_MIN_MASK;
+	tm->tm_hour = data[RTC_OFFSET_HOUR] & RTC_TC_HOU_MASK;
+	tm->tm_mday = data[RTC_OFFSET_DOM]  & RTC_TC_DOM_MASK;
+	tm->tm_mon  = (data[RTC_OFFSET_MTH] & RTC_TC_MTH_MASK) - 1;
+	tm->tm_year = (data[RTC_OFFSET_YEAR] & RTC_TC_YEA_MASK) +
+		      RTC_MIN_YEAR_OFFSET;
+
+	return 0;
+}
+
+static int mt6685_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alm)
+{
+	struct mt6685_rtc *rtc = dev_get_drvdata(dev);
+	struct rtc_time *tm = &alm->time;
+	u32 data[RTC_OFFSET_COUNT];
+	int ret, i;
+
+	data[RTC_OFFSET_SEC]  = tm->tm_sec;
+	data[RTC_OFFSET_MIN]  = tm->tm_min;
+	data[RTC_OFFSET_HOUR] = tm->tm_hour;
+	data[RTC_OFFSET_DOM]  = tm->tm_mday;
+	data[RTC_OFFSET_MTH]  = tm->tm_mon + 1;
+	data[RTC_OFFSET_YEAR] = tm->tm_year - RTC_MIN_YEAR_OFFSET;
+
+	mutex_lock(&rtc->lock);
+
+	for (i = 0; i < RTC_OFFSET_COUNT; i++) {
+		if (i == RTC_OFFSET_DOW)
+			continue;
+		ret = mt6685_rtc_write(rtc, RTC_AL_SEC + i * 2, data[i]);
+		if (ret < 0)
+			goto out;
+	}
+
+	/* Match on date and time, ignore the day-of-week field. */
+	ret = mt6685_rtc_write(rtc, RTC_AL_MASK, RTC_AL_MASK_DOW);
+	if (ret < 0)
+		goto out;
+
+	ret = mt6685_rtc_al_irq_set(rtc, alm->enabled);
+	if (ret < 0)
+		goto out;
+
+	ret = mt6685_rtc_write_trigger(rtc);
+out:
+	mutex_unlock(&rtc->lock);
+	return ret;
+}
+
+static int mt6685_rtc_alarm_irq_enable(struct device *dev, unsigned int enabled)
+{
+	struct mt6685_rtc *rtc = dev_get_drvdata(dev);
+	int ret;
+
+	mutex_lock(&rtc->lock);
+	ret = mt6685_rtc_al_irq_set(rtc, enabled);
+	if (ret == 0)
+		ret = mt6685_rtc_write_trigger(rtc);
+	mutex_unlock(&rtc->lock);
+
+	return ret;
+}
+
+static irqreturn_t mt6685_rtc_irq(int irq, void *data)
+{
+	struct mt6685_rtc *rtc = data;
+	u32 sta;
+	int ret;
+
+	mutex_lock(&rtc->lock);
+	ret = mt6685_rtc_read(rtc, RTC_IRQ_STA, &sta);	/* read to clear */
+	if (ret == 0 && (sta & RTC_IRQ_STA_AL)) {
+		/* One-shot: disable the alarm now that it has fired. */
+		mt6685_rtc_al_irq_set(rtc, false);
+		mt6685_rtc_write_trigger(rtc);
+		mutex_unlock(&rtc->lock);
+		rtc_update_irq(rtc->rtc_dev, 1, RTC_IRQF | RTC_AF);
+		return IRQ_HANDLED;
+	}
+	mutex_unlock(&rtc->lock);
+
+	return IRQ_NONE;
+}
+
 static const struct rtc_class_ops mt6685_rtc_ops = {
 	.read_time	= mt6685_rtc_read_time,
 	.set_time	= mt6685_rtc_set_time,
+};
+
+static const struct rtc_class_ops mt6685_rtc_alarm_ops = {
+	.read_time		= mt6685_rtc_read_time,
+	.set_time		= mt6685_rtc_set_time,
+	.read_alarm		= mt6685_rtc_read_alarm,
+	.set_alarm		= mt6685_rtc_set_alarm,
+	.alarm_irq_enable	= mt6685_rtc_alarm_irq_enable,
 };
 
 static int mt6685_rtc_probe(struct platform_device *pdev)
@@ -230,7 +365,24 @@ static int mt6685_rtc_probe(struct platform_device *pdev)
 	if (IS_ERR(rtc->rtc_dev))
 		return PTR_ERR(rtc->rtc_dev);
 
-	rtc->rtc_dev->ops = &mt6685_rtc_ops;
+	rtc->irq = platform_get_irq(pdev, 0);
+	if (rtc->irq >= 0) {
+		ret = devm_request_threaded_irq(&pdev->dev, rtc->irq, NULL,
+						mt6685_rtc_irq, IRQF_ONESHOT,
+						"mt6685-rtc", rtc);
+		if (ret) {
+			dev_err(&pdev->dev, "failed to request alarm IRQ: %d\n",
+				ret);
+			return ret;
+		}
+		device_init_wakeup(&pdev->dev, true);
+		rtc->rtc_dev->ops = &mt6685_rtc_alarm_ops;
+	} else {
+		/* No interrupt wired: time-of-day only, no alarm. */
+		clear_bit(RTC_FEATURE_ALARM, rtc->rtc_dev->features);
+		rtc->rtc_dev->ops = &mt6685_rtc_ops;
+	}
+
 	rtc->rtc_dev->range_min = mktime64(RTC_MIN_YEAR, 1, 1, 0, 0, 0);
 	rtc->rtc_dev->range_max = mktime64(RTC_MIN_YEAR + RTC_TC_YEA_MASK,
 					   12, 31, 23, 59, 59);
