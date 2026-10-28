@@ -21,7 +21,12 @@
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/rtc.h>
+#include <linux/sched/clock.h>
+#include <linux/time.h>
+#include <linux/timekeeping.h>
 #include <linux/workqueue.h>
+#include <asm/arch_timer.h>
 
 /* region-info descriptor the bootloader leaves at SCP SRAM + 0x4 */
 #define SCP_REGION_INFO_OFFSET		0x4
@@ -49,13 +54,116 @@
 #define SCP_READY_BIT			25	/* IPI_IN_SCP_READY_1, payload = image size */
 #define SCP_SENSOR_NOTIFY_BIT		27	/* IPI_IN_SENSOR_NOTIFY */
 
+#define SCP_SENSOR_CTRL_ACK_BIT		26	/* IPI_IN_SENSOR_CTRL (ack) */
+
 /* AP->SCP send pins on mailbox 1 */
+#define SCP_SENSOR_CTRL_OUT_BIT		5	/* IPI_OUT_SENSOR_CTRL */
 #define SCP_SENSOR_NOTIFY_OUT_BIT	13	/* IPI_OUT_SENSOR_NOTIFY */
 
 /* sensor_comm notify commands */
+#define SCP_SENSOR_NOTIFY_DATA		0
 #define SCP_SENSOR_NOTIFY_READY		4
+#define SCP_SENSOR_NOTIFY_LIST		5
+
+/* sensor_comm ctrl commands */
+#define SCP_SENSOR_CTRL_TIMESYNC	10
+#define SCP_SENSOR_CTRL_SHARE_MEMORY	11
+
+/* share-memory payload types */
+#define SCP_SHM_PAYLOAD_DATA		0
+#define SCP_SHM_PAYLOAD_LIST		2
+
+/*
+ * Sensor ring buffers inside the SCP shared-DRAM window (DRAM_RESV base
+ * 0x8e000000). These sub-block addresses reproduce the firmware's fixed
+ * reserved-memory layout (secure-dump 0xe28000, then VOW, then these), so
+ * they do not collide with regions the SCP uses on its own.
+ */
+#define SCP_SHM_LIST_BASE		0x8f1a6700
+#define SCP_SHM_LIST_SIZE		0x1000
+#define SCP_SHM_DATA_BASE		0x8eef2700
+#define SCP_SHM_DATA_SIZE		0x100000
+/*
+ * Ring element sizes differ per payload type and the SCP firmware asserts
+ * (share_memory.c) that each region's header item_size matches what it
+ * expects: sizeof(struct share_mem_data)=36 for DATA, sizeof(struct
+ * share_mem_info)=40 for LIST.
+ */
+#define SCP_SHM_DATA_ITEM		36	/* share_mem_data */
+#define SCP_SHM_LIST_ITEM		40	/* share_mem_info */
+#define SCP_SHM_HDR_SIZE		16	/* rp, wp, buffer_size, item_size */
 
 #define SCP_READY_TIMEOUT_MS		10000
+#define SCP_REPLY_TIMEOUT_MS		200
+
+/* sensor_comm ctrl header: 5 CRC'd bytes, payload (if any) follows at offset 8 */
+struct scp_sensor_ctrl {
+	u8 sequence;
+	u8 sensor_type;
+	u8 command;
+	u8 length;
+	u8 crc8;
+	u8 pad[3];
+} __packed;
+
+/* sensor_comm ack (reply to a ctrl) */
+struct scp_sensor_ack {
+	u8 sequence;
+	u8 sensor_type;
+	u8 command;
+	s8 ret_val;
+	u8 crc8;
+	u8 pad[3];
+} __packed;
+
+/*
+ * SHARE_MEMORY ctrl payload: up to four {type, phys-base} ring descriptors.
+ * The SCP firmware reads the base_info entries packed immediately after the
+ * available_num byte (base_info[0] at offset 1, not 4), with each entry's
+ * payload_base at an *unaligned* offset (5, 13, ...) — the firmware loads it
+ * byte-wise. A padding byte after available_num shifts every field and makes
+ * the firmware read payload_base as 0, tripping an assert in its
+ * share_memory.c. So the whole payload must be truly packed.
+ */
+struct scp_share_mem {
+	u8 available_num;
+	struct {
+		u8 payload_type;
+		u8 pad[3];
+		u32 payload_base;
+	} __packed base_info[4];
+	u8 tail[3];	/* pad to 36 bytes: firmware asserts ctrl->length == 36 */
+} __packed;
+
+/* sensor_comm timesync payload (ctrl cmd TIMESYNC) */
+struct scp_timesync {
+	s64 host_timestamp;
+	s64 host_archcounter;
+	s64 sched_clock;
+	s32 usecond;
+	s32 second;
+	s32 minute;
+	s32 hour;
+	s32 day;
+	s32 month;
+} __packed;
+
+/* ring header at the start of each share-memory region (share_mem_base) */
+struct scp_ring_hdr {
+	u32 rp;
+	u32 wp;
+	u32 buffer_size;
+	u32 item_size;
+} __packed;
+
+/* one sensor-list record (share_mem_info) */
+struct scp_sensor_info {
+	u8 sensor_type;
+	u8 pad[3];
+	u32 gain;
+	u8 name[16];
+	u8 vendor[16];
+} __packed;
 
 /*
  * sensor_comm notify packet (28 bytes): a small header plus five data words.
@@ -117,7 +225,17 @@ struct mt6878_scp {
 	atomic_t sensor_ready;
 	u32 image_size;
 	u8 seq;
+
+	/* sensor hub bring-up */
 	struct work_struct sensor_init;
+	struct work_struct sensorhub;
+	struct completion ctrl_ack;
+	struct completion notify_reply;
+	s8 ack_ret;
+	u32 notify_wp;
+	void __iomem *list_ring;
+	void __iomem *data_ring;
+
 	struct delayed_work report;
 };
 
@@ -158,6 +276,168 @@ static void scp_sensor_init_work(struct work_struct *work)
 	scp_send_sensor_ready(scp);
 }
 
+/* Send a sensor_comm ctrl packet and wait for the SCP's ack. */
+static int scp_ctrl_send(struct mt6878_scp *scp, struct scp_sensor_ctrl *c,
+			 size_t len)
+{
+	c->sequence = ++scp->seq;
+	c->crc8 = scp_crc8((u8 *)c, 4);
+
+	reinit_completion(&scp->ctrl_ack);
+	scp_mbox_send(&scp->mbox[SCP_SENSOR_MBOX], SCP_SENSOR_CTRL_OUT_BIT,
+		      c, len);
+	if (!wait_for_completion_timeout(&scp->ctrl_ack,
+			msecs_to_jiffies(SCP_REPLY_TIMEOUT_MS))) {
+		dev_err(scp->dev, "ctrl cmd %u: no ack\n", c->command);
+		return -ETIMEDOUT;
+	}
+	if (scp->ack_ret < 0) {
+		dev_err(scp->dev, "ctrl cmd %u rejected (%d)\n",
+			c->command, scp->ack_ret);
+		return -EREMOTEIO;
+	}
+	return 0;
+}
+
+/* Write a fresh ring header (rp/wp/buffer_size/item_size) into a region. */
+static void scp_ring_init(void __iomem *ring, u32 region_size, u32 item_size)
+{
+	u32 bufsz = ((region_size - SCP_SHM_HDR_SIZE) / item_size) * item_size;
+
+	writel(0, ring + 0);			/* rp */
+	writel(0, ring + 4);			/* wp */
+	writel(bufsz, ring + 8);		/* buffer_size */
+	writel(item_size, ring + 12);		/* item_size */
+	wmb();
+}
+
+/* Tell the SCP where the sensor rings live (prerequisite for list/samples). */
+static int scp_config_share_mem(struct mt6878_scp *scp)
+{
+	struct {
+		struct scp_sensor_ctrl c;
+		struct scp_share_mem shm;
+	} __packed pkt = {};
+
+	pkt.c.sensor_type = 0;
+	pkt.c.command = SCP_SENSOR_CTRL_SHARE_MEMORY;
+	pkt.c.length = sizeof(pkt.shm);
+	pkt.shm.available_num = 2;
+	pkt.shm.base_info[0].payload_type = SCP_SHM_PAYLOAD_DATA;
+	pkt.shm.base_info[0].payload_base = SCP_SHM_DATA_BASE;
+	pkt.shm.base_info[1].payload_type = SCP_SHM_PAYLOAD_LIST;
+	pkt.shm.base_info[1].payload_base = SCP_SHM_LIST_BASE;
+
+	return scp_ctrl_send(scp, &pkt.c, sizeof(pkt));
+}
+
+/* Hand the SCP a host timebase (boot ns, arch counter, sched_clock, wall). */
+static int scp_send_timesync(struct mt6878_scp *scp)
+{
+	struct {
+		struct scp_sensor_ctrl c;
+		struct scp_timesync t;
+	} __packed pkt = {};
+	struct timespec64 rt;
+	struct rtc_time tm;
+	unsigned long flags;
+
+	pkt.c.sensor_type = 0;
+	pkt.c.command = SCP_SENSOR_CTRL_TIMESYNC;
+	pkt.c.length = sizeof(pkt.t);
+
+	local_irq_save(flags);
+	pkt.t.host_timestamp = ktime_get_boottime_ns();
+	pkt.t.host_archcounter = __arch_counter_get_cntvct();
+	pkt.t.sched_clock = sched_clock();
+	ktime_get_real_ts64(&rt);
+	local_irq_restore(flags);
+
+	rt.tv_sec -= (s64)sys_tz.tz_minuteswest * 60;
+	rtc_time64_to_tm(rt.tv_sec, &tm);
+	pkt.t.usecond = rt.tv_nsec / 1000;
+	pkt.t.second = tm.tm_sec;
+	pkt.t.minute = tm.tm_min;
+	pkt.t.hour = tm.tm_hour;
+	pkt.t.day = tm.tm_mday;
+	pkt.t.month = tm.tm_mon + 1;
+
+	return scp_ctrl_send(scp, &pkt.c, sizeof(pkt));
+}
+
+/* Ask the SCP for its sensor list and read the records back from the ring. */
+static int scp_query_sensor_list(struct mt6878_scp *scp)
+{
+	u32 wp, rp;
+	int count = 0, try;
+
+	for (try = 0; try < 3; try++) {
+		struct scp_sensor_notify n = {
+			.command = SCP_SENSOR_NOTIFY_LIST,
+		};
+
+		writel(0, scp->list_ring + 0);	/* reset read pointer */
+		wmb();
+
+		n.sequence = ++scp->seq;
+		n.crc8 = scp_crc8((u8 *)&n, 4);
+		reinit_completion(&scp->notify_reply);
+		scp_mbox_send(&scp->mbox[SCP_SENSOR_MBOX],
+			      SCP_SENSOR_NOTIFY_OUT_BIT, &n, sizeof(n));
+		if (wait_for_completion_timeout(&scp->notify_reply,
+				msecs_to_jiffies(1000)))
+			break;
+		dev_warn(scp->dev, "sensor list: no reply (try %d)\n", try + 1);
+	}
+	if (try == 3)
+		return -ETIMEDOUT;
+
+	wp = scp->notify_wp;
+	for (rp = 0; rp + SCP_SHM_LIST_ITEM <= wp &&
+	     SCP_SHM_HDR_SIZE + rp + SCP_SHM_LIST_ITEM <= SCP_SHM_LIST_SIZE;
+	     rp += SCP_SHM_LIST_ITEM) {
+		struct scp_sensor_info rec;
+
+		memcpy_fromio(&rec, scp->list_ring + SCP_SHM_HDR_SIZE + rp,
+			      sizeof(rec));
+		if (!rec.sensor_type || !rec.gain)
+			continue;
+		dev_info(scp->dev,
+			 "sensor type %2u gain %u name '%.16s' vendor '%.16s'\n",
+			 rec.sensor_type, rec.gain, rec.name, rec.vendor);
+		count++;
+	}
+	dev_info(scp->dev, "sensor hub lists %d sensor(s) (wp=%u)\n", count, wp);
+	return 0;
+}
+
+static void scp_sensorhub_work(struct work_struct *work)
+{
+	struct mt6878_scp *scp =
+		container_of(work, struct mt6878_scp, sensorhub);
+
+	scp->list_ring = ioremap_wc(SCP_SHM_LIST_BASE, SCP_SHM_LIST_SIZE);
+	scp->data_ring = ioremap_wc(SCP_SHM_DATA_BASE, SCP_SHM_DATA_SIZE);
+	if (!scp->list_ring || !scp->data_ring) {
+		dev_err(scp->dev, "cannot map sensor rings\n");
+		return;
+	}
+
+	scp_ring_init(scp->list_ring, SCP_SHM_LIST_SIZE, SCP_SHM_LIST_ITEM);
+	scp_ring_init(scp->data_ring, SCP_SHM_DATA_SIZE, SCP_SHM_DATA_ITEM);
+
+	if (scp_config_share_mem(scp))
+		return;
+	dev_info(scp->dev, "sensor share-memory configured\n");
+
+	if (scp_send_timesync(scp))
+		dev_warn(scp->dev, "timesync failed\n");
+	else
+		dev_info(scp->dev, "timesync sent\n");
+
+	scp_query_sensor_list(scp);
+}
+
 static irqreturn_t scp_mbox_isr(int irq, void *data)
 {
 	struct scp_mbox *mb = data;
@@ -177,19 +457,43 @@ static irqreturn_t scp_mbox_isr(int irq, void *data)
 		}
 	}
 
+	if (mb->id == SCP_SENSOR_MBOX && (status & BIT(SCP_SENSOR_CTRL_ACK_BIT))) {
+		struct scp_sensor_ack a;
+		u32 *w = (u32 *)&a;
+		unsigned int i;
+
+		for (i = 0; i < sizeof(a) / 4; i++)
+			w[i] = readl(mb->base +
+				     SCP_PIN_OFF(SCP_SENSOR_CTRL_ACK_BIT) + i * 4);
+		scp->ack_ret = a.ret_val;
+		complete(&scp->ctrl_ack);
+	}
+
 	if (mb->id == SCP_SENSOR_MBOX && (status & BIT(SCP_SENSOR_NOTIFY_BIT))) {
 		struct scp_sensor_notify n;
 		u32 *w = (u32 *)&n;
-		int i;
+		unsigned int i;
 
 		for (i = 0; i < sizeof(n) / 4; i++)
-			w[i] = readl(mb->base + SCP_PIN_OFF(SCP_SENSOR_NOTIFY_BIT) + i * 4);
-		dev_info(scp->dev,
-			 "sensor NOTIFY: cmd %u type %u len %u val0 %d\n",
-			 n.command, n.sensor_type, n.length, n.value[0]);
-		if (n.command == SCP_SENSOR_NOTIFY_READY &&
-		    atomic_xchg(&scp->sensor_ready, 1) == 0)
-			dev_info(scp->dev, "sensor hub ready\n");
+			w[i] = readl(mb->base +
+				     SCP_PIN_OFF(SCP_SENSOR_NOTIFY_BIT) + i * 4);
+
+		switch (n.command) {
+		case SCP_SENSOR_NOTIFY_READY:
+			if (atomic_xchg(&scp->sensor_ready, 1) == 0) {
+				dev_info(scp->dev, "sensor hub ready\n");
+				schedule_work(&scp->sensorhub);
+			}
+			break;
+		case SCP_SENSOR_NOTIFY_LIST:
+			scp->notify_wp = n.value[0];
+			complete(&scp->notify_reply);
+			break;
+		default:
+			dev_dbg(scp->dev, "sensor NOTIFY cmd %u val0 %d\n",
+				n.command, n.value[0]);
+			break;
+		}
 	}
 
 	/*
@@ -284,7 +588,10 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 	scp->dev = dev;
 	atomic_set(&scp->ready, 0);
 	atomic_set(&scp->sensor_ready, 0);
+	init_completion(&scp->ctrl_ack);
+	init_completion(&scp->notify_reply);
 	INIT_WORK(&scp->sensor_init, scp_sensor_init_work);
+	INIT_WORK(&scp->sensorhub, scp_sensorhub_work);
 	INIT_DELAYED_WORK(&scp->report, mt6878_scp_report);
 	platform_set_drvdata(pdev, scp);
 
@@ -333,7 +640,12 @@ static void mt6878_scp_remove(struct platform_device *pdev)
 	struct mt6878_scp *scp = platform_get_drvdata(pdev);
 
 	cancel_work_sync(&scp->sensor_init);
+	cancel_work_sync(&scp->sensorhub);
 	cancel_delayed_work_sync(&scp->report);
+	if (scp->list_ring)
+		iounmap(scp->list_ring);
+	if (scp->data_ring)
+		iounmap(scp->data_ring);
 }
 
 static const struct of_device_id mt6878_scp_of_match[] = {
