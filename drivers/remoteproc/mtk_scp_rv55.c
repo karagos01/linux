@@ -13,9 +13,9 @@
  * with a CRC-8 header), hands the SCP the shared-DRAM ring layout and a host
  * timebase, enumerates the sensor list, and exposes the physical sensors
  * (accelerometer, gyroscope, magnetometer, ambient-light, proximity, SAR) plus
- * the SCP-fused virtual sensors (gravity, linear acceleration, orientation and
- * the step counter) as standard IIO devices. They share one SCP DATA ring; the
- * drain routes each
+ * the SCP-fused virtual sensors (gravity, linear acceleration, orientation, the
+ * rotation-vector quaternions and the step counter) as standard IIO devices.
+ * They share one SCP DATA ring; the drain routes each
  * record to its sensor by type. Sensors are enabled on demand (when an IIO
  * reader or capture buffer needs them) and disabled again when idle; with no
  * active sensor the SCP sleeps, and the enable path wakes it first through the
@@ -103,7 +103,10 @@
 #define SCP_SENSOR_TYPE_PS		8
 #define SCP_SENSOR_TYPE_GRAVITY		9	/* fusion: gravity vector */
 #define SCP_SENSOR_TYPE_LINEAR_ACCEL	10	/* fusion: linear acceleration */
+#define SCP_SENSOR_TYPE_ROTATION	11	/* fusion: rotation vector (quaternion) */
+#define SCP_SENSOR_TYPE_GAME_ROTATION	15	/* fusion: game rotation (no magnetometer) */
 #define SCP_SENSOR_TYPE_STEP_COUNT	19	/* fusion: cumulative step count */
+#define SCP_SENSOR_TYPE_GEOMAG_ROTATION	20	/* fusion: geomagnetic rotation (no gyro) */
 #define SCP_SENSOR_TYPE_SAR		72
 
 /*
@@ -350,7 +353,7 @@ struct scp_sensor {
 	struct iio_dev *indio;
 	const struct scp_sensor_desc *desc;
 	spinlock_t lock;
-	s32 val[3];
+	s32 val[4];			/* up to 4 (quaternion w,x,y,z) */
 	u8 accuracy;
 	s64 ts;
 	u32 gain;
@@ -432,6 +435,26 @@ static const struct iio_chan_spec scp_steps_channels[] = {
 };
 
 /*
+ * rotation-vector family = one unit quaternion in a single channel (repeat 4).
+ * Read back through read_raw_multi; the four components are reordered to the
+ * IIO w,x,y,z convention from the ring's Android x,y,z,w order.
+ */
+static const struct iio_chan_spec scp_rotvec_channels[] = {
+	{
+		.type = IIO_ROT,
+		.modified = 1,
+		.channel2 = IIO_MOD_QUATERNION,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE) |
+					    BIT(IIO_CHAN_INFO_SAMP_FREQ),
+		.scan_index = 0,
+		.scan_type = { .sign = 's', .realbits = 32, .storagebits = 32,
+			       .repeat = 4, .endianness = IIO_CPU },
+	},
+	IIO_CHAN_SOFT_TIMESTAMP(1),
+};
+
+/*
  * _udiv is an extra divisor applied on top of the vendor gain so the IIO scale
  * yields the unit the IIO ABI mandates for that channel type. The SCP reports
  * accel in m/s^2, gyro in rad/s and light in lux already (raw/gain), which is
@@ -464,22 +487,35 @@ static const struct scp_sensor_desc scp_sensor_table[] = {
 	SCP_FUSION(SCP_SENSOR_TYPE_GRAVITY,      "mtk-scp-gravity",      scp_gravity_channels,  3, 1000000, 1),
 	SCP_FUSION(SCP_SENSOR_TYPE_LINEAR_ACCEL, "mtk-scp-linear-accel", scp_linaccel_channels, 3, 1000000, 1),
 	SCP_FUSION(SCP_SENSOR_TYPE_ORIENTATION,  "mtk-scp-orientation",  scp_orient_channels,   3, 1000000, 1),
+	SCP_FUSION(SCP_SENSOR_TYPE_ROTATION,        "mtk-scp-rotation-vector",   scp_rotvec_channels, 4, 1000000, 1),
+	SCP_FUSION(SCP_SENSOR_TYPE_GAME_ROTATION,   "mtk-scp-game-rotation",     scp_rotvec_channels, 4, 1000000, 1),
+	SCP_FUSION(SCP_SENSOR_TYPE_GEOMAG_ROTATION, "mtk-scp-geomag-rotation",   scp_rotvec_channels, 4, 1000000, 1),
 	/* step counter: fused, and on-change so enable flushes the current total */
 	SCP_SENSOR_FULL(SCP_SENSOR_TYPE_STEP_COUNT, "mtk-scp-step-counter", scp_steps_channels, 1, 1, 1, true, true),
 };
 #define SCP_NR_SENSORS ARRAY_SIZE(scp_sensor_table)
 
-static int scp_read_raw(struct iio_dev *indio,
-			struct iio_chan_spec const *chan,
-			int *val, int *val2, long mask)
+/*
+ * A quaternion channel returns all four components from one read; every other
+ * channel returns a single value. read_raw_multi shadows read_raw in the IIO
+ * core, so all channels are served here.
+ */
+static int scp_read_raw_multi(struct iio_dev *indio,
+			      struct iio_chan_spec const *chan,
+			      int size, int *vals, int *val_len, long mask)
 {
 	struct scp_sensor *s = iio_to_sensor(indio);
+	bool quat = chan->type == IIO_ROT &&
+		    chan->channel2 == IIO_MOD_QUATERNION;
 	unsigned long flags;
-	int ret, tries;
+	int ret, tries, nv;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
 	case IIO_CHAN_INFO_PROCESSED:	/* step counter reports a processed count */
+		nv = quat ? 4 : 1;
+		if (size < nv)
+			return -EINVAL;
 		/*
 		 * On-demand: enable the sensor for the duration of the read (a
 		 * no-op if a buffer already holds it on), wait briefly for the
@@ -496,10 +532,19 @@ static int scp_read_raw(struct iio_dev *indio,
 		for (tries = 0; tries < 6; tries++) {
 			spin_lock_irqsave(&s->lock, flags);
 			if (s->valid) {
-				*val = s->val[chan->scan_index];
+				if (quat) {
+					/* ring order x,y,z,w -> IIO w,x,y,z */
+					vals[0] = s->val[3];
+					vals[1] = s->val[0];
+					vals[2] = s->val[1];
+					vals[3] = s->val[2];
+				} else {
+					vals[0] = s->val[chan->scan_index];
+				}
 				spin_unlock_irqrestore(&s->lock, flags);
 				scp_sensor_put(s);
-				return IIO_VAL_INT;
+				*val_len = nv;
+				return quat ? IIO_VAL_INT_MULTIPLE : IIO_VAL_INT;
 			}
 			spin_unlock_irqrestore(&s->lock, flags);
 			msleep(60);
@@ -507,12 +552,16 @@ static int scp_read_raw(struct iio_dev *indio,
 		scp_sensor_put(s);
 		return -EAGAIN;
 	case IIO_CHAN_INFO_SCALE:
-		/* raw * scale = IIO-standard unit (m/s^2, rad/s, Gauss, lux) */
-		*val = 1;
-		*val2 = s->gain * s->desc->unit_div;
+		/* raw * scale = IIO-standard unit (m/s^2, rad/s, Gauss, lux, deg) */
+		if (size < 2)
+			return -EINVAL;
+		vals[0] = 1;
+		vals[1] = s->gain * s->desc->unit_div;
+		*val_len = 2;
 		return IIO_VAL_FRACTIONAL;
 	case IIO_CHAN_INFO_SAMP_FREQ:
-		*val = NSEC_PER_SEC / s->desc->period_ns;
+		vals[0] = NSEC_PER_SEC / s->desc->period_ns;
+		*val_len = 1;
 		return IIO_VAL_INT;
 	default:
 		return -EINVAL;
@@ -520,7 +569,7 @@ static int scp_read_raw(struct iio_dev *indio,
 }
 
 static const struct iio_info scp_sensor_iio_info = {
-	.read_raw = scp_read_raw,
+	.read_raw_multi = scp_read_raw_multi,
 };
 
 static struct scp_sensor *scp_find_sensor(struct mt6878_scp *scp, u8 type)
@@ -963,12 +1012,20 @@ static void scp_drain_data_work(struct work_struct *work)
 		/* and push it to this sensor's capture buffer if one is open */
 		if (iio_buffer_enabled(s->indio)) {
 			struct {
-				s32 chan[3];
+				s32 chan[4];
 				s64 ts __aligned(8);
 			} sample;
 
-			for (i = 0; i < nv; i++)
-				sample.chan[i] = rec.value[i];
+			if (nv == 4) {
+				/* quaternion: ring x,y,z,w -> IIO w,x,y,z */
+				sample.chan[0] = rec.value[3];
+				sample.chan[1] = rec.value[0];
+				sample.chan[2] = rec.value[1];
+				sample.chan[3] = rec.value[2];
+			} else {
+				for (i = 0; i < nv; i++)
+					sample.chan[i] = rec.value[i];
+			}
 			iio_push_to_buffers_with_timestamp(s->indio, &sample,
 							   rec.timestamp);
 		}
