@@ -767,6 +767,7 @@
 			     <GIC_SPI 522 IRQ_TYPE_LEVEL_HIGH 0>;
 		interrupt-names = "ipc0", "ipc1", "mbox0", "mbox1",
 				  "mbox2", "mbox3", "mbox4";
+		mediatek,infracfg = <&infracfg_ao>;
 	};
 };
 
