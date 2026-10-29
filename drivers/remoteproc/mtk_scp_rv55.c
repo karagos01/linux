@@ -88,6 +88,9 @@
 #define SCP_SENSOR_CTRL_TIMESYNC	10
 #define SCP_SENSOR_CTRL_SHARE_MEMORY	11
 
+/* DATA-ring record action: 0 = real sample, nonzero = meta (flush-complete...) */
+#define SCP_SENSOR_ACTION_DATA		0
+
 /* Android/MTK sensor type IDs (hf_sensor_type.h) */
 #define SCP_SENSOR_TYPE_ACCEL		1
 #define SCP_SENSOR_TYPE_MAGN		2
@@ -329,6 +332,7 @@ struct scp_sensor_desc {
 	u32 default_gain;			/* fallback until the list is read */
 	u32 unit_div;				/* extra scale divisor for IIO units */
 	s64 period_ns;
+	bool on_change;				/* flush on enable to prime a value */
 };
 
 /* per-sensor runtime state; iio_priv() holds a pointer to one of these */
@@ -404,20 +408,22 @@ SCP_1VAL_CHANNELS(scp_sar_channels, IIO_PROXIMITY);
  * reported in microtesla but IIO_MAGN is in Gauss (1 Gauss = 100 uT), so it
  * needs an extra /100. Proximity is dimensionless.
  */
-#define SCP_SENSOR(_t, _name, _ch, _nv, _gain, _udiv) {		\
+#define SCP_SENSOR_F(_t, _name, _ch, _nv, _gain, _udiv, _oc) {	\
 	.type = _t, .name = _name, .channels = _ch,		\
 	.num_channels = ARRAY_SIZE(_ch), .nvals = _nv,		\
 	.default_gain = _gain, .unit_div = _udiv,		\
-	.period_ns = SCP_SENSOR_PERIOD_NS,			\
+	.period_ns = SCP_SENSOR_PERIOD_NS, .on_change = _oc,	\
 }
+#define SCP_SENSOR(_t, _name, _ch, _nv, _gain, _udiv)		\
+	SCP_SENSOR_F(_t, _name, _ch, _nv, _gain, _udiv, false)
 
 static const struct scp_sensor_desc scp_sensor_table[] = {
-	SCP_SENSOR(SCP_SENSOR_TYPE_ACCEL, "mtk-scp-accel",     scp_accel_channels, 3, 1000,    1),
-	SCP_SENSOR(SCP_SENSOR_TYPE_GYRO,  "mtk-scp-gyro",      scp_gyro_channels,  3, 1000000, 1),
-	SCP_SENSOR(SCP_SENSOR_TYPE_MAGN,  "mtk-scp-magn",      scp_magn_channels,  3, 1000,    100),
-	SCP_SENSOR(SCP_SENSOR_TYPE_ALS,   "mtk-scp-als",       scp_light_channels, 1, 1,       1),
-	SCP_SENSOR(SCP_SENSOR_TYPE_PS,    "mtk-scp-proximity", scp_prox_channels,  1, 1,       1),
-	SCP_SENSOR(SCP_SENSOR_TYPE_SAR,   "mtk-scp-sar",       scp_sar_channels,   1, 1,       1),
+	SCP_SENSOR(SCP_SENSOR_TYPE_ACCEL,  "mtk-scp-accel",     scp_accel_channels, 3, 1000,    1),
+	SCP_SENSOR(SCP_SENSOR_TYPE_GYRO,   "mtk-scp-gyro",      scp_gyro_channels,  3, 1000000, 1),
+	SCP_SENSOR(SCP_SENSOR_TYPE_MAGN,   "mtk-scp-magn",      scp_magn_channels,  3, 1000,    100),
+	SCP_SENSOR(SCP_SENSOR_TYPE_ALS,    "mtk-scp-als",       scp_light_channels, 1, 1,       1),
+	SCP_SENSOR(SCP_SENSOR_TYPE_PS,     "mtk-scp-proximity", scp_prox_channels,  1, 1,       1),
+	SCP_SENSOR_F(SCP_SENSOR_TYPE_SAR,  "mtk-scp-sar",       scp_sar_channels,   1, 1, 1, true),
 };
 #define SCP_NR_SENSORS ARRAY_SIZE(scp_sensor_table)
 
@@ -720,11 +726,12 @@ static int scp_sensor_enable(struct mt6878_scp *scp, u8 type,
 }
 
 /*
- * Flush a sensor: ask the hub to push its latest cached sample into the DATA
- * ring now, instead of waiting for the next periodic/on-change report. On-change
- * sensors (e.g. the aw963xx SAR) sit at a stable baseline and do not emit a
- * sample on enable, so without a flush their IIO *_raw reads stay -EAGAIN; the
- * flush primes the first value, after which on-change updates flow normally.
+ * Flush a sensor: ask the hub to push any buffered samples into the DATA ring
+ * now. Issued for on-change sensors (e.g. the aw963xx SAR) when they are
+ * enabled; the hub answers with a flush-complete meta event (action != 0, which
+ * the drain ignores) and, if it has one, the current sample. On-change sensors
+ * sitting at their baseline have nothing to report yet, so their IIO *_raw reads
+ * stay -EAGAIN until the first real change event.
  */
 static int scp_sensor_flush(struct mt6878_scp *scp, u8 type)
 {
@@ -776,7 +783,7 @@ static int scp_sensor_get(struct scp_sensor *s)
 	if (s->users == 0) {
 		ret = scp_sensor_enable(scp, s->desc->type,
 					s->desc->period_ns, 0);
-		if (!ret && s->desc->type == SCP_SENSOR_TYPE_SAR)
+		if (!ret && s->desc->on_change)
 			scp_sensor_flush(scp, s->desc->type);
 	}
 	if (!ret)
@@ -841,6 +848,14 @@ static void scp_drain_data_work(struct work_struct *work)
 		memcpy_fromio(&rec, scp->data_ring + SCP_SHM_HDR_SIZE + rp,
 			      sizeof(rec));
 		rp = (rp + SCP_SHM_DATA_ITEM) % bufsz;
+
+		/*
+		 * Only action 0 carries an actual sample. Other actions are meta
+		 * events (action 1 = flush-complete, etc.) whose value[] is not a
+		 * reading, so skip them rather than cache their payload.
+		 */
+		if (rec.action != SCP_SENSOR_ACTION_DATA)
+			continue;
 
 		/* route the record to its sensor by type (ignore unknown) */
 		s = scp_find_sensor(scp, rec.sensor_type);
