@@ -12,7 +12,8 @@
  * tinysys sensor-hub protocol over the hardware mailbox (CTRL/NOTIFY packets
  * with a CRC-8 header), hands the SCP the shared-DRAM ring layout and a host
  * timebase, enumerates the sensor list, and exposes the physical sensors
- * (accelerometer, gyroscope, magnetometer, ambient-light, proximity, SAR) plus
+ * (accelerometer, gyroscope, magnetometer, ambient-light, proximity, and the
+ * raw per-channel SAR capacitance) plus
  * the SCP-fused virtual sensors (gravity, linear acceleration, orientation, the
  * rotation-vector quaternions, the step counter, the uncalibrated accel/gyro/
  * magnetometer, the device-orientation quadrant, and the significant-motion,
@@ -92,11 +93,19 @@
 #define SCP_SENSOR_CTRL_ENABLE		1
 #define SCP_SENSOR_CTRL_FLUSH		2
 #define SCP_SENSOR_CTRL_CONFIG		4	/* set-delay/batch */
+#define SCP_SENSOR_CTRL_ENABLE_RAW	6	/* stream raw (unprocessed) samples */
+#define SCP_SENSOR_CTRL_DISABLE_RAW	7
 #define SCP_SENSOR_CTRL_TIMESYNC	10
 #define SCP_SENSOR_CTRL_SHARE_MEMORY	11
 
-/* DATA-ring record action: 0 = real sample, nonzero = meta (flush-complete...) */
+/*
+ * DATA-ring record action. Real processed samples arrive as DATA (0); the
+ * other actions are meta (flush-complete, bias, calibration...) and are
+ * dropped, except RAW, which carries the raw per-channel reading a sensor
+ * emits once it has been put into raw mode by SCP_SENSOR_CTRL_ENABLE_RAW.
+ */
 #define SCP_SENSOR_ACTION_DATA		0
+#define SCP_SENSOR_ACTION_RAW		6	/* MTK hf_sensor_io action order */
 
 /* Android/MTK sensor type IDs (hf_sensor_type.h) */
 #define SCP_SENSOR_TYPE_ACCEL		1
@@ -356,6 +365,7 @@ struct scp_sensor_desc {
 	bool on_change;				/* flush on enable to prime a value */
 	bool fusion;				/* SCP-fused virtual sensor */
 	bool event;				/* delivers IIO events, not samples */
+	bool raw;				/* stream raw samples (ENABLE_RAW) */
 };
 
 /* per-sensor runtime state; iio_priv() holds a pointer to one of these */
@@ -449,12 +459,34 @@ SCP_3AXIS_CHANNELS(scp_gyro_channels, IIO_ANGL_VEL);
 SCP_3AXIS_CHANNELS(scp_magn_channels, IIO_MAGN);
 SCP_1VAL_CHANNELS(scp_light_channels, IIO_LIGHT);
 SCP_1VAL_CHANNELS(scp_prox_channels, IIO_PROXIMITY);
-SCP_1VAL_CHANNELS(scp_sar_channels, IIO_PROXIMITY);
 SCP_3AXIS_CHANNELS(scp_gravity_channels, IIO_GRAVITY);
 SCP_3AXIS_CHANNELS(scp_linaccel_channels, IIO_ACCEL);
 SCP_UNCAL_3AXIS_CHANNELS(scp_uncal_accel_channels, IIO_ACCEL);
 SCP_UNCAL_3AXIS_CHANNELS(scp_uncal_gyro_channels, IIO_ANGL_VEL);
 SCP_UNCAL_3AXIS_CHANNELS(scp_uncal_magn_channels, IIO_MAGN);
+
+/*
+ * SAR (aw963xx) in raw mode: the raw counts of its capacitive sense channels,
+ * one indexed IIO_PROXIMITY channel each. No SCALE is advertised — these are
+ * unprocessed readings, not a calibrated distance.
+ */
+#define SCP_SAR_RAW_CHAN(_idx) {				\
+	.type = IIO_PROXIMITY,					\
+	.indexed = 1,						\
+	.channel = _idx,					\
+	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),		\
+	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SAMP_FREQ), \
+	.scan_index = _idx,					\
+	.scan_type = { .sign = 's', .realbits = 32,		\
+		       .storagebits = 32, .endianness = IIO_CPU }, \
+}
+
+static const struct iio_chan_spec scp_sar_channels[] = {
+	SCP_SAR_RAW_CHAN(0),
+	SCP_SAR_RAW_CHAN(1),
+	SCP_SAR_RAW_CHAN(2),
+	IIO_CHAN_SOFT_TIMESTAMP(3),
+};
 
 /* orientation = Euler angles (azimuth->yaw, pitch, roll), in degrees */
 static const struct iio_chan_spec scp_orient_channels[] = {
@@ -599,13 +631,22 @@ static const struct iio_chan_spec scp_wake_channels[] = {
 	.fusion = true, .event = true,				\
 }
 
+/* physical sensor streamed in raw mode: ENABLE plus ENABLE_RAW on enable */
+#define SCP_SENSOR_RAW(_t, _name, _ch, _nv, _gain, _udiv) {	\
+	.type = _t, .name = _name, .channels = _ch,		\
+	.num_channels = ARRAY_SIZE(_ch), .nvals = _nv,		\
+	.default_gain = _gain, .unit_div = _udiv,		\
+	.period_ns = SCP_SENSOR_PERIOD_NS,			\
+	.raw = true,						\
+}
+
 static const struct scp_sensor_desc scp_sensor_table[] = {
 	SCP_SENSOR(SCP_SENSOR_TYPE_ACCEL,  "mtk-scp-accel",     scp_accel_channels, 3, 1000,    1),
 	SCP_SENSOR(SCP_SENSOR_TYPE_GYRO,   "mtk-scp-gyro",      scp_gyro_channels,  3, 1000000, 1),
 	SCP_SENSOR(SCP_SENSOR_TYPE_MAGN,   "mtk-scp-magn",      scp_magn_channels,  3, 1000,    100),
 	SCP_SENSOR(SCP_SENSOR_TYPE_ALS,    "mtk-scp-als",       scp_light_channels, 1, 1,       1),
 	SCP_SENSOR(SCP_SENSOR_TYPE_PS,     "mtk-scp-proximity", scp_prox_channels,  1, 1,       1),
-	SCP_SENSOR_F(SCP_SENSOR_TYPE_SAR,  "mtk-scp-sar",       scp_sar_channels,   1, 1, 1, true),
+	SCP_SENSOR_RAW(SCP_SENSOR_TYPE_SAR, "mtk-scp-sar",      scp_sar_channels,   3, 1,       1),
 	SCP_FUSION(SCP_SENSOR_TYPE_GRAVITY,      "mtk-scp-gravity",      scp_gravity_channels,  3, 1000000, 1),
 	SCP_FUSION(SCP_SENSOR_TYPE_LINEAR_ACCEL, "mtk-scp-linear-accel", scp_linaccel_channels, 3, 1000000, 1),
 	SCP_FUSION(SCP_SENSOR_TYPE_ORIENTATION,  "mtk-scp-orientation",  scp_orient_channels,   3, 1000000, 1),
@@ -1017,7 +1058,7 @@ static int scp_sensor_config(struct mt6878_scp *scp, u8 type,
 
 /*
  * Flush a sensor: ask the hub to push any buffered samples into the DATA ring
- * now. Issued for on-change sensors (e.g. the aw963xx SAR) when they are
+ * now. Issued for on-change sensors (e.g. the step counter) when they are
  * enabled; the hub answers with a flush-complete meta event (action != 0, which
  * the drain ignores) and, if it has one, the current sample. On-change sensors
  * sitting at their baseline have nothing to report yet, so their IIO *_raw reads
@@ -1028,6 +1069,24 @@ static int scp_sensor_flush(struct mt6878_scp *scp, u8 type)
 	struct scp_sensor_ctrl c = {
 		.sensor_type = type,
 		.command = SCP_SENSOR_CTRL_FLUSH,
+	};
+
+	return scp_ctrl_send(scp, &c, sizeof(c));
+}
+
+/*
+ * Toggle a sensor's raw-sample mode. With raw enabled the hub additionally
+ * streams the sensor's unprocessed per-channel reading into the DATA ring as
+ * SCP_SENSOR_ACTION_RAW records (for the aw963xx SAR, the raw capacitance of
+ * each sense channel). It is a mode on top of a normal ENABLE, not a
+ * replacement, so the caller enables the sensor first and keeps it enabled.
+ */
+static int scp_sensor_rawdata(struct mt6878_scp *scp, u8 type, bool enable)
+{
+	struct scp_sensor_ctrl c = {
+		.sensor_type = type,
+		.command = enable ? SCP_SENSOR_CTRL_ENABLE_RAW :
+				    SCP_SENSOR_CTRL_DISABLE_RAW,
 	};
 
 	return scp_ctrl_send(scp, &c, sizeof(c));
@@ -1062,7 +1121,8 @@ static void scp_sensor_disable(struct mt6878_scp *scp, u8 type)
  * when the last one leaves. The enable CTRL command wakes a sleeping SCP (via
  * scp_ctrl_send's awake handshake); once a sensor is streaming its own traffic
  * keeps the SCP awake, and once the last sensor stops the SCP is free to sleep.
- * The on-change SAR is flushed on enable so its first reading is primed.
+ * On-change sensors are flushed on enable so their first reading is primed, and
+ * raw-mode sensors (the SAR) are additionally put into raw streaming.
  */
 static int scp_sensor_get(struct scp_sensor *s)
 {
@@ -1081,8 +1141,11 @@ static int scp_sensor_get(struct scp_sensor *s)
 		if (!ret && s->desc->fusion)
 			scp_sensor_config(scp, s->desc->type,
 					  s->desc->period_ns, 0);
-		if (!ret && s->desc->on_change)
+		if (!ret && (s->desc->on_change || s->desc->raw))
 			scp_sensor_flush(scp, s->desc->type);
+		/* put a raw-mode sensor into raw streaming once it is enabled */
+		if (!ret && s->desc->raw)
+			scp_sensor_rawdata(scp, s->desc->type, true);
 	}
 	if (!ret)
 		s->users++;
@@ -1096,6 +1159,9 @@ static void scp_sensor_put(struct scp_sensor *s)
 
 	mutex_lock(&s->en_lock);
 	if (!WARN_ON(s->users == 0) && --s->users == 0) {
+		/* leave raw mode before the sensor itself is disabled */
+		if (s->desc->raw)
+			scp_sensor_rawdata(s->scp, s->desc->type, false);
 		/* stop a fused sensor's pipeline first; DISABLE alone won't */
 		if (s->desc->fusion)
 			scp_sensor_config(s->scp, s->desc->type, 0, 0);
@@ -1150,17 +1216,20 @@ static void scp_drain_data_work(struct work_struct *work)
 			      sizeof(rec));
 		rp = (rp + SCP_SHM_DATA_ITEM) % bufsz;
 
-		/*
-		 * Only action 0 carries an actual sample. Other actions are meta
-		 * events (action 1 = flush-complete, etc.) whose value[] is not a
-		 * reading, so skip them rather than cache their payload.
-		 */
-		if (rec.action != SCP_SENSOR_ACTION_DATA)
-			continue;
-
 		/* route the record to its sensor by type (ignore unknown) */
 		s = scp_find_sensor(scp, rec.sensor_type);
 		if (!s)
+			continue;
+
+		/*
+		 * Processed samples arrive as DATA_ACTION (action 0). A raw-mode
+		 * sensor (the SAR) additionally reports its unprocessed per-channel
+		 * reading as RAW_ACTION once ENABLE_RAW is set, so accept that too
+		 * for those; the remaining actions are meta (flush-complete, bias,
+		 * calibration...) with no reading and are dropped.
+		 */
+		if (rec.action != SCP_SENSOR_ACTION_DATA &&
+		    !(s->desc->raw && rec.action == SCP_SENSOR_ACTION_RAW))
 			continue;
 
 		/* event sensors carry a detection, not a sample: push an event */
