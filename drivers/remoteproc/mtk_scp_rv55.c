@@ -11,13 +11,15 @@
  * This driver boots the RV55 (reset-release via the SMC above), speaks the
  * tinysys sensor-hub protocol over the hardware mailbox (CTRL/NOTIFY packets
  * with a CRC-8 header), hands the SCP the shared-DRAM ring layout and a host
- * timebase, enumerates the sensor list, and exposes the accelerometer as a
- * standard IIO device. The sensor is enabled at bring-up and streams
+ * timebase, enumerates the sensor list, and exposes the physical sensors
+ * (accelerometer, gyroscope, magnetometer, ambient-light, proximity, SAR) as
+ * standard IIO devices. They share one SCP DATA ring; the drain routes each
+ * record to its sensor by type. Sensors are enabled at bring-up and stream
  * continuously; besides feeding the IIO interface this keeps the SCP out of the
  * deep idle state it enters with no active sensor, in which it stops acking
- * mailbox traffic. The latest sample is available through in_accel_*_raw and the
- * full timestamped stream through the kfifo capture buffer (/dev/iio:deviceN).
- * The generic rpmsg layer and the remaining sensors are not wired up yet.
+ * mailbox traffic. The latest sample is available through the sysfs *_raw
+ * attributes and the full timestamped stream through each device's kfifo capture
+ * buffer (/dev/iio:deviceN). The generic rpmsg layer is not wired up yet.
  */
 #include <linux/arm-smccc.h>
 #include <linux/atomic.h>
@@ -83,15 +85,21 @@
 
 /* Android/MTK sensor type IDs (hf_sensor_type.h) */
 #define SCP_SENSOR_TYPE_ACCEL		1
+#define SCP_SENSOR_TYPE_MAGN		2
+#define SCP_SENSOR_TYPE_GYRO		4
+#define SCP_SENSOR_TYPE_ALS		5
+#define SCP_SENSOR_TYPE_PS		8
+#define SCP_SENSOR_TYPE_SAR		72
 
 /*
- * Steady sampling rate at which the accelerometer is enabled once the sensor
- * hub is up; the latest DATA-ring sample is cached for sysfs reads and the whole
- * stream is pushed to the capture buffer. The gain (raw / gain = m/s^2) is read
- * back from the sensor list, with a fallback.
+ * Steady sampling rate at which each physical sensor is enabled once the sensor
+ * hub is up; the latest DATA-ring sample per sensor is cached for sysfs reads and
+ * the whole stream is pushed to that sensor's capture buffer. The per-sensor gain
+ * (physical = raw / gain) is read back from the sensor list, with a fallback.
+ * Keeping these sensors streaming also holds the SCP out of the deep idle state
+ * in which it stops acking mailbox traffic.
  */
-#define SCP_ACCEL_PERIOD_NS		100000000LL	/* 10 Hz */
-#define SCP_ACCEL_DEFAULT_GAIN		1000
+#define SCP_SENSOR_PERIOD_NS		100000000LL	/* 10 Hz */
 
 /* share-memory payload types */
 #define SCP_SHM_PAYLOAD_DATA		0
@@ -250,6 +258,7 @@ struct scp_region_info {
 };
 
 struct mt6878_scp;
+struct scp_sensor;
 
 struct scp_mbox {
 	struct mt6878_scp *scp;
@@ -280,79 +289,142 @@ struct mt6878_scp {
 	struct work_struct drain;
 	u32 data_wp;
 
-	/* IIO accelerometer: latest cached sample */
-	struct iio_dev *indio;
-	spinlock_t sample_lock;
-	s32 accel[3];
-	u8 accel_accuracy;
-	s64 accel_ts;
-	u32 accel_gain;
-	bool accel_valid;
+	/* IIO devices, one per physical sensor (indexed by scp_sensor_table) */
+	struct scp_sensor *sensors;
 
 	struct delayed_work report;
 };
 
-static struct mt6878_scp *iio_to_scp(struct iio_dev *indio)
+/* static description of one physical sensor exposed as an IIO device */
+struct scp_sensor_desc {
+	u8 type;				/* SCP sensor_type */
+	const char *name;			/* IIO device name */
+	const struct iio_chan_spec *channels;
+	int num_channels;
+	int nvals;				/* data channels (1 or 3) */
+	u32 default_gain;			/* fallback until the list is read */
+	s64 period_ns;
+};
+
+/* per-sensor runtime state; iio_priv() holds a pointer to one of these */
+struct scp_sensor {
+	struct mt6878_scp *scp;
+	struct iio_dev *indio;
+	const struct scp_sensor_desc *desc;
+	spinlock_t lock;
+	s32 val[3];
+	u8 accuracy;
+	s64 ts;
+	u32 gain;
+	bool valid;
+};
+
+static struct scp_sensor *iio_to_sensor(struct iio_dev *indio)
 {
-	return *(struct mt6878_scp **)iio_priv(indio);
+	return *(struct scp_sensor **)iio_priv(indio);
 }
 
-#define SCP_ACCEL_CHANNEL(mod, idx) {				\
-	.type = IIO_ACCEL,					\
+/* A modified X/Y/Z tri(IIO_ACCEL/ANGL_VEL/MAGN) or a single-value channel. */
+#define SCP_AXIS_CHAN(_type, _mod, _idx) {			\
+	.type = _type,						\
 	.modified = 1,						\
-	.channel2 = IIO_MOD_##mod,				\
+	.channel2 = IIO_MOD_##_mod,				\
 	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),		\
 	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE) |	\
 				    BIT(IIO_CHAN_INFO_SAMP_FREQ),	\
-	.scan_index = idx,					\
-	.scan_type = {						\
-		.sign = 's',					\
-		.realbits = 32,					\
-		.storagebits = 32,				\
-		.endianness = IIO_CPU,				\
-	},							\
+	.scan_index = _idx,					\
+	.scan_type = { .sign = 's', .realbits = 32,		\
+		       .storagebits = 32, .endianness = IIO_CPU }, \
+}
+#define SCP_1VAL_CHAN(_type) {					\
+	.type = _type,						\
+	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),		\
+	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE) |	\
+				    BIT(IIO_CHAN_INFO_SAMP_FREQ),	\
+	.scan_index = 0,					\
+	.scan_type = { .sign = 's', .realbits = 32,		\
+		       .storagebits = 32, .endianness = IIO_CPU }, \
 }
 
-static const struct iio_chan_spec scp_accel_channels[] = {
-	SCP_ACCEL_CHANNEL(X, 0),
-	SCP_ACCEL_CHANNEL(Y, 1),
-	SCP_ACCEL_CHANNEL(Z, 2),
-	IIO_CHAN_SOFT_TIMESTAMP(3),
+#define SCP_3AXIS_CHANNELS(_name, _type)			\
+static const struct iio_chan_spec _name[] = {			\
+	SCP_AXIS_CHAN(_type, X, 0),				\
+	SCP_AXIS_CHAN(_type, Y, 1),				\
+	SCP_AXIS_CHAN(_type, Z, 2),				\
+	IIO_CHAN_SOFT_TIMESTAMP(3),				\
+}
+#define SCP_1VAL_CHANNELS(_name, _type)				\
+static const struct iio_chan_spec _name[] = {			\
+	SCP_1VAL_CHAN(_type),					\
+	IIO_CHAN_SOFT_TIMESTAMP(1),				\
+}
+
+SCP_3AXIS_CHANNELS(scp_accel_channels, IIO_ACCEL);
+SCP_3AXIS_CHANNELS(scp_gyro_channels, IIO_ANGL_VEL);
+SCP_3AXIS_CHANNELS(scp_magn_channels, IIO_MAGN);
+SCP_1VAL_CHANNELS(scp_light_channels, IIO_LIGHT);
+SCP_1VAL_CHANNELS(scp_prox_channels, IIO_PROXIMITY);
+SCP_1VAL_CHANNELS(scp_sar_channels, IIO_PROXIMITY);
+
+#define SCP_SENSOR(_t, _name, _ch, _nv, _gain) {		\
+	.type = _t, .name = _name, .channels = _ch,		\
+	.num_channels = ARRAY_SIZE(_ch), .nvals = _nv,		\
+	.default_gain = _gain, .period_ns = SCP_SENSOR_PERIOD_NS, \
+}
+
+static const struct scp_sensor_desc scp_sensor_table[] = {
+	SCP_SENSOR(SCP_SENSOR_TYPE_ACCEL, "mtk-scp-accel",     scp_accel_channels, 3, 1000),
+	SCP_SENSOR(SCP_SENSOR_TYPE_GYRO,  "mtk-scp-gyro",      scp_gyro_channels,  3, 1000000),
+	SCP_SENSOR(SCP_SENSOR_TYPE_MAGN,  "mtk-scp-magn",      scp_magn_channels,  3, 1000),
+	SCP_SENSOR(SCP_SENSOR_TYPE_ALS,   "mtk-scp-als",       scp_light_channels, 1, 1),
+	SCP_SENSOR(SCP_SENSOR_TYPE_PS,    "mtk-scp-proximity", scp_prox_channels,  1, 1),
+	SCP_SENSOR(SCP_SENSOR_TYPE_SAR,   "mtk-scp-sar",       scp_sar_channels,   1, 1),
 };
+#define SCP_NR_SENSORS ARRAY_SIZE(scp_sensor_table)
 
 static int scp_read_raw(struct iio_dev *indio,
 			struct iio_chan_spec const *chan,
 			int *val, int *val2, long mask)
 {
-	struct mt6878_scp *scp = iio_to_scp(indio);
+	struct scp_sensor *s = iio_to_sensor(indio);
 	unsigned long flags;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
-		spin_lock_irqsave(&scp->sample_lock, flags);
-		if (!scp->accel_valid) {
-			spin_unlock_irqrestore(&scp->sample_lock, flags);
+		spin_lock_irqsave(&s->lock, flags);
+		if (!s->valid) {
+			spin_unlock_irqrestore(&s->lock, flags);
 			return -EAGAIN;
 		}
-		*val = scp->accel[chan->scan_index];
-		spin_unlock_irqrestore(&scp->sample_lock, flags);
+		*val = s->val[chan->scan_index];
+		spin_unlock_irqrestore(&s->lock, flags);
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
-		/* physical [m/s^2] = raw / gain */
+		/* physical = raw / gain (vendor units: m/s^2, rad/s, uT, ...) */
 		*val = 1;
-		*val2 = scp->accel_gain;
+		*val2 = s->gain;
 		return IIO_VAL_FRACTIONAL;
 	case IIO_CHAN_INFO_SAMP_FREQ:
-		*val = NSEC_PER_SEC / SCP_ACCEL_PERIOD_NS;
+		*val = NSEC_PER_SEC / s->desc->period_ns;
 		return IIO_VAL_INT;
 	default:
 		return -EINVAL;
 	}
 }
 
-static const struct iio_info scp_accel_info = {
+static const struct iio_info scp_sensor_iio_info = {
 	.read_raw = scp_read_raw,
 };
+
+static struct scp_sensor *scp_find_sensor(struct mt6878_scp *scp, u8 type)
+{
+	int i;
+
+	for (i = 0; i < SCP_NR_SENSORS; i++)
+		if (scp->sensors[i].desc->type == type)
+			return &scp->sensors[i];
+	return NULL;
+}
 
 /* Write a message into a send pin's slot and ring the SCP's doorbell. */
 static void scp_mbox_send(struct scp_mbox *mb, unsigned int bit,
@@ -483,6 +555,7 @@ static int scp_send_timesync(struct mt6878_scp *scp)
 /* Ask the SCP for its sensor list and read the records back from the ring. */
 static int scp_query_sensor_list(struct mt6878_scp *scp)
 {
+	struct scp_sensor *s;
 	u32 wp, rp;
 	int count = 0, try;
 
@@ -520,8 +593,9 @@ static int scp_query_sensor_list(struct mt6878_scp *scp)
 		dev_info(scp->dev,
 			 "sensor type %2u gain %u name '%.16s' vendor '%.16s'\n",
 			 rec.sensor_type, rec.gain, rec.name, rec.vendor);
-		if (rec.sensor_type == SCP_SENSOR_TYPE_ACCEL)
-			scp->accel_gain = rec.gain;
+		s = scp_find_sensor(scp, rec.sensor_type);
+		if (s && rec.gain)
+			s->gain = rec.gain;
 		count++;
 	}
 	dev_info(scp->dev, "sensor hub lists %d sensor(s) (wp=%u)\n", count, wp);
@@ -530,28 +604,25 @@ static int scp_query_sensor_list(struct mt6878_scp *scp)
 
 /*
  * Enable a sensor at a given sample period / max report latency (nanoseconds).
- * Sent fire-and-forget (like disable): the SCP does not always ack an ENABLE,
- * and the arrival of DATA-ring records is the real "it started" signal, so there
- * is nothing useful to wait for here.
+ * Waits for the SCP's ack: besides confirming the command this serializes the
+ * per-sensor enables at bring-up, since they all go through the one CTRL-out pin
+ * and a fresh send would otherwise clobber the slot before the SCP reads it.
  */
-static void scp_sensor_enable(struct mt6878_scp *scp, u8 type,
-			      s64 delay_ns, s64 latency_ns)
+static int scp_sensor_enable(struct mt6878_scp *scp, u8 type,
+			     s64 delay_ns, s64 latency_ns)
 {
 	struct {
 		struct scp_sensor_ctrl c;
 		struct scp_sensor_batch b;
 	} __packed pkt = {};
 
-	pkt.c.sequence = ++scp->seq;
 	pkt.c.sensor_type = type;
 	pkt.c.command = SCP_SENSOR_CTRL_ENABLE;
 	pkt.c.length = sizeof(pkt.b);
 	pkt.b.delay = delay_ns;
 	pkt.b.latency = latency_ns;
 
-	pkt.c.crc8 = scp_crc8((u8 *)&pkt.c, 4);
-	scp_mbox_send(&scp->mbox[SCP_SENSOR_MBOX], SCP_SENSOR_CTRL_OUT_BIT,
-		      &pkt, sizeof(pkt));
+	return scp_ctrl_send(scp, &pkt.c, sizeof(pkt));
 }
 
 /*
@@ -580,7 +651,6 @@ static void scp_sensor_disable(struct mt6878_scp *scp, u8 type)
 static void scp_drain_data_work(struct work_struct *work)
 {
 	struct mt6878_scp *scp = container_of(work, struct mt6878_scp, drain);
-	struct iio_dev *indio = scp->indio;
 	u32 bufsz = readl(scp->data_ring + 8);
 	u32 wp = scp->data_wp;
 	u32 rp = readl(scp->data_ring + 0);
@@ -590,44 +660,45 @@ static void scp_drain_data_work(struct work_struct *work)
 
 	while (rp != wp) {
 		struct scp_sensor_data rec;
+		struct scp_sensor *s;
 		unsigned long flags;
 		bool first;
+		int i, nv;
 
 		memcpy_fromio(&rec, scp->data_ring + SCP_SHM_HDR_SIZE + rp,
 			      sizeof(rec));
 		rp = (rp + SCP_SHM_DATA_ITEM) % bufsz;
 
-		if (rec.sensor_type != SCP_SENSOR_TYPE_ACCEL)
+		/* route the record to its sensor by type (ignore unknown) */
+		s = scp_find_sensor(scp, rec.sensor_type);
+		if (!s)
 			continue;
+		nv = s->desc->nvals;
 
-		/* cache the newest sample for sysfs in_accel_*_raw reads */
-		spin_lock_irqsave(&scp->sample_lock, flags);
-		scp->accel[0] = rec.value[0];
-		scp->accel[1] = rec.value[1];
-		scp->accel[2] = rec.value[2];
-		scp->accel_accuracy = rec.accuracy;
-		scp->accel_ts = rec.timestamp;
-		first = !scp->accel_valid;
-		scp->accel_valid = true;
-		spin_unlock_irqrestore(&scp->sample_lock, flags);
+		/* cache the newest sample for this sensor's sysfs *_raw reads */
+		spin_lock_irqsave(&s->lock, flags);
+		for (i = 0; i < nv; i++)
+			s->val[i] = rec.value[i];
+		s->accuracy = rec.accuracy;
+		s->ts = rec.timestamp;
+		first = !s->valid;
+		s->valid = true;
+		spin_unlock_irqrestore(&s->lock, flags);
 
 		if (first)
-			dev_info(scp->dev,
-				 "accel streaming to IIO: x=%d y=%d z=%d (acc %u)\n",
-				 rec.value[0], rec.value[1], rec.value[2],
-				 rec.accuracy);
+			dev_info(scp->dev, "%s streaming to IIO (v0=%d acc %u)\n",
+				 s->desc->name, rec.value[0], rec.accuracy);
 
-		/* and push it to the capture buffer if one is open */
-		if (iio_buffer_enabled(indio)) {
+		/* and push it to this sensor's capture buffer if one is open */
+		if (iio_buffer_enabled(s->indio)) {
 			struct {
 				s32 chan[3];
 				s64 ts __aligned(8);
 			} sample;
 
-			sample.chan[0] = rec.value[0];
-			sample.chan[1] = rec.value[1];
-			sample.chan[2] = rec.value[2];
-			iio_push_to_buffers_with_timestamp(indio, &sample,
+			for (i = 0; i < nv; i++)
+				sample.chan[i] = rec.value[i];
+			iio_push_to_buffers_with_timestamp(s->indio, &sample,
 							   rec.timestamp);
 		}
 	}
@@ -641,6 +712,7 @@ static void scp_sensorhub_work(struct work_struct *work)
 {
 	struct mt6878_scp *scp =
 		container_of(work, struct mt6878_scp, sensorhub);
+	int i;
 
 	scp->list_ring = ioremap_wc(SCP_SHM_LIST_BASE, SCP_SHM_LIST_SIZE);
 	scp->data_ring = ioremap_wc(SCP_SHM_DATA_BASE, SCP_SHM_DATA_SIZE);
@@ -664,13 +736,19 @@ static void scp_sensorhub_work(struct work_struct *work)
 	scp_query_sensor_list(scp);
 
 	/*
-	 * Enable the accelerometer now and keep it running: its DATA-ring samples
-	 * feed the IIO device, and the steady traffic keeps the SCP from dropping
-	 * into the deep idle state where it stops acking mailbox commands.
+	 * Enable every exposed sensor now and keep them running: their DATA-ring
+	 * records feed the IIO devices, and the steady traffic keeps the SCP from
+	 * dropping into the deep idle state where it stops acking mailbox commands.
+	 * The enables are serialized (each waits for its ack) so they don't clobber
+	 * the shared CTRL-out mailbox slot.
 	 */
-	scp_sensor_enable(scp, SCP_SENSOR_TYPE_ACCEL, SCP_ACCEL_PERIOD_NS, 0);
-	dev_info(scp->dev, "accelerometer enabled (%d Hz), streaming to IIO\n",
-		 (int)(NSEC_PER_SEC / SCP_ACCEL_PERIOD_NS));
+	for (i = 0; i < SCP_NR_SENSORS; i++) {
+		const struct scp_sensor_desc *d = scp->sensors[i].desc;
+
+		if (scp_sensor_enable(scp, d->type, d->period_ns, 0))
+			dev_warn(scp->dev, "%s: enable not acked\n", d->name);
+	}
+	dev_info(scp->dev, "sensors enabled, streaming to IIO\n");
 }
 
 static irqreturn_t scp_mbox_isr(int irq, void *data)
@@ -820,7 +898,7 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 	struct scp_region_info ri;
 	struct arm_smccc_res res;
 	struct mt6878_scp *scp;
-	int ret;
+	int ret, i;
 
 	scp = devm_kzalloc(dev, sizeof(*scp), GFP_KERNEL);
 	if (!scp)
@@ -830,8 +908,6 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 	atomic_set(&scp->sensor_ready, 0);
 	init_completion(&scp->ctrl_ack);
 	init_completion(&scp->notify_reply);
-	spin_lock_init(&scp->sample_lock);
-	scp->accel_gain = SCP_ACCEL_DEFAULT_GAIN;
 	INIT_WORK(&scp->sensor_init, scp_sensor_init_work);
 	INIT_WORK(&scp->sensorhub, scp_sensorhub_work);
 	INIT_WORK(&scp->drain, scp_drain_data_work);
@@ -860,26 +936,45 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 		return ret;
 
 	/*
-	 * Expose the accelerometer as an IIO device with a kfifo capture buffer.
-	 * It is registered up front; in_accel_*_raw returns -EAGAIN and the buffer
-	 * stays empty until the sensor hub comes up and the first DATA-ring sample
-	 * has been cached.
+	 * Expose each physical sensor as its own IIO device with a kfifo capture
+	 * buffer. They are registered up front; the *_raw attributes return -EAGAIN
+	 * and the buffers stay empty until the sensor hub comes up and the first
+	 * DATA-ring record for that sensor has been cached.
 	 */
-	scp->indio = devm_iio_device_alloc(dev, sizeof(scp));
-	if (!scp->indio)
+	scp->sensors = devm_kcalloc(dev, SCP_NR_SENSORS, sizeof(*scp->sensors),
+				    GFP_KERNEL);
+	if (!scp->sensors)
 		return -ENOMEM;
-	*(struct mt6878_scp **)iio_priv(scp->indio) = scp;
-	scp->indio->name = "mtk-scp-accel";
-	scp->indio->modes = INDIO_DIRECT_MODE;
-	scp->indio->info = &scp_accel_info;
-	scp->indio->channels = scp_accel_channels;
-	scp->indio->num_channels = ARRAY_SIZE(scp_accel_channels);
-	ret = devm_iio_kfifo_buffer_setup(dev, scp->indio, NULL);
-	if (ret)
-		return dev_err_probe(dev, ret, "cannot set up IIO buffer\n");
-	ret = devm_iio_device_register(dev, scp->indio);
-	if (ret)
-		return dev_err_probe(dev, ret, "cannot register IIO device\n");
+	for (i = 0; i < SCP_NR_SENSORS; i++) {
+		struct scp_sensor *s = &scp->sensors[i];
+		struct iio_dev *indio;
+
+		s->scp = scp;
+		s->desc = &scp_sensor_table[i];
+		s->gain = s->desc->default_gain;
+		spin_lock_init(&s->lock);
+
+		indio = devm_iio_device_alloc(dev, sizeof(s));
+		if (!indio)
+			return -ENOMEM;
+		*(struct scp_sensor **)iio_priv(indio) = s;
+		indio->name = s->desc->name;
+		indio->modes = INDIO_DIRECT_MODE;
+		indio->info = &scp_sensor_iio_info;
+		indio->channels = s->desc->channels;
+		indio->num_channels = s->desc->num_channels;
+		s->indio = indio;
+
+		ret = devm_iio_kfifo_buffer_setup(dev, indio, NULL);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "cannot set up %s buffer\n",
+					     s->desc->name);
+		ret = devm_iio_device_register(dev, indio);
+		if (ret)
+			return dev_err_probe(dev, ret, "cannot register %s\n",
+					     s->desc->name);
+	}
 
 	/*
 	 * Release the RV55 from reset. Firmware and the region-info descriptor
@@ -903,9 +998,11 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 static void mt6878_scp_remove(struct platform_device *pdev)
 {
 	struct mt6878_scp *scp = platform_get_drvdata(pdev);
+	int i;
 
 	if (atomic_read(&scp->sensor_ready))
-		scp_sensor_disable(scp, SCP_SENSOR_TYPE_ACCEL);
+		for (i = 0; i < SCP_NR_SENSORS; i++)
+			scp_sensor_disable(scp, scp->sensors[i].desc->type);
 	cancel_work_sync(&scp->sensor_init);
 	cancel_work_sync(&scp->sensorhub);
 	cancel_work_sync(&scp->drain);
