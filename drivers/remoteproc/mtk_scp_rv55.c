@@ -13,8 +13,9 @@
  * with a CRC-8 header), hands the SCP the shared-DRAM ring layout and a host
  * timebase, enumerates the sensor list, and exposes the physical sensors
  * (accelerometer, gyroscope, magnetometer, ambient-light, proximity, SAR) plus
- * the SCP-fused virtual sensors (gravity, linear acceleration) as standard IIO
- * devices. They share one SCP DATA ring; the drain routes each
+ * the SCP-fused virtual sensors (gravity, linear acceleration, orientation and
+ * the step counter) as standard IIO devices. They share one SCP DATA ring; the
+ * drain routes each
  * record to its sensor by type. Sensors are enabled on demand (when an IIO
  * reader or capture buffer needs them) and disabled again when idle; with no
  * active sensor the SCP sleeps, and the enable path wakes it first through the
@@ -96,11 +97,13 @@
 /* Android/MTK sensor type IDs (hf_sensor_type.h) */
 #define SCP_SENSOR_TYPE_ACCEL		1
 #define SCP_SENSOR_TYPE_MAGN		2
+#define SCP_SENSOR_TYPE_ORIENTATION	3	/* fusion: azimuth/pitch/roll */
 #define SCP_SENSOR_TYPE_GYRO		4
 #define SCP_SENSOR_TYPE_ALS		5
 #define SCP_SENSOR_TYPE_PS		8
 #define SCP_SENSOR_TYPE_GRAVITY		9	/* fusion: gravity vector */
 #define SCP_SENSOR_TYPE_LINEAR_ACCEL	10	/* fusion: linear acceleration */
+#define SCP_SENSOR_TYPE_STEP_COUNT	19	/* fusion: cumulative step count */
 #define SCP_SENSOR_TYPE_SAR		72
 
 /*
@@ -408,6 +411,26 @@ SCP_1VAL_CHANNELS(scp_sar_channels, IIO_PROXIMITY);
 SCP_3AXIS_CHANNELS(scp_gravity_channels, IIO_GRAVITY);
 SCP_3AXIS_CHANNELS(scp_linaccel_channels, IIO_ACCEL);
 
+/* orientation = Euler angles (azimuth->yaw, pitch, roll), in degrees */
+static const struct iio_chan_spec scp_orient_channels[] = {
+	SCP_AXIS_CHAN(IIO_ROT, YAW, 0),
+	SCP_AXIS_CHAN(IIO_ROT, PITCH, 1),
+	SCP_AXIS_CHAN(IIO_ROT, ROLL, 2),
+	IIO_CHAN_SOFT_TIMESTAMP(3),
+};
+
+/* step counter = a single processed, cumulative count (no scale) */
+static const struct iio_chan_spec scp_steps_channels[] = {
+	{
+		.type = IIO_STEPS,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED),
+		.scan_index = 0,
+		.scan_type = { .sign = 'u', .realbits = 32,
+			       .storagebits = 32, .endianness = IIO_CPU },
+	},
+	IIO_CHAN_SOFT_TIMESTAMP(1),
+};
+
 /*
  * _udiv is an extra divisor applied on top of the vendor gain so the IIO scale
  * yields the unit the IIO ABI mandates for that channel type. The SCP reports
@@ -440,6 +463,9 @@ static const struct scp_sensor_desc scp_sensor_table[] = {
 	SCP_SENSOR_F(SCP_SENSOR_TYPE_SAR,  "mtk-scp-sar",       scp_sar_channels,   1, 1, 1, true),
 	SCP_FUSION(SCP_SENSOR_TYPE_GRAVITY,      "mtk-scp-gravity",      scp_gravity_channels,  3, 1000000, 1),
 	SCP_FUSION(SCP_SENSOR_TYPE_LINEAR_ACCEL, "mtk-scp-linear-accel", scp_linaccel_channels, 3, 1000000, 1),
+	SCP_FUSION(SCP_SENSOR_TYPE_ORIENTATION,  "mtk-scp-orientation",  scp_orient_channels,   3, 1000000, 1),
+	/* step counter: fused, and on-change so enable flushes the current total */
+	SCP_SENSOR_FULL(SCP_SENSOR_TYPE_STEP_COUNT, "mtk-scp-step-counter", scp_steps_channels, 1, 1, 1, true, true),
 };
 #define SCP_NR_SENSORS ARRAY_SIZE(scp_sensor_table)
 
@@ -453,6 +479,7 @@ static int scp_read_raw(struct iio_dev *indio,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
+	case IIO_CHAN_INFO_PROCESSED:	/* step counter reports a processed count */
 		/*
 		 * On-demand: enable the sensor for the duration of the read (a
 		 * no-op if a buffer already holds it on), wait briefly for the
