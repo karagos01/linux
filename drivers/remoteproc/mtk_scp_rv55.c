@@ -14,8 +14,9 @@
  * timebase, enumerates the sensor list, and exposes the physical sensors
  * (accelerometer, gyroscope, magnetometer, ambient-light, proximity, SAR) plus
  * the SCP-fused virtual sensors (gravity, linear acceleration, orientation, the
- * rotation-vector quaternions and the step counter) as standard IIO devices.
- * They share one SCP DATA ring; the drain routes each
+ * rotation-vector quaternions, the step counter, and the significant-motion and
+ * tilt event detectors) as standard IIO devices. They share one SCP DATA ring;
+ * the drain routes each
  * record to its sensor by type. Sensors are enabled on demand (when an IIO
  * reader or capture buffer needs them) and disabled again when idle; with no
  * active sensor the SCP sleeps, and the enable path wakes it first through the
@@ -43,6 +44,7 @@
 #include <linux/workqueue.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/buffer.h>
+#include <linux/iio/events.h>
 #include <linux/iio/kfifo_buf.h>
 #include <asm/arch_timer.h>
 
@@ -105,8 +107,10 @@
 #define SCP_SENSOR_TYPE_LINEAR_ACCEL	10	/* fusion: linear acceleration */
 #define SCP_SENSOR_TYPE_ROTATION	11	/* fusion: rotation vector (quaternion) */
 #define SCP_SENSOR_TYPE_GAME_ROTATION	15	/* fusion: game rotation (no magnetometer) */
+#define SCP_SENSOR_TYPE_SIGNIFICANT	17	/* fusion: significant-motion event */
 #define SCP_SENSOR_TYPE_STEP_COUNT	19	/* fusion: cumulative step count */
 #define SCP_SENSOR_TYPE_GEOMAG_ROTATION	20	/* fusion: geomagnetic rotation (no gyro) */
+#define SCP_SENSOR_TYPE_TILT		22	/* fusion: tilt-detector event */
 #define SCP_SENSOR_TYPE_SAR		72
 
 /*
@@ -345,6 +349,7 @@ struct scp_sensor_desc {
 	s64 period_ns;
 	bool on_change;				/* flush on enable to prime a value */
 	bool fusion;				/* SCP-fused virtual sensor */
+	bool event;				/* delivers IIO events, not samples */
 };
 
 /* per-sensor runtime state; iio_priv() holds a pointer to one of these */
@@ -360,6 +365,7 @@ struct scp_sensor {
 	bool valid;
 	struct mutex en_lock;		/* guards users/enable transitions */
 	unsigned int users;		/* on-demand enable refcount */
+	bool ev_on;			/* event delivery armed (event sensors) */
 };
 
 static struct scp_sensor *iio_to_sensor(struct iio_dev *indio)
@@ -455,6 +461,41 @@ static const struct iio_chan_spec scp_rotvec_channels[] = {
 };
 
 /*
+ * Event-only sensors: no sample channel, just an IIO event delivered when the
+ * SCP reports a detection. significant-motion follows the cros_ec convention
+ * (activity leaving "still"); tilt has no canonical IIO type, so it is a
+ * generic activity gesture.
+ */
+static const struct iio_event_spec scp_sigmotion_event = {
+	.type = IIO_EV_TYPE_CHANGE,
+	.dir = IIO_EV_DIR_FALLING,
+	.mask_separate = BIT(IIO_EV_INFO_ENABLE),
+};
+static const struct iio_chan_spec scp_sigmotion_channels[] = {
+	{
+		.type = IIO_ACTIVITY,
+		.modified = 1,
+		.channel2 = IIO_MOD_STILL,
+		.event_spec = &scp_sigmotion_event,
+		.num_event_specs = 1,
+		.scan_index = -1,
+	},
+};
+static const struct iio_event_spec scp_tilt_event = {
+	.type = IIO_EV_TYPE_GESTURE,
+	.dir = IIO_EV_DIR_NONE,
+	.mask_separate = BIT(IIO_EV_INFO_ENABLE),
+};
+static const struct iio_chan_spec scp_tilt_channels[] = {
+	{
+		.type = IIO_ACTIVITY,
+		.event_spec = &scp_tilt_event,
+		.num_event_specs = 1,
+		.scan_index = -1,
+	},
+};
+
+/*
  * _udiv is an extra divisor applied on top of the vendor gain so the IIO scale
  * yields the unit the IIO ABI mandates for that channel type. The SCP reports
  * accel in m/s^2, gyro in rad/s and light in lux already (raw/gain), which is
@@ -476,6 +517,14 @@ static const struct iio_chan_spec scp_rotvec_channels[] = {
 /* SCP-fused virtual sensor: needs a standalone CONFIG to start/stop its pipeline */
 #define SCP_FUSION(_t, _name, _ch, _nv, _gain, _udiv)		\
 	SCP_SENSOR_FULL(_t, _name, _ch, _nv, _gain, _udiv, false, true)
+/* fused event sensor: no sample channel, delivers an IIO event on detection */
+#define SCP_EVENT(_t, _name, _ch) {				\
+	.type = _t, .name = _name, .channels = _ch,		\
+	.num_channels = ARRAY_SIZE(_ch), .nvals = 0,		\
+	.default_gain = 1, .unit_div = 1,			\
+	.period_ns = SCP_SENSOR_PERIOD_NS,			\
+	.fusion = true, .event = true,				\
+}
 
 static const struct scp_sensor_desc scp_sensor_table[] = {
 	SCP_SENSOR(SCP_SENSOR_TYPE_ACCEL,  "mtk-scp-accel",     scp_accel_channels, 3, 1000,    1),
@@ -492,6 +541,8 @@ static const struct scp_sensor_desc scp_sensor_table[] = {
 	SCP_FUSION(SCP_SENSOR_TYPE_GEOMAG_ROTATION, "mtk-scp-geomag-rotation",   scp_rotvec_channels, 4, 1000000, 1),
 	/* step counter: fused, and on-change so enable flushes the current total */
 	SCP_SENSOR_FULL(SCP_SENSOR_TYPE_STEP_COUNT, "mtk-scp-step-counter", scp_steps_channels, 1, 1, 1, true, true),
+	SCP_EVENT(SCP_SENSOR_TYPE_SIGNIFICANT, "mtk-scp-significant-motion", scp_sigmotion_channels),
+	SCP_EVENT(SCP_SENSOR_TYPE_TILT,        "mtk-scp-tilt",              scp_tilt_channels),
 };
 #define SCP_NR_SENSORS ARRAY_SIZE(scp_sensor_table)
 
@@ -568,8 +619,40 @@ static int scp_read_raw_multi(struct iio_dev *indio,
 	}
 }
 
+/* event sensors arm/disarm through the on-demand enable path */
+static int scp_read_event_config(struct iio_dev *indio,
+				 const struct iio_chan_spec *chan,
+				 enum iio_event_type type,
+				 enum iio_event_direction dir)
+{
+	return iio_to_sensor(indio)->ev_on;
+}
+
+static int scp_write_event_config(struct iio_dev *indio,
+				  const struct iio_chan_spec *chan,
+				  enum iio_event_type type,
+				  enum iio_event_direction dir, bool state)
+{
+	struct scp_sensor *s = iio_to_sensor(indio);
+	int ret;
+
+	if (state == s->ev_on)
+		return 0;
+	if (state) {
+		ret = scp_sensor_get(s);
+		if (ret)
+			return ret;
+	} else {
+		scp_sensor_put(s);
+	}
+	s->ev_on = state;
+	return 0;
+}
+
 static const struct iio_info scp_sensor_iio_info = {
 	.read_raw_multi = scp_read_raw_multi,
+	.read_event_config = scp_read_event_config,
+	.write_event_config = scp_write_event_config,
 };
 
 static struct scp_sensor *scp_find_sensor(struct mt6878_scp *scp, u8 type)
@@ -993,6 +1076,21 @@ static void scp_drain_data_work(struct work_struct *work)
 		s = scp_find_sensor(scp, rec.sensor_type);
 		if (!s)
 			continue;
+
+		/* event sensors carry a detection, not a sample: push an event */
+		if (s->desc->event) {
+			const struct iio_chan_spec *c = &s->desc->channels[0];
+			u64 code = c->modified ?
+				IIO_MOD_EVENT_CODE(c->type, 0, c->channel2,
+						   c->event_spec[0].type,
+						   c->event_spec[0].dir) :
+				IIO_UNMOD_EVENT_CODE(c->type, 0,
+						     c->event_spec[0].type,
+						     c->event_spec[0].dir);
+
+			iio_push_event(s->indio, code, rec.timestamp);
+			continue;
+		}
 		nv = s->desc->nvals;
 
 		/* cache the newest sample for this sensor's sysfs *_raw reads */
@@ -1291,11 +1389,15 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 		indio->num_channels = s->desc->num_channels;
 		s->indio = indio;
 
-		ret = devm_iio_kfifo_buffer_setup(dev, indio, &scp_buffer_ops);
-		if (ret)
-			return dev_err_probe(dev, ret,
-					     "cannot set up %s buffer\n",
-					     s->desc->name);
+		/* event sensors have no sample channel, so no capture buffer */
+		if (!s->desc->event) {
+			ret = devm_iio_kfifo_buffer_setup(dev, indio,
+							  &scp_buffer_ops);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "cannot set up %s buffer\n",
+						     s->desc->name);
+		}
 		ret = devm_iio_device_register(dev, indio);
 		if (ret)
 			return dev_err_probe(dev, ret, "cannot register %s\n",
