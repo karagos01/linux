@@ -14,9 +14,10 @@
  * timebase, enumerates the sensor list, and exposes the physical sensors
  * (accelerometer, gyroscope, magnetometer, ambient-light, proximity, SAR) as
  * standard IIO devices. They share one SCP DATA ring; the drain routes each
- * record to its sensor by type. Sensors are enabled at bring-up and stream
- * continuously; besides feeding the IIO interface this keeps the SCP out of the
- * deep idle state it enters with no active sensor, in which it stops acking
+ * record to its sensor by type. Sensors are enabled on demand (when an IIO
+ * reader or capture buffer needs them) and disabled again when idle; with no
+ * active sensor the SCP sleeps, and the enable path wakes it first through the
+ * infracfg_ao awake handshake, since a sleeping SCP otherwise stops acking
  * mailbox traffic. The latest sample is available through the sysfs *_raw
  * attributes and the full timestamped stream through each device's kfifo capture
  * buffer (/dev/iio:deviceN). The generic rpmsg layer is not wired up yet.
@@ -24,11 +25,13 @@
 #include <linux/arm-smccc.h>
 #include <linux/atomic.h>
 #include <linux/bits.h>
+#include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/rtc.h>
 #include <linux/sched/clock.h>
@@ -297,6 +300,7 @@ struct mt6878_scp {
 	/* sensor hub bring-up */
 	struct work_struct sensor_init;
 	struct work_struct sensorhub;
+	struct mutex ctrl_lock;		/* serializes CTRL commands + awake */
 	struct completion ctrl_ack;
 	struct completion notify_reply;
 	s8 ack_ret;
@@ -338,12 +342,17 @@ struct scp_sensor {
 	s64 ts;
 	u32 gain;
 	bool valid;
+	struct mutex en_lock;		/* guards users/enable transitions */
+	unsigned int users;		/* on-demand enable refcount */
 };
 
 static struct scp_sensor *iio_to_sensor(struct iio_dev *indio)
 {
 	return *(struct scp_sensor **)iio_priv(indio);
 }
+
+static int scp_sensor_get(struct scp_sensor *s);
+static void scp_sensor_put(struct scp_sensor *s);
 
 /* A modified X/Y/Z tri(IIO_ACCEL/ANGL_VEL/MAGN) or a single-value channel. */
 #define SCP_AXIS_CHAN(_type, _mod, _idx) {			\
@@ -418,17 +427,31 @@ static int scp_read_raw(struct iio_dev *indio,
 {
 	struct scp_sensor *s = iio_to_sensor(indio);
 	unsigned long flags;
+	int ret, tries;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
-		spin_lock_irqsave(&s->lock, flags);
-		if (!s->valid) {
+		/*
+		 * On-demand: enable the sensor for the duration of the read (a
+		 * no-op if a buffer already holds it on), wait briefly for the
+		 * first cached sample, then release it so an idle SCP can sleep.
+		 */
+		ret = scp_sensor_get(s);
+		if (ret)
+			return ret;
+		for (tries = 0; tries < 6; tries++) {
+			spin_lock_irqsave(&s->lock, flags);
+			if (s->valid) {
+				*val = s->val[chan->scan_index];
+				spin_unlock_irqrestore(&s->lock, flags);
+				scp_sensor_put(s);
+				return IIO_VAL_INT;
+			}
 			spin_unlock_irqrestore(&s->lock, flags);
-			return -EAGAIN;
+			msleep(60);
 		}
-		*val = s->val[chan->scan_index];
-		spin_unlock_irqrestore(&s->lock, flags);
-		return IIO_VAL_INT;
+		scp_sensor_put(s);
+		return -EAGAIN;
 	case IIO_CHAN_INFO_SCALE:
 		/* raw * scale = IIO-standard unit (m/s^2, rad/s, Gauss, lux) */
 		*val = 1;
@@ -493,29 +516,6 @@ static void scp_sensor_init_work(struct work_struct *work)
 	scp_send_sensor_ready(scp);
 }
 
-/* Send a sensor_comm ctrl packet and wait for the SCP's ack. */
-static int scp_ctrl_send(struct mt6878_scp *scp, struct scp_sensor_ctrl *c,
-			 size_t len)
-{
-	c->sequence = ++scp->seq;
-	c->crc8 = scp_crc8((u8 *)c, 4);
-
-	reinit_completion(&scp->ctrl_ack);
-	scp_mbox_send(&scp->mbox[SCP_SENSOR_MBOX], SCP_SENSOR_CTRL_OUT_BIT,
-		      c, len);
-	if (!wait_for_completion_timeout(&scp->ctrl_ack,
-			msecs_to_jiffies(SCP_REPLY_TIMEOUT_MS))) {
-		dev_err(scp->dev, "ctrl cmd %u: no ack\n", c->command);
-		return -ETIMEDOUT;
-	}
-	if (scp->ack_ret < 0) {
-		dev_err(scp->dev, "ctrl cmd %u rejected (%d)\n",
-			c->command, scp->ack_ret);
-		return -EREMOTEIO;
-	}
-	return 0;
-}
-
 /*
  * Ring the SCP awake doorbell with one opcode (LOCK/UNLOCK) and wait for the
  * SCP to consume it: the opcode bit in INFRA_IRQ_SET self-clears once the core
@@ -546,6 +546,38 @@ static int scp_awake_lock(struct mt6878_scp *scp)
 static int scp_awake_unlock(struct mt6878_scp *scp)
 {
 	return scp_awake_ring(scp, SCP_AWAKE_UNLOCK);
+}
+
+static int scp_ctrl_send(struct mt6878_scp *scp, struct scp_sensor_ctrl *c,
+			 size_t len)
+{
+	int ret = 0;
+
+	/*
+	 * Serialize CTRL traffic (one ack completion, one CTRL-out mailbox slot)
+	 * and bracket it with the awake handshake so a sleeping SCP is woken for
+	 * the whole command-and-ack, not just the instant the slot is written.
+	 */
+	mutex_lock(&scp->ctrl_lock);
+	c->sequence = ++scp->seq;
+	c->crc8 = scp_crc8((u8 *)c, 4);
+
+	reinit_completion(&scp->ctrl_ack);
+	scp_awake_lock(scp);
+	scp_mbox_send(&scp->mbox[SCP_SENSOR_MBOX], SCP_SENSOR_CTRL_OUT_BIT,
+		      c, len);
+	if (!wait_for_completion_timeout(&scp->ctrl_ack,
+			msecs_to_jiffies(SCP_REPLY_TIMEOUT_MS))) {
+		dev_err(scp->dev, "ctrl cmd %u: no ack\n", c->command);
+		ret = -ETIMEDOUT;
+	} else if (scp->ack_ret < 0) {
+		dev_err(scp->dev, "ctrl cmd %u rejected (%d)\n",
+			c->command, scp->ack_ret);
+		ret = -EREMOTEIO;
+	}
+	scp_awake_unlock(scp);
+	mutex_unlock(&scp->ctrl_lock);
+	return ret;
 }
 
 /* Write a fresh ring header (rp/wp/buffer_size/item_size) into a region. */
@@ -705,22 +737,84 @@ static int scp_sensor_flush(struct mt6878_scp *scp, u8 type)
 }
 
 /*
- * Best-effort disable (used on unbind): the SCP acts on the command (the stream
- * stops) but does not reliably ack a DISABLE issued while samples are still in
- * flight, so fire it without waiting rather than log a spurious timeout.
+ * Best-effort disable: the SCP acts on the command (the stream stops) but does
+ * not reliably ack a DISABLE issued while samples are still in flight, so fire
+ * it without waiting rather than log a spurious timeout. Still take the CTRL
+ * lock and the awake handshake so it doesn't clobber a concurrent command and
+ * so a drowsy SCP is woken to see it.
  */
 static void scp_sensor_disable(struct mt6878_scp *scp, u8 type)
 {
 	struct scp_sensor_ctrl c = {
-		.sequence = ++scp->seq,
 		.sensor_type = type,
 		.command = SCP_SENSOR_CTRL_DISABLE,
 	};
 
+	mutex_lock(&scp->ctrl_lock);
+	c.sequence = ++scp->seq;
 	c.crc8 = scp_crc8((u8 *)&c, 4);
+	scp_awake_lock(scp);
 	scp_mbox_send(&scp->mbox[SCP_SENSOR_MBOX], SCP_SENSOR_CTRL_OUT_BIT,
 		      &c, sizeof(c));
+	scp_awake_unlock(scp);
+	mutex_unlock(&scp->ctrl_lock);
 }
+
+/*
+ * On-demand enable: bring a sensor online for the first user and take it offline
+ * when the last one leaves. The enable CTRL command wakes a sleeping SCP (via
+ * scp_ctrl_send's awake handshake); once a sensor is streaming its own traffic
+ * keeps the SCP awake, and once the last sensor stops the SCP is free to sleep.
+ * The on-change SAR is flushed on enable so its first reading is primed.
+ */
+static int scp_sensor_get(struct scp_sensor *s)
+{
+	struct mt6878_scp *scp = s->scp;
+	int ret = 0;
+
+	mutex_lock(&s->en_lock);
+	if (s->users == 0) {
+		ret = scp_sensor_enable(scp, s->desc->type,
+					s->desc->period_ns, 0);
+		if (!ret && s->desc->type == SCP_SENSOR_TYPE_SAR)
+			scp_sensor_flush(scp, s->desc->type);
+	}
+	if (!ret)
+		s->users++;
+	mutex_unlock(&s->en_lock);
+	return ret;
+}
+
+static void scp_sensor_put(struct scp_sensor *s)
+{
+	unsigned long flags;
+
+	mutex_lock(&s->en_lock);
+	if (!WARN_ON(s->users == 0) && --s->users == 0) {
+		scp_sensor_disable(s->scp, s->desc->type);
+		spin_lock_irqsave(&s->lock, flags);
+		s->valid = false;	/* cached sample is stale once stopped */
+		spin_unlock_irqrestore(&s->lock, flags);
+	}
+	mutex_unlock(&s->en_lock);
+}
+
+/* IIO buffer open/close maps straight onto the on-demand refcount. */
+static int scp_buffer_postenable(struct iio_dev *indio)
+{
+	return scp_sensor_get(iio_to_sensor(indio));
+}
+
+static int scp_buffer_predisable(struct iio_dev *indio)
+{
+	scp_sensor_put(iio_to_sensor(indio));
+	return 0;
+}
+
+static const struct iio_buffer_setup_ops scp_buffer_ops = {
+	.postenable = scp_buffer_postenable,
+	.predisable = scp_buffer_predisable,
+};
 
 /*
  * Drain the DATA ring up to the SCP's reported write pointer. rp/wp are byte
@@ -765,8 +859,8 @@ static void scp_drain_data_work(struct work_struct *work)
 		spin_unlock_irqrestore(&s->lock, flags);
 
 		if (first)
-			dev_info(scp->dev, "%s streaming to IIO (v0=%d acc %u)\n",
-				 s->desc->name, rec.value[0], rec.accuracy);
+			dev_dbg(scp->dev, "%s first sample (v0=%d acc %u)\n",
+				s->desc->name, rec.value[0], rec.accuracy);
 
 		/* and push it to this sensor's capture buffer if one is open */
 		if (iio_buffer_enabled(s->indio)) {
@@ -791,7 +885,6 @@ static void scp_sensorhub_work(struct work_struct *work)
 {
 	struct mt6878_scp *scp =
 		container_of(work, struct mt6878_scp, sensorhub);
-	int i;
 
 	scp->list_ring = ioremap_wc(SCP_SHM_LIST_BASE, SCP_SHM_LIST_SIZE);
 	scp->data_ring = ioremap_wc(SCP_SHM_DATA_BASE, SCP_SHM_DATA_SIZE);
@@ -802,19 +895,6 @@ static void scp_sensorhub_work(struct work_struct *work)
 
 	scp_ring_init(scp->list_ring, SCP_SHM_LIST_SIZE, SCP_SHM_LIST_ITEM);
 	scp_ring_init(scp->data_ring, SCP_SHM_DATA_SIZE, SCP_SHM_DATA_ITEM);
-
-	/*
-	 * Validate the awake handshake while the SCP is known to be up (the hub
-	 * just reported ready): a lock/unlock pair here must complete instantly.
-	 * This proves the infracfg_ao doorbell register and poll before the
-	 * handshake is relied on to wake a sleeping SCP for on-demand enables.
-	 */
-	if (scp->awake) {
-		int l = scp_awake_lock(scp);
-		int u = scp_awake_unlock(scp);
-
-		dev_info(scp->dev, "awake handshake: lock=%d unlock=%d\n", l, u);
-	}
 
 	if (scp_config_share_mem(scp))
 		return;
@@ -828,29 +908,11 @@ static void scp_sensorhub_work(struct work_struct *work)
 	scp_query_sensor_list(scp);
 
 	/*
-	 * Enable every exposed sensor now and keep them running: their DATA-ring
-	 * records feed the IIO devices, and the steady traffic keeps the SCP from
-	 * dropping into the deep idle state where it stops acking mailbox commands.
-	 * The enables are serialized (each waits for its ack) so they don't clobber
-	 * the shared CTRL-out mailbox slot.
+	 * Sensors are enabled on demand (first IIO reader or buffer open) rather
+	 * than kept running: each enable wakes the SCP through the awake handshake
+	 * in scp_ctrl_send, and with no sensor active the SCP is free to sleep.
 	 */
-	for (i = 0; i < SCP_NR_SENSORS; i++) {
-		const struct scp_sensor_desc *d = scp->sensors[i].desc;
-
-		if (scp_sensor_enable(scp, d->type, d->period_ns, 0))
-			dev_warn(scp->dev, "%s: enable not acked\n", d->name);
-	}
-	dev_info(scp->dev, "sensors enabled, streaming to IIO\n");
-
-	/*
-	 * The SAR (aw963xx) is on-change and stays silent at its baseline, so
-	 * flush it once to prime an initial reading; later proximity changes are
-	 * reported on their own. The flush ack means the hub accepted it.
-	 */
-	if (scp_sensor_flush(scp, SCP_SENSOR_TYPE_SAR))
-		dev_warn(scp->dev, "sar: flush not acked\n");
-	else
-		dev_info(scp->dev, "sar: flush requested\n");
+	dev_info(scp->dev, "sensor hub ready; sensors enabled on demand\n");
 }
 
 static irqreturn_t scp_mbox_isr(int irq, void *data)
@@ -1008,6 +1070,7 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 	scp->dev = dev;
 	atomic_set(&scp->ready, 0);
 	atomic_set(&scp->sensor_ready, 0);
+	mutex_init(&scp->ctrl_lock);
 	init_completion(&scp->ctrl_ack);
 	init_completion(&scp->notify_reply);
 	INIT_WORK(&scp->sensor_init, scp_sensor_init_work);
@@ -1060,6 +1123,7 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 		s->desc = &scp_sensor_table[i];
 		s->gain = s->desc->default_gain;
 		spin_lock_init(&s->lock);
+		mutex_init(&s->en_lock);
 
 		indio = devm_iio_device_alloc(dev, sizeof(s));
 		if (!indio)
@@ -1072,7 +1136,7 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 		indio->num_channels = s->desc->num_channels;
 		s->indio = indio;
 
-		ret = devm_iio_kfifo_buffer_setup(dev, indio, NULL);
+		ret = devm_iio_kfifo_buffer_setup(dev, indio, &scp_buffer_ops);
 		if (ret)
 			return dev_err_probe(dev, ret,
 					     "cannot set up %s buffer\n",
@@ -1109,7 +1173,9 @@ static void mt6878_scp_remove(struct platform_device *pdev)
 
 	if (atomic_read(&scp->sensor_ready))
 		for (i = 0; i < SCP_NR_SENSORS; i++)
-			scp_sensor_disable(scp, scp->sensors[i].desc->type);
+			if (scp->sensors[i].users)
+				scp_sensor_disable(scp,
+						   scp->sensors[i].desc->type);
 	cancel_work_sync(&scp->sensor_init);
 	cancel_work_sync(&scp->sensorhub);
 	cancel_work_sync(&scp->drain);
