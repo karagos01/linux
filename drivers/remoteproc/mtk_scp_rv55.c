@@ -77,9 +77,10 @@
 #define SCP_SENSOR_NOTIFY_READY		4
 #define SCP_SENSOR_NOTIFY_LIST		5
 
-/* sensor_comm ctrl commands */
+/* sensor_comm ctrl commands (enum sensor_comm_ctrl_cmd) */
 #define SCP_SENSOR_CTRL_DISABLE		0
 #define SCP_SENSOR_CTRL_ENABLE		1
+#define SCP_SENSOR_CTRL_FLUSH		2
 #define SCP_SENSOR_CTRL_TIMESYNC	10
 #define SCP_SENSOR_CTRL_SHARE_MEMORY	11
 
@@ -626,6 +627,23 @@ static int scp_sensor_enable(struct mt6878_scp *scp, u8 type,
 }
 
 /*
+ * Flush a sensor: ask the hub to push its latest cached sample into the DATA
+ * ring now, instead of waiting for the next periodic/on-change report. On-change
+ * sensors (e.g. the aw963xx SAR) sit at a stable baseline and do not emit a
+ * sample on enable, so without a flush their IIO *_raw reads stay -EAGAIN; the
+ * flush primes the first value, after which on-change updates flow normally.
+ */
+static int scp_sensor_flush(struct mt6878_scp *scp, u8 type)
+{
+	struct scp_sensor_ctrl c = {
+		.sensor_type = type,
+		.command = SCP_SENSOR_CTRL_FLUSH,
+	};
+
+	return scp_ctrl_send(scp, &c, sizeof(c));
+}
+
+/*
  * Best-effort disable (used on unbind): the SCP acts on the command (the stream
  * stops) but does not reliably ack a DISABLE issued while samples are still in
  * flight, so fire it without waiting rather than log a spurious timeout.
@@ -749,6 +767,16 @@ static void scp_sensorhub_work(struct work_struct *work)
 			dev_warn(scp->dev, "%s: enable not acked\n", d->name);
 	}
 	dev_info(scp->dev, "sensors enabled, streaming to IIO\n");
+
+	/*
+	 * The SAR (aw963xx) is on-change and stays silent at its baseline, so
+	 * flush it once to prime an initial reading; later proximity changes are
+	 * reported on their own. The flush ack means the hub accepted it.
+	 */
+	if (scp_sensor_flush(scp, SCP_SENSOR_TYPE_SAR))
+		dev_warn(scp->dev, "sar: flush not acked\n");
+	else
+		dev_info(scp->dev, "sar: flush requested\n");
 }
 
 static irqreturn_t scp_mbox_isr(int irq, void *data)
