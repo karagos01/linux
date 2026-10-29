@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/remoteproc/mediatek,mt6878-scp.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6878 SCP (Andes RV55 tinysys)
+
+maintainers:
+  - kara <karagos01@gmail.com>
+
+description:
+  The System Companion Processor on the MediaTek MT6878 is an Andes RV55
+  (RISC-V) core running an MTK tinysys firmware container. Unlike the ARM
+  Cortex-M SCPs described by mtk,scp.yaml, its firmware is staged into
+  reserved DRAM by the bootloader and the core is released through the
+  resident TF-A via an SiP SMC, so the binding describes no clocks. It acts
+  as a sensor hub, exchanging packets with the host over a set of hardware
+  mailboxes.
+
+properties:
+  compatible:
+    const: mediatek,mt6878-scp
+
+  reg:
+    items:
+      - description: SRAM / TCM, where the firmware is executed from
+      - description: SCP configuration registers
+      - description: core 0 configuration registers
+      - description: core 1 configuration registers
+      - description: mailbox 0 registers
+      - description: mailbox 1 registers
+      - description: mailbox 2 registers
+      - description: mailbox 3 registers
+      - description: mailbox 4 registers
+
+  reg-names:
+    items:
+      - const: sram
+      - const: cfg
+      - const: cfg_core0
+      - const: cfg_core1
+      - const: mbox0
+      - const: mbox1
+      - const: mbox2
+      - const: mbox3
+      - const: mbox4
+
+  interrupts:
+    items:
+      - description: IPC interrupt 0
+      - description: IPC interrupt 1
+      - description: mailbox 0 interrupt
+      - description: mailbox 1 interrupt
+      - description: mailbox 2 interrupt
+      - description: mailbox 3 interrupt
+      - description: mailbox 4 interrupt
+
+  interrupt-names:
+    items:
+      - const: ipc0
+      - const: ipc1
+      - const: mbox0
+      - const: mbox1
+      - const: mbox2
+      - const: mbox3
+      - const: mbox4
+
+  mediatek,infracfg:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the infracfg-ao syscon that holds the SCP "awake" doorbell
+      registers. The host rings this doorbell to wake the SCP out of deep
+      idle before sending it mailbox traffic, so a sleeping SCP keeps acking
+      commands. If absent, the awake handshake is disabled.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - interrupt-names
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    scp@1c400000 {
+        compatible = "mediatek,mt6878-scp";
+        reg = <0x1c400000 0x100000>,
+              <0x1cb24000 0x1000>,
+              <0x1cb30000 0x1000>,
+              <0x1cb40000 0x1000>,
+              <0x1cba0000 0x1000>,
+              <0x1cbb0000 0x1000>,
+              <0x1cbc0000 0x1000>,
+              <0x1cbd0000 0x1000>,
+              <0x1cbe0000 0x1000>;
+        reg-names = "sram", "cfg", "cfg_core0", "cfg_core1",
+                    "mbox0", "mbox1", "mbox2", "mbox3", "mbox4";
+        interrupts = <GIC_SPI 516 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 517 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 518 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 519 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 520 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 521 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 522 IRQ_TYPE_LEVEL_HIGH 0>;
+        interrupt-names = "ipc0", "ipc1", "mbox0", "mbox1",
+                          "mbox2", "mbox3", "mbox4";
+        mediatek,infracfg = <&infracfg_ao>;
+    };
