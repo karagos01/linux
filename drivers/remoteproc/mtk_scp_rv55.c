@@ -15,7 +15,8 @@
  * (accelerometer, gyroscope, magnetometer, ambient-light, proximity, SAR) plus
  * the SCP-fused virtual sensors (gravity, linear acceleration, orientation, the
  * rotation-vector quaternions, the step counter, the uncalibrated accel/gyro/
- * magnetometer, and the significant-motion and tilt event detectors) as standard
+ * magnetometer, the device-orientation quadrant, and the significant-motion,
+ * tilt and wake-gesture event detectors) as standard
  * IIO devices. They share one SCP DATA ring; the drain routes each
  * record to its sensor by type. Sensors are enabled on demand (when an IIO
  * reader or capture buffer needs them) and disabled again when idle; with no
@@ -115,6 +116,8 @@
 #define SCP_SENSOR_TYPE_STEP_COUNT	19	/* fusion: cumulative step count */
 #define SCP_SENSOR_TYPE_GEOMAG_ROTATION	20	/* fusion: geomagnetic rotation (no gyro) */
 #define SCP_SENSOR_TYPE_TILT		22	/* fusion: tilt-detector event */
+#define SCP_SENSOR_TYPE_WAKE		23	/* fusion: wake-gesture event */
+#define SCP_SENSOR_TYPE_DEV_ORIENT	27	/* fusion: device-orientation quadrant */
 #define SCP_SENSOR_TYPE_SAR		72
 
 /*
@@ -456,6 +459,23 @@ static const struct iio_chan_spec scp_orient_channels[] = {
 	IIO_CHAN_SOFT_TIMESTAMP(3),
 };
 
+/*
+ * device orientation = the discrete screen-rotation quadrant (0..3), as a single
+ * raw value. No SCALE is advertised: this is an enum index, not an angle in
+ * degrees, so exposing a scale would mislead a reader into reading it as rotation.
+ */
+static const struct iio_chan_spec scp_devorient_channels[] = {
+	{
+		.type = IIO_ROT,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SAMP_FREQ),
+		.scan_index = 0,
+		.scan_type = { .sign = 'u', .realbits = 32,
+			       .storagebits = 32, .endianness = IIO_CPU },
+	},
+	IIO_CHAN_SOFT_TIMESTAMP(1),
+};
+
 /* step counter = a single processed, cumulative count (no scale) */
 static const struct iio_chan_spec scp_steps_channels[] = {
 	{
@@ -522,6 +542,20 @@ static const struct iio_chan_spec scp_tilt_channels[] = {
 		.scan_index = -1,
 	},
 };
+/* wake-gesture: a one-shot trigger like significant-motion, as a rising gesture */
+static const struct iio_event_spec scp_wake_event = {
+	.type = IIO_EV_TYPE_GESTURE,
+	.dir = IIO_EV_DIR_RISING,
+	.mask_separate = BIT(IIO_EV_INFO_ENABLE),
+};
+static const struct iio_chan_spec scp_wake_channels[] = {
+	{
+		.type = IIO_ACTIVITY,
+		.event_spec = &scp_wake_event,
+		.num_event_specs = 1,
+		.scan_index = -1,
+	},
+};
 
 /*
  * _udiv is an extra divisor applied on top of the vendor gain so the IIO scale
@@ -572,8 +606,11 @@ static const struct scp_sensor_desc scp_sensor_table[] = {
 	SCP_FUSION(SCP_SENSOR_TYPE_UNCAL_MAGN,  "mtk-scp-uncal-magn",  scp_uncal_magn_channels,  3, 1000,    100),
 	/* step counter: fused, and on-change so enable flushes the current total */
 	SCP_SENSOR_FULL(SCP_SENSOR_TYPE_STEP_COUNT, "mtk-scp-step-counter", scp_steps_channels, 1, 1, 1, true, true),
+	/* device orientation: fused, on-change (enable flushes the current quadrant) */
+	SCP_SENSOR_FULL(SCP_SENSOR_TYPE_DEV_ORIENT, "mtk-scp-device-orientation", scp_devorient_channels, 1, 1, 1, true, true),
 	SCP_EVENT(SCP_SENSOR_TYPE_SIGNIFICANT, "mtk-scp-significant-motion", scp_sigmotion_channels),
 	SCP_EVENT(SCP_SENSOR_TYPE_TILT,        "mtk-scp-tilt",              scp_tilt_channels),
+	SCP_EVENT(SCP_SENSOR_TYPE_WAKE,        "mtk-scp-wake-gesture",      scp_wake_channels),
 };
 #define SCP_NR_SENSORS ARRAY_SIZE(scp_sensor_table)
 
