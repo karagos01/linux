@@ -304,6 +304,7 @@ struct scp_sensor_desc {
 	int num_channels;
 	int nvals;				/* data channels (1 or 3) */
 	u32 default_gain;			/* fallback until the list is read */
+	u32 unit_div;				/* extra scale divisor for IIO units */
 	s64 period_ns;
 };
 
@@ -367,19 +368,28 @@ SCP_1VAL_CHANNELS(scp_light_channels, IIO_LIGHT);
 SCP_1VAL_CHANNELS(scp_prox_channels, IIO_PROXIMITY);
 SCP_1VAL_CHANNELS(scp_sar_channels, IIO_PROXIMITY);
 
-#define SCP_SENSOR(_t, _name, _ch, _nv, _gain) {		\
+/*
+ * _udiv is an extra divisor applied on top of the vendor gain so the IIO scale
+ * yields the unit the IIO ABI mandates for that channel type. The SCP reports
+ * accel in m/s^2, gyro in rad/s and light in lux already (raw/gain), which is
+ * what IIO_ACCEL/ANGL_VEL/LIGHT expect, so _udiv is 1. The magnetometer is
+ * reported in microtesla but IIO_MAGN is in Gauss (1 Gauss = 100 uT), so it
+ * needs an extra /100. Proximity is dimensionless.
+ */
+#define SCP_SENSOR(_t, _name, _ch, _nv, _gain, _udiv) {		\
 	.type = _t, .name = _name, .channels = _ch,		\
 	.num_channels = ARRAY_SIZE(_ch), .nvals = _nv,		\
-	.default_gain = _gain, .period_ns = SCP_SENSOR_PERIOD_NS, \
+	.default_gain = _gain, .unit_div = _udiv,		\
+	.period_ns = SCP_SENSOR_PERIOD_NS,			\
 }
 
 static const struct scp_sensor_desc scp_sensor_table[] = {
-	SCP_SENSOR(SCP_SENSOR_TYPE_ACCEL, "mtk-scp-accel",     scp_accel_channels, 3, 1000),
-	SCP_SENSOR(SCP_SENSOR_TYPE_GYRO,  "mtk-scp-gyro",      scp_gyro_channels,  3, 1000000),
-	SCP_SENSOR(SCP_SENSOR_TYPE_MAGN,  "mtk-scp-magn",      scp_magn_channels,  3, 1000),
-	SCP_SENSOR(SCP_SENSOR_TYPE_ALS,   "mtk-scp-als",       scp_light_channels, 1, 1),
-	SCP_SENSOR(SCP_SENSOR_TYPE_PS,    "mtk-scp-proximity", scp_prox_channels,  1, 1),
-	SCP_SENSOR(SCP_SENSOR_TYPE_SAR,   "mtk-scp-sar",       scp_sar_channels,   1, 1),
+	SCP_SENSOR(SCP_SENSOR_TYPE_ACCEL, "mtk-scp-accel",     scp_accel_channels, 3, 1000,    1),
+	SCP_SENSOR(SCP_SENSOR_TYPE_GYRO,  "mtk-scp-gyro",      scp_gyro_channels,  3, 1000000, 1),
+	SCP_SENSOR(SCP_SENSOR_TYPE_MAGN,  "mtk-scp-magn",      scp_magn_channels,  3, 1000,    100),
+	SCP_SENSOR(SCP_SENSOR_TYPE_ALS,   "mtk-scp-als",       scp_light_channels, 1, 1,       1),
+	SCP_SENSOR(SCP_SENSOR_TYPE_PS,    "mtk-scp-proximity", scp_prox_channels,  1, 1,       1),
+	SCP_SENSOR(SCP_SENSOR_TYPE_SAR,   "mtk-scp-sar",       scp_sar_channels,   1, 1,       1),
 };
 #define SCP_NR_SENSORS ARRAY_SIZE(scp_sensor_table)
 
@@ -401,9 +411,9 @@ static int scp_read_raw(struct iio_dev *indio,
 		spin_unlock_irqrestore(&s->lock, flags);
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
-		/* physical = raw / gain (vendor units: m/s^2, rad/s, uT, ...) */
+		/* raw * scale = IIO-standard unit (m/s^2, rad/s, Gauss, lux) */
 		*val = 1;
-		*val2 = s->gain;
+		*val2 = s->gain * s->desc->unit_div;
 		return IIO_VAL_FRACTIONAL;
 	case IIO_CHAN_INFO_SAMP_FREQ:
 		*val = NSEC_PER_SEC / s->desc->period_ns;
