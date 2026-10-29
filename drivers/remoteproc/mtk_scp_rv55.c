@@ -26,6 +26,7 @@
 #include <linux/bits.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -91,6 +92,23 @@
 #define SCP_SENSOR_TYPE_ALS		5
 #define SCP_SENSOR_TYPE_PS		8
 #define SCP_SENSOR_TYPE_SAR		72
+
+/*
+ * SCP "awake" doorbell in infracfg_ao (mediatek,infracfg_ao @ 0x10001000). To
+ * talk to the SCP while it may be in deep idle, the AP writes an awake opcode
+ * to INFRA_IRQ_SET, polls that register until the opcode bit self-clears (the
+ * SCP has woken and acknowledged), then writes INFRA_IRQ_CLEAR. This mirrors
+ * the vendor scp_awake_lock()/unlock() (scp_awake.c). Offsets are relative to
+ * the 8-byte window we map at INFRA_IRQ_SET.
+ */
+#define SCP_AWAKE_PHYS			0x10001b14
+#define SCP_AWAKE_WINDOW		8
+#define SCP_AWAKE_SET			0x0		/* INFRA_IRQ_SET  (+0xb14) */
+#define SCP_AWAKE_CLR			0x4		/* INFRA_IRQ_CLEAR (+0xb18) */
+#define SCP_AWAKE_TAG			0xa0
+#define SCP_AWAKE_LOCK			0		/* opcode: hold awake */
+#define SCP_AWAKE_UNLOCK		1		/* opcode: release */
+#define SCP_AWAKE_POLL_US		2000		/* ~2 ms handshake budget */
 
 /*
  * Steady sampling rate at which each physical sensor is enabled once the sensor
@@ -285,6 +303,7 @@ struct mt6878_scp {
 	u32 notify_wp;
 	void __iomem *list_ring;
 	void __iomem *data_ring;
+	void __iomem *awake;		/* infracfg_ao SCP awake doorbell */
 
 	/* live DATA-ring drain */
 	struct work_struct drain;
@@ -495,6 +514,38 @@ static int scp_ctrl_send(struct mt6878_scp *scp, struct scp_sensor_ctrl *c,
 		return -EREMOTEIO;
 	}
 	return 0;
+}
+
+/*
+ * Ring the SCP awake doorbell with one opcode (LOCK/UNLOCK) and wait for the
+ * SCP to consume it: the opcode bit in INFRA_IRQ_SET self-clears once the core
+ * has woken and acknowledged, after which we deassert via INFRA_IRQ_CLEAR.
+ * Returns 0 on ack, -ETIMEDOUT if the bit never cleared (SCP did not wake).
+ */
+static int scp_awake_ring(struct mt6878_scp *scp, u32 opcode)
+{
+	u32 bit = BIT(opcode);
+	u32 v;
+	int ret;
+
+	if (!scp->awake)
+		return -ENODEV;
+
+	writel(SCP_AWAKE_TAG | bit, scp->awake + SCP_AWAKE_SET);
+	ret = readl_poll_timeout_atomic(scp->awake + SCP_AWAKE_SET, v,
+					!(v & bit), 1, SCP_AWAKE_POLL_US);
+	writel(SCP_AWAKE_TAG | bit, scp->awake + SCP_AWAKE_CLR);
+	return ret;
+}
+
+static int scp_awake_lock(struct mt6878_scp *scp)
+{
+	return scp_awake_ring(scp, SCP_AWAKE_LOCK);
+}
+
+static int scp_awake_unlock(struct mt6878_scp *scp)
+{
+	return scp_awake_ring(scp, SCP_AWAKE_UNLOCK);
 }
 
 /* Write a fresh ring header (rp/wp/buffer_size/item_size) into a region. */
@@ -752,6 +803,19 @@ static void scp_sensorhub_work(struct work_struct *work)
 	scp_ring_init(scp->list_ring, SCP_SHM_LIST_SIZE, SCP_SHM_LIST_ITEM);
 	scp_ring_init(scp->data_ring, SCP_SHM_DATA_SIZE, SCP_SHM_DATA_ITEM);
 
+	/*
+	 * Validate the awake handshake while the SCP is known to be up (the hub
+	 * just reported ready): a lock/unlock pair here must complete instantly.
+	 * This proves the infracfg_ao doorbell register and poll before the
+	 * handshake is relied on to wake a sleeping SCP for on-demand enables.
+	 */
+	if (scp->awake) {
+		int l = scp_awake_lock(scp);
+		int u = scp_awake_unlock(scp);
+
+		dev_info(scp->dev, "awake handshake: lock=%d unlock=%d\n", l, u);
+	}
+
 	if (scp_config_share_mem(scp))
 		return;
 	dev_info(scp->dev, "sensor share-memory configured\n");
@@ -956,6 +1020,11 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 	if (IS_ERR(scp->sram))
 		return dev_err_probe(dev, PTR_ERR(scp->sram),
 				     "cannot map SCP SRAM\n");
+
+	/* infracfg_ao SCP awake doorbell (fixed SoC address, not in our node) */
+	scp->awake = devm_ioremap(dev, SCP_AWAKE_PHYS, SCP_AWAKE_WINDOW);
+	if (!scp->awake)
+		dev_warn(dev, "cannot map SCP awake doorbell\n");
 
 	memcpy_fromio(&ri, scp->sram + SCP_REGION_INFO_OFFSET, sizeof(ri));
 	dev_info(dev,
