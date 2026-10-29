@@ -12,8 +12,9 @@
  * tinysys sensor-hub protocol over the hardware mailbox (CTRL/NOTIFY packets
  * with a CRC-8 header), hands the SCP the shared-DRAM ring layout and a host
  * timebase, enumerates the sensor list, and exposes the physical sensors
- * (accelerometer, gyroscope, magnetometer, ambient-light, proximity, SAR) as
- * standard IIO devices. They share one SCP DATA ring; the drain routes each
+ * (accelerometer, gyroscope, magnetometer, ambient-light, proximity, SAR) plus
+ * the SCP-fused virtual sensors (gravity, linear acceleration) as standard IIO
+ * devices. They share one SCP DATA ring; the drain routes each
  * record to its sensor by type. Sensors are enabled on demand (when an IIO
  * reader or capture buffer needs them) and disabled again when idle; with no
  * active sensor the SCP sleeps, and the enable path wakes it first through the
@@ -85,6 +86,7 @@
 #define SCP_SENSOR_CTRL_DISABLE		0
 #define SCP_SENSOR_CTRL_ENABLE		1
 #define SCP_SENSOR_CTRL_FLUSH		2
+#define SCP_SENSOR_CTRL_CONFIG		4	/* set-delay/batch */
 #define SCP_SENSOR_CTRL_TIMESYNC	10
 #define SCP_SENSOR_CTRL_SHARE_MEMORY	11
 
@@ -97,6 +99,8 @@
 #define SCP_SENSOR_TYPE_GYRO		4
 #define SCP_SENSOR_TYPE_ALS		5
 #define SCP_SENSOR_TYPE_PS		8
+#define SCP_SENSOR_TYPE_GRAVITY		9	/* fusion: gravity vector */
+#define SCP_SENSOR_TYPE_LINEAR_ACCEL	10	/* fusion: linear acceleration */
 #define SCP_SENSOR_TYPE_SAR		72
 
 /*
@@ -125,6 +129,7 @@
  * in which it stops acking mailbox traffic.
  */
 #define SCP_SENSOR_PERIOD_NS		100000000LL	/* 10 Hz */
+#define SCP_FUSION_SETTLE_MS		500	/* fused-filter convergence before a one-shot read */
 
 /* share-memory payload types */
 #define SCP_SHM_PAYLOAD_DATA		0
@@ -333,6 +338,7 @@ struct scp_sensor_desc {
 	u32 unit_div;				/* extra scale divisor for IIO units */
 	s64 period_ns;
 	bool on_change;				/* flush on enable to prime a value */
+	bool fusion;				/* SCP-fused virtual sensor */
 };
 
 /* per-sensor runtime state; iio_priv() holds a pointer to one of these */
@@ -399,6 +405,8 @@ SCP_3AXIS_CHANNELS(scp_magn_channels, IIO_MAGN);
 SCP_1VAL_CHANNELS(scp_light_channels, IIO_LIGHT);
 SCP_1VAL_CHANNELS(scp_prox_channels, IIO_PROXIMITY);
 SCP_1VAL_CHANNELS(scp_sar_channels, IIO_PROXIMITY);
+SCP_3AXIS_CHANNELS(scp_gravity_channels, IIO_GRAVITY);
+SCP_3AXIS_CHANNELS(scp_linaccel_channels, IIO_ACCEL);
 
 /*
  * _udiv is an extra divisor applied on top of the vendor gain so the IIO scale
@@ -408,14 +416,20 @@ SCP_1VAL_CHANNELS(scp_sar_channels, IIO_PROXIMITY);
  * reported in microtesla but IIO_MAGN is in Gauss (1 Gauss = 100 uT), so it
  * needs an extra /100. Proximity is dimensionless.
  */
-#define SCP_SENSOR_F(_t, _name, _ch, _nv, _gain, _udiv, _oc) {	\
+#define SCP_SENSOR_FULL(_t, _name, _ch, _nv, _gain, _udiv, _oc, _fus) {	\
 	.type = _t, .name = _name, .channels = _ch,		\
 	.num_channels = ARRAY_SIZE(_ch), .nvals = _nv,		\
 	.default_gain = _gain, .unit_div = _udiv,		\
-	.period_ns = SCP_SENSOR_PERIOD_NS, .on_change = _oc,	\
+	.period_ns = SCP_SENSOR_PERIOD_NS,			\
+	.on_change = _oc, .fusion = _fus,			\
 }
+#define SCP_SENSOR_F(_t, _name, _ch, _nv, _gain, _udiv, _oc)	\
+	SCP_SENSOR_FULL(_t, _name, _ch, _nv, _gain, _udiv, _oc, false)
 #define SCP_SENSOR(_t, _name, _ch, _nv, _gain, _udiv)		\
-	SCP_SENSOR_F(_t, _name, _ch, _nv, _gain, _udiv, false)
+	SCP_SENSOR_FULL(_t, _name, _ch, _nv, _gain, _udiv, false, false)
+/* SCP-fused virtual sensor: needs a standalone CONFIG to start/stop its pipeline */
+#define SCP_FUSION(_t, _name, _ch, _nv, _gain, _udiv)		\
+	SCP_SENSOR_FULL(_t, _name, _ch, _nv, _gain, _udiv, false, true)
 
 static const struct scp_sensor_desc scp_sensor_table[] = {
 	SCP_SENSOR(SCP_SENSOR_TYPE_ACCEL,  "mtk-scp-accel",     scp_accel_channels, 3, 1000,    1),
@@ -424,6 +438,8 @@ static const struct scp_sensor_desc scp_sensor_table[] = {
 	SCP_SENSOR(SCP_SENSOR_TYPE_ALS,    "mtk-scp-als",       scp_light_channels, 1, 1,       1),
 	SCP_SENSOR(SCP_SENSOR_TYPE_PS,     "mtk-scp-proximity", scp_prox_channels,  1, 1,       1),
 	SCP_SENSOR_F(SCP_SENSOR_TYPE_SAR,  "mtk-scp-sar",       scp_sar_channels,   1, 1, 1, true),
+	SCP_FUSION(SCP_SENSOR_TYPE_GRAVITY,      "mtk-scp-gravity",      scp_gravity_channels,  3, 1000000, 1),
+	SCP_FUSION(SCP_SENSOR_TYPE_LINEAR_ACCEL, "mtk-scp-linear-accel", scp_linaccel_channels, 3, 1000000, 1),
 };
 #define SCP_NR_SENSORS ARRAY_SIZE(scp_sensor_table)
 
@@ -441,10 +457,15 @@ static int scp_read_raw(struct iio_dev *indio,
 		 * On-demand: enable the sensor for the duration of the read (a
 		 * no-op if a buffer already holds it on), wait briefly for the
 		 * first cached sample, then release it so an idle SCP can sleep.
+		 * A fused sensor emits meaningless zeros until its filter has
+		 * converged (a fraction of a second), so give it a settle delay
+		 * first; the loop then returns the latest, converged sample.
 		 */
 		ret = scp_sensor_get(s);
 		if (ret)
 			return ret;
+		if (s->desc->fusion)
+			msleep(SCP_FUSION_SETTLE_MS);
 		for (tries = 0; tries < 6; tries++) {
 			spin_lock_irqsave(&s->lock, flags);
 			if (s->valid) {
@@ -726,6 +747,30 @@ static int scp_sensor_enable(struct mt6878_scp *scp, u8 type,
 }
 
 /*
+ * Send a standalone CONFIG (set-delay/batch) command. Physical sensors stream
+ * from ENABLE alone, but the SCP's fused virtual sensors (gravity, linear-accel,
+ * ...) only run their pipeline once a CONFIG has set a sample period: ENABLE
+ * merely marks them active. A CONFIG with delay == 0 stops that pipeline again,
+ * which a bare DISABLE does not do (the fusion task keeps emitting otherwise).
+ */
+static int scp_sensor_config(struct mt6878_scp *scp, u8 type,
+			     s64 delay_ns, s64 latency_ns)
+{
+	struct {
+		struct scp_sensor_ctrl c;
+		struct scp_sensor_batch b;
+	} __packed pkt = {};
+
+	pkt.c.sensor_type = type;
+	pkt.c.command = SCP_SENSOR_CTRL_CONFIG;
+	pkt.c.length = sizeof(pkt.b);
+	pkt.b.delay = delay_ns;
+	pkt.b.latency = latency_ns;
+
+	return scp_ctrl_send(scp, &pkt.c, sizeof(pkt));
+}
+
+/*
  * Flush a sensor: ask the hub to push any buffered samples into the DATA ring
  * now. Issued for on-change sensors (e.g. the aw963xx SAR) when they are
  * enabled; the hub answers with a flush-complete meta event (action != 0, which
@@ -783,6 +828,14 @@ static int scp_sensor_get(struct scp_sensor *s)
 	if (s->users == 0) {
 		ret = scp_sensor_enable(scp, s->desc->type,
 					s->desc->period_ns, 0);
+		/*
+		 * Fused sensors need a standalone CONFIG to start their pipeline;
+		 * the SCP's fusion manager brings up its own physical inputs
+		 * (accel/gyro/mag), so we do not enable those from here.
+		 */
+		if (!ret && s->desc->fusion)
+			scp_sensor_config(scp, s->desc->type,
+					  s->desc->period_ns, 0);
 		if (!ret && s->desc->on_change)
 			scp_sensor_flush(scp, s->desc->type);
 	}
@@ -798,6 +851,9 @@ static void scp_sensor_put(struct scp_sensor *s)
 
 	mutex_lock(&s->en_lock);
 	if (!WARN_ON(s->users == 0) && --s->users == 0) {
+		/* stop a fused sensor's pipeline first; DISABLE alone won't */
+		if (s->desc->fusion)
+			scp_sensor_config(s->scp, s->desc->type, 0, 0);
 		scp_sensor_disable(s->scp, s->desc->type);
 		spin_lock_irqsave(&s->lock, flags);
 		s->valid = false;	/* cached sample is stale once stopped */
