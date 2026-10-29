@@ -14,9 +14,9 @@
  * timebase, enumerates the sensor list, and exposes the physical sensors
  * (accelerometer, gyroscope, magnetometer, ambient-light, proximity, SAR) plus
  * the SCP-fused virtual sensors (gravity, linear acceleration, orientation, the
- * rotation-vector quaternions, the step counter, and the significant-motion and
- * tilt event detectors) as standard IIO devices. They share one SCP DATA ring;
- * the drain routes each
+ * rotation-vector quaternions, the step counter, the uncalibrated accel/gyro/
+ * magnetometer, and the significant-motion and tilt event detectors) as standard
+ * IIO devices. They share one SCP DATA ring; the drain routes each
  * record to its sensor by type. Sensors are enabled on demand (when an IIO
  * reader or capture buffer needs them) and disabled again when idle; with no
  * active sensor the SCP sleeps, and the enable path wakes it first through the
@@ -101,6 +101,9 @@
 #define SCP_SENSOR_TYPE_MAGN		2
 #define SCP_SENSOR_TYPE_ORIENTATION	3	/* fusion: azimuth/pitch/roll */
 #define SCP_SENSOR_TYPE_GYRO		4
+#define SCP_SENSOR_TYPE_UNCAL_MAGN	14	/* fusion: magnetometer + hard-iron bias */
+#define SCP_SENSOR_TYPE_UNCAL_GYRO	16	/* fusion: gyroscope + drift bias */
+#define SCP_SENSOR_TYPE_UNCAL_ACCEL	35	/* fusion: accelerometer + bias */
 #define SCP_SENSOR_TYPE_ALS		5
 #define SCP_SENSOR_TYPE_PS		8
 #define SCP_SENSOR_TYPE_GRAVITY		9	/* fusion: gravity vector */
@@ -358,7 +361,7 @@ struct scp_sensor {
 	struct iio_dev *indio;
 	const struct scp_sensor_desc *desc;
 	spinlock_t lock;
-	s32 val[4];			/* up to 4 (quaternion w,x,y,z) */
+	s32 val[6];			/* up to 6 (uncal: x,y,z + bias x,y,z) */
 	u8 accuracy;
 	s64 ts;
 	u32 gain;
@@ -405,6 +408,29 @@ static const struct iio_chan_spec _name[] = {			\
 	SCP_AXIS_CHAN(_type, Z, 2),				\
 	IIO_CHAN_SOFT_TIMESTAMP(3),				\
 }
+/*
+ * Uncalibrated tri-axis channel: besides the raw reading it carries the SCP's
+ * live bias estimate (ring value[3..5]) through the standard calibbias attr.
+ */
+#define SCP_UNCAL_AXIS_CHAN(_type, _mod, _idx) {		\
+	.type = _type,						\
+	.modified = 1,						\
+	.channel2 = IIO_MOD_##_mod,				\
+	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |		\
+			      BIT(IIO_CHAN_INFO_CALIBBIAS),	\
+	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE) |	\
+				    BIT(IIO_CHAN_INFO_SAMP_FREQ),	\
+	.scan_index = _idx,					\
+	.scan_type = { .sign = 's', .realbits = 32,		\
+		       .storagebits = 32, .endianness = IIO_CPU }, \
+}
+#define SCP_UNCAL_3AXIS_CHANNELS(_name, _type)			\
+static const struct iio_chan_spec _name[] = {			\
+	SCP_UNCAL_AXIS_CHAN(_type, X, 0),			\
+	SCP_UNCAL_AXIS_CHAN(_type, Y, 1),			\
+	SCP_UNCAL_AXIS_CHAN(_type, Z, 2),			\
+	IIO_CHAN_SOFT_TIMESTAMP(3),				\
+}
 #define SCP_1VAL_CHANNELS(_name, _type)				\
 static const struct iio_chan_spec _name[] = {			\
 	SCP_1VAL_CHAN(_type),					\
@@ -419,6 +445,9 @@ SCP_1VAL_CHANNELS(scp_prox_channels, IIO_PROXIMITY);
 SCP_1VAL_CHANNELS(scp_sar_channels, IIO_PROXIMITY);
 SCP_3AXIS_CHANNELS(scp_gravity_channels, IIO_GRAVITY);
 SCP_3AXIS_CHANNELS(scp_linaccel_channels, IIO_ACCEL);
+SCP_UNCAL_3AXIS_CHANNELS(scp_uncal_accel_channels, IIO_ACCEL);
+SCP_UNCAL_3AXIS_CHANNELS(scp_uncal_gyro_channels, IIO_ANGL_VEL);
+SCP_UNCAL_3AXIS_CHANNELS(scp_uncal_magn_channels, IIO_MAGN);
 
 /* orientation = Euler angles (azimuth->yaw, pitch, roll), in degrees */
 static const struct iio_chan_spec scp_orient_channels[] = {
@@ -539,6 +568,9 @@ static const struct scp_sensor_desc scp_sensor_table[] = {
 	SCP_FUSION(SCP_SENSOR_TYPE_ROTATION,        "mtk-scp-rotation-vector",   scp_rotvec_channels, 4, 1000000, 1),
 	SCP_FUSION(SCP_SENSOR_TYPE_GAME_ROTATION,   "mtk-scp-game-rotation",     scp_rotvec_channels, 4, 1000000, 1),
 	SCP_FUSION(SCP_SENSOR_TYPE_GEOMAG_ROTATION, "mtk-scp-geomag-rotation",   scp_rotvec_channels, 4, 1000000, 1),
+	SCP_FUSION(SCP_SENSOR_TYPE_UNCAL_ACCEL, "mtk-scp-uncal-accel", scp_uncal_accel_channels, 3, 1000,    1),
+	SCP_FUSION(SCP_SENSOR_TYPE_UNCAL_GYRO,  "mtk-scp-uncal-gyro",  scp_uncal_gyro_channels,  3, 1000000, 1),
+	SCP_FUSION(SCP_SENSOR_TYPE_UNCAL_MAGN,  "mtk-scp-uncal-magn",  scp_uncal_magn_channels,  3, 1000,    100),
 	/* step counter: fused, and on-change so enable flushes the current total */
 	SCP_SENSOR_FULL(SCP_SENSOR_TYPE_STEP_COUNT, "mtk-scp-step-counter", scp_steps_channels, 1, 1, 1, true, true),
 	SCP_EVENT(SCP_SENSOR_TYPE_SIGNIFICANT, "mtk-scp-significant-motion", scp_sigmotion_channels),
@@ -564,6 +596,10 @@ static int scp_read_raw_multi(struct iio_dev *indio,
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
 	case IIO_CHAN_INFO_PROCESSED:	/* step counter reports a processed count */
+	case IIO_CHAN_INFO_CALIBBIAS: {	/* uncalibrated sensor's bias estimate */
+		/* the bias triple sits at ring value[3..5], behind the reading */
+		int base = mask == IIO_CHAN_INFO_CALIBBIAS ? 3 : 0;
+
 		nv = quat ? 4 : 1;
 		if (size < nv)
 			return -EINVAL;
@@ -590,7 +626,7 @@ static int scp_read_raw_multi(struct iio_dev *indio,
 					vals[2] = s->val[1];
 					vals[3] = s->val[2];
 				} else {
-					vals[0] = s->val[chan->scan_index];
+					vals[0] = s->val[base + chan->scan_index];
 				}
 				spin_unlock_irqrestore(&s->lock, flags);
 				scp_sensor_put(s);
@@ -602,6 +638,7 @@ static int scp_read_raw_multi(struct iio_dev *indio,
 		}
 		scp_sensor_put(s);
 		return -EAGAIN;
+	}
 	case IIO_CHAN_INFO_SCALE:
 		/* raw * scale = IIO-standard unit (m/s^2, rad/s, Gauss, lux, deg) */
 		if (size < 2)
@@ -1093,9 +1130,13 @@ static void scp_drain_data_work(struct work_struct *work)
 		}
 		nv = s->desc->nvals;
 
-		/* cache the newest sample for this sensor's sysfs *_raw reads */
+		/*
+		 * Cache the whole record (all six value words) so sysfs reads
+		 * can serve both the reading (value[0..2]) and, for uncalibrated
+		 * sensors, the bias estimate (value[3..5]) via calibbias.
+		 */
 		spin_lock_irqsave(&s->lock, flags);
-		for (i = 0; i < nv; i++)
+		for (i = 0; i < 6; i++)
 			s->val[i] = rec.value[i];
 		s->accuracy = rec.accuracy;
 		s->ts = rec.timestamp;
