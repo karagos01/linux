@@ -144,7 +144,8 @@
  * in which it stops acking mailbox traffic.
  */
 #define SCP_SENSOR_PERIOD_NS		100000000LL	/* 10 Hz */
-#define SCP_FUSION_SETTLE_MS		500	/* fused-filter convergence before a one-shot read */
+/* fused-filter convergence delay before a one-shot read */
+#define SCP_FUSION_SETTLE_MS		500
 
 /* share-memory payload types */
 #define SCP_SHM_PAYLOAD_DATA		0
@@ -362,7 +363,7 @@ struct scp_sensor {
 	struct mt6878_scp *scp;
 	struct iio_dev *indio;
 	const struct scp_sensor_desc *desc;
-	spinlock_t lock;
+	spinlock_t lock;		/* protects the cached sample below */
 	s32 val[6];			/* up to 6 (uncal: x,y,z + bias x,y,z) */
 	u8 accuracy;
 	s64 ts;
@@ -393,6 +394,7 @@ static void scp_sensor_put(struct scp_sensor *s);
 	.scan_type = { .sign = 's', .realbits = 32,		\
 		       .storagebits = 32, .endianness = IIO_CPU }, \
 }
+
 #define SCP_1VAL_CHAN(_type) {					\
 	.type = _type,						\
 	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),		\
@@ -410,6 +412,7 @@ static const struct iio_chan_spec _name[] = {			\
 	SCP_AXIS_CHAN(_type, Z, 2),				\
 	IIO_CHAN_SOFT_TIMESTAMP(3),				\
 }
+
 /*
  * Uncalibrated tri-axis channel: besides the raw reading it carries the SCP's
  * live bias estimate (ring value[3..5]) through the standard calibbias attr.
@@ -426,6 +429,7 @@ static const struct iio_chan_spec _name[] = {			\
 	.scan_type = { .sign = 's', .realbits = 32,		\
 		       .storagebits = 32, .endianness = IIO_CPU }, \
 }
+
 #define SCP_UNCAL_3AXIS_CHANNELS(_name, _type)			\
 static const struct iio_chan_spec _name[] = {			\
 	SCP_UNCAL_AXIS_CHAN(_type, X, 0),			\
@@ -433,6 +437,7 @@ static const struct iio_chan_spec _name[] = {			\
 	SCP_UNCAL_AXIS_CHAN(_type, Z, 2),			\
 	IIO_CHAN_SOFT_TIMESTAMP(3),				\
 }
+
 #define SCP_1VAL_CHANNELS(_name, _type)				\
 static const struct iio_chan_spec _name[] = {			\
 	SCP_1VAL_CHAN(_type),					\
@@ -519,6 +524,7 @@ static const struct iio_event_spec scp_sigmotion_event = {
 	.dir = IIO_EV_DIR_FALLING,
 	.mask_separate = BIT(IIO_EV_INFO_ENABLE),
 };
+
 static const struct iio_chan_spec scp_sigmotion_channels[] = {
 	{
 		.type = IIO_ACTIVITY,
@@ -529,11 +535,13 @@ static const struct iio_chan_spec scp_sigmotion_channels[] = {
 		.scan_index = -1,
 	},
 };
+
 static const struct iio_event_spec scp_tilt_event = {
 	.type = IIO_EV_TYPE_GESTURE,
 	.dir = IIO_EV_DIR_NONE,
 	.mask_separate = BIT(IIO_EV_INFO_ENABLE),
 };
+
 static const struct iio_chan_spec scp_tilt_channels[] = {
 	{
 		.type = IIO_ACTIVITY,
@@ -542,12 +550,14 @@ static const struct iio_chan_spec scp_tilt_channels[] = {
 		.scan_index = -1,
 	},
 };
+
 /* wake-gesture: a one-shot trigger like significant-motion, as a rising gesture */
 static const struct iio_event_spec scp_wake_event = {
 	.type = IIO_EV_TYPE_GESTURE,
 	.dir = IIO_EV_DIR_RISING,
 	.mask_separate = BIT(IIO_EV_INFO_ENABLE),
 };
+
 static const struct iio_chan_spec scp_wake_channels[] = {
 	{
 		.type = IIO_ACTIVITY,
@@ -572,6 +582,7 @@ static const struct iio_chan_spec scp_wake_channels[] = {
 	.period_ns = SCP_SENSOR_PERIOD_NS,			\
 	.on_change = _oc, .fusion = _fus,			\
 }
+
 #define SCP_SENSOR_F(_t, _name, _ch, _nv, _gain, _udiv, _oc)	\
 	SCP_SENSOR_FULL(_t, _name, _ch, _nv, _gain, _udiv, _oc, false)
 #define SCP_SENSOR(_t, _name, _ch, _nv, _gain, _udiv)		\
@@ -612,6 +623,7 @@ static const struct scp_sensor_desc scp_sensor_table[] = {
 	SCP_EVENT(SCP_SENSOR_TYPE_TILT,        "mtk-scp-tilt",              scp_tilt_channels),
 	SCP_EVENT(SCP_SENSOR_TYPE_WAKE,        "mtk-scp-wake-gesture",      scp_wake_channels),
 };
+
 #define SCP_NR_SENSORS ARRAY_SIZE(scp_sensor_table)
 
 /*
@@ -827,7 +839,7 @@ static int scp_ctrl_send(struct mt6878_scp *scp, struct scp_sensor_ctrl *c,
 	scp_mbox_send(&scp->mbox[SCP_SENSOR_MBOX], SCP_SENSOR_CTRL_OUT_BIT,
 		      c, len);
 	if (!wait_for_completion_timeout(&scp->ctrl_ack,
-			msecs_to_jiffies(SCP_REPLY_TIMEOUT_MS))) {
+					 msecs_to_jiffies(SCP_REPLY_TIMEOUT_MS))) {
 		dev_err(scp->dev, "ctrl cmd %u: no ack\n", c->command);
 		ret = -ETIMEDOUT;
 	} else if (scp->ack_ret < 0) {
@@ -849,7 +861,7 @@ static void scp_ring_init(void __iomem *ring, u32 region_size, u32 item_size)
 	writel(0, ring + 4);			/* wp */
 	writel(bufsz, ring + 8);		/* buffer_size */
 	writel(item_size, ring + 12);		/* item_size */
-	wmb();
+	wmb();	/* finish the header before the SCP is pointed at this ring */
 }
 
 /* Tell the SCP where the sensor rings live (prerequisite for list/samples). */
@@ -919,7 +931,7 @@ static int scp_query_sensor_list(struct mt6878_scp *scp)
 		};
 
 		writel(0, scp->list_ring + 0);	/* reset read pointer */
-		wmb();
+		wmb();	/* reset lands before the LIST request is sent */
 
 		n.sequence = ++scp->seq;
 		n.crc8 = scp_crc8((u8 *)&n, 4);
@@ -927,7 +939,7 @@ static int scp_query_sensor_list(struct mt6878_scp *scp)
 		scp_mbox_send(&scp->mbox[SCP_SENSOR_MBOX],
 			      SCP_SENSOR_NOTIFY_OUT_BIT, &n, sizeof(n));
 		if (wait_for_completion_timeout(&scp->notify_reply,
-				msecs_to_jiffies(1000)))
+						msecs_to_jiffies(1000)))
 			break;
 		dev_warn(scp->dev, "sensor list: no reply (try %d)\n", try + 1);
 	}
@@ -1189,7 +1201,7 @@ static void scp_drain_data_work(struct work_struct *work)
 		if (iio_buffer_enabled(s->indio)) {
 			struct {
 				s32 chan[4];
-				s64 ts __aligned(8);
+				aligned_s64 ts;
 			} sample;
 
 			if (nv == 4) {
@@ -1209,7 +1221,7 @@ static void scp_drain_data_work(struct work_struct *work)
 
 	/* publish the advanced read pointer so the SCP can reuse the space */
 	writel(rp, scp->data_ring + 0);
-	wmb();
+	wmb();	/* commit rp before we next read the ring */
 }
 
 static void scp_sensorhub_work(struct work_struct *work)
