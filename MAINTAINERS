@@ -16555,7 +16555,7 @@ F:	Documentation/devicetree/bindings/mmc/mtk-sd.yaml
 F:	drivers/mmc/host/mtk-sd.c
 
 MEDIATEK MT6363 AND MT6685 SPMI PMIC DRIVERS
-M:	Kara <karagos01@gmail.com>
+M:	Jan Benedikt <karagos01@gmail.com>
 L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
 S:	Maintained
 F:	Documentation/devicetree/bindings/mfd/mediatek,mt6363.yaml
@@ -16566,14 +16566,14 @@ F:	drivers/rtc/rtc-mt6685.c
 F:	include/linux/mfd/mt63x3_spmi/registers.h
 
 MEDIATEK MT6369 REGULATOR DRIVER
-M:	Kara <karagos01@gmail.com>
+M:	Jan Benedikt <karagos01@gmail.com>
 L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
 S:	Maintained
 F:	Documentation/devicetree/bindings/regulator/mediatek,mt6369-regulator.yaml
 F:	drivers/regulator/mt6369-regulator.c
 
 MEDIATEK MT6375 SUBPMIC DRIVERS
-M:	Kara <karagos01@gmail.com>
+M:	Jan Benedikt <karagos01@gmail.com>
 L:	linux-pm@vger.kernel.org
 L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
 S:	Maintained
@@ -16615,7 +16615,7 @@ F:	include/dt-bindings/reset/mediatek,mt6735-pericfg.h
 F:	include/dt-bindings/reset/mediatek,mt6735-vdecsys.h
 
 MEDIATEK MT6878 SoC AND VOLLA PHONE PLINIUS SUPPORT
-M:	Kara <karagos01@gmail.com>
+M:	Jan Benedikt <karagos01@gmail.com>
 L:	linux-arm-kernel@lists.infradead.org (moderated for non-subscribers)
 L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
 S:	Maintained

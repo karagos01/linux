@@ -7,7 +7,7 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: MediaTek MT6375 SubPMIC
 
 maintainers:
-  - Kara <karagos01@gmail.com>
+  - Jan Benedikt <karagos01@gmail.com>
 
 description:
   MT6375 is a companion power management IC that bundles a single-cell

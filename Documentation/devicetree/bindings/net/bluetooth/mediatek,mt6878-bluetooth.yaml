@@ -7,7 +7,7 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: MediaTek MT6878 connsys Bluetooth
 
 maintainers:
-  - Kara <karagos01@gmail.com>
+  - Jan Benedikt <karagos01@gmail.com>
 
 description:
   The Bluetooth controller in the MT6878 lives in the "BGF" subsystem of the

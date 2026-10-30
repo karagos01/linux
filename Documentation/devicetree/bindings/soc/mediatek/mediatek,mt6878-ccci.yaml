@@ -7,7 +7,7 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: MediaTek MT6878 modem (CCCI)
 
 maintainers:
-  - Kara <karagos01@gmail.com>
+  - Jan Benedikt <karagos01@gmail.com>
 
 description:
   The MT6878 integrates a cellular modem reached from the application

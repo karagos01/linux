@@ -7,7 +7,7 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: MediaTek MT6878 bootloader command-mode panel refresher
 
 maintainers:
-  - Kara <karagos01@gmail.com>
+  - Jan Benedikt <karagos01@gmail.com>
 
 description:
   The bootloader leaves the display pipeline (OVL0 -> ... -> DSI0) scanning out

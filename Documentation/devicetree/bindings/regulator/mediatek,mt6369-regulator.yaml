@@ -7,7 +7,7 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: MediaTek MT6369 PMIC Regulators
 
 maintainers:
-  - Kara <karagos01@gmail.com>
+  - Jan Benedikt <karagos01@gmail.com>
 
 description:
   The MT6369 is an SPMI companion PMIC. This binding covers the LDO
