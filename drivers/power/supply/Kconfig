@@ -731,6 +731,7 @@ config CHARGER_MT6370
 config CHARGER_MT6375
 	tristate "MediaTek MT6375 Charger Driver"
 	depends on MFD_MT6375
+	select REGULATOR
 	help
 	  Say Y here to enable the switching battery charger embedded in the
 	  MediaTek MT6375 SubPMIC. It reports the charging status and detected

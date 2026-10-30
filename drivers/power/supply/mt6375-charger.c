@@ -18,17 +18,37 @@
 #include <linux/power_supply.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
+#include <linux/regulator/driver.h>
 #include <linux/string.h>
 #include <linux/workqueue.h>
 
+#define MT6375_REG_TM_PASSCODE	0x107
 #define MT6375_REG_CHG_TOP1	0x120
+#define MT6375_REG_CHG_TOP2	0x121
 #define MT6375_REG_CHG_AICR	0x122
 #define MT6375_REG_CHG_VCHG	0x125
 #define MT6375_REG_CHG_ICHG	0x126
+#define MT6375_REG_CHG_BOOST4	0x129
+#define MT6375_REG_CHG_OTGV	0x131
+#define MT6375_REG_CHG_OTGC	0x132
 #define MT6375_REG_CHG_STAT	0x134
+#define MT6375_REG_CHG_BOOST2	0x135
+#define MT6375_REG_CHG_BOOST3	0x140
 #define MT6375_REG_BC12_FUNC	0x150
 #define MT6375_REG_BC12_STAT	0x151
 #define MT6375_REG_CHG_STAT0	0x1E0
+
+/* CHG_TOP1: bit 0 enables the buck charger, bit 2 the OTG (boost) path */
+#define MT6375_OTG_EN_MASK	BIT(2)
+/* Passcode that unlocks the boost tuning registers; 0 re-locks them */
+#define MT6375_TM_PASSCODE_UNLOCK	0x69
+/* OTG boost output voltage (CHG_OTGV[5:0]) and current limit (CHG_OTGC[2:0]) */
+#define MT6375_OTGV_MASK	GENMASK(5, 0)
+#define MT6375_OTGV_MIN_UV	4850000
+#define MT6375_OTGV_STEP_UV	25000
+#define MT6375_OTGV_MIN_SEL	20
+#define MT6375_OTGV_NUM		47
+#define MT6375_OTGC_MASK	GENMASK(2, 0)
 
 /* CHG_STAT[3:0] - IC charging state */
 enum {
@@ -453,6 +473,127 @@ static void mt6375_chg_psy_notifier_remove(void *data)
 	cancel_work_sync(&ddata->pd_work);
 }
 
+/* Selectable OTG (boost) output current limits, in uA */
+static const unsigned int mt6375_chg_otg_curr[] = {
+	500000, 700000, 1100000, 1300000, 1800000, 2100000, 2400000,
+};
+
+/*
+ * Converter tuning that has to be switched between buck (charging) and boost
+ * (OTG) operation. These registers are behind the test-mode passcode, so they
+ * are only touched while it is unlocked.
+ */
+static const struct {
+	unsigned int reg;
+	unsigned int mask;
+	unsigned int boost;
+	unsigned int buck;
+} mt6375_chg_boost_params[] = {
+	{ MT6375_REG_CHG_TOP2,   GENMASK(7, 6), 0x00, 0x40 },
+	{ MT6375_REG_CHG_BOOST2, GENMASK(1, 0), 0x03, 0x00 },
+	{ MT6375_REG_CHG_BOOST3, GENMASK(7, 6), 0xc0, 0x40 },
+	{ MT6375_REG_CHG_BOOST4, BIT(7),        0x00, 0x80 },
+};
+
+static int mt6375_chg_set_boost_params(struct mt6375_chg_data *ddata, bool boost)
+{
+	int i, ret;
+
+	ret = regmap_write(ddata->regmap, MT6375_REG_TM_PASSCODE,
+			   MT6375_TM_PASSCODE_UNLOCK);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < ARRAY_SIZE(mt6375_chg_boost_params); i++) {
+		unsigned int val = boost ? mt6375_chg_boost_params[i].boost :
+					   mt6375_chg_boost_params[i].buck;
+
+		ret = regmap_update_bits(ddata->regmap,
+					 mt6375_chg_boost_params[i].reg,
+					 mt6375_chg_boost_params[i].mask, val);
+		if (ret)
+			break;
+	}
+
+	/* Always re-lock, even if a write above failed */
+	regmap_write(ddata->regmap, MT6375_REG_TM_PASSCODE, 0);
+	return ret;
+}
+
+static int mt6375_chg_otg_enable(struct regulator_dev *rdev)
+{
+	struct mt6375_chg_data *ddata = rdev_get_drvdata(rdev);
+	int ret;
+
+	ret = mt6375_chg_set_boost_params(ddata, true);
+	if (ret)
+		return ret;
+
+	ret = regulator_enable_regmap(rdev);
+	if (ret)
+		mt6375_chg_set_boost_params(ddata, false);
+	return ret;
+}
+
+static int mt6375_chg_otg_disable(struct regulator_dev *rdev)
+{
+	struct mt6375_chg_data *ddata = rdev_get_drvdata(rdev);
+	int ret;
+
+	ret = regulator_disable_regmap(rdev);
+	if (ret)
+		return ret;
+
+	return mt6375_chg_set_boost_params(ddata, false);
+}
+
+static const struct regulator_ops mt6375_chg_otg_ops = {
+	.enable			= mt6375_chg_otg_enable,
+	.disable		= mt6375_chg_otg_disable,
+	.is_enabled		= regulator_is_enabled_regmap,
+	.list_voltage		= regulator_list_voltage_linear,
+	.set_voltage_sel	= regulator_set_voltage_sel_regmap,
+	.get_voltage_sel	= regulator_get_voltage_sel_regmap,
+	.set_current_limit	= regulator_set_current_limit_regmap,
+	.get_current_limit	= regulator_get_current_limit_regmap,
+};
+
+static const struct regulator_desc mt6375_chg_otg_rdesc = {
+	.of_match		= "usb-otg-vbus-regulator",
+	.name			= "mt6375-usb-otg-vbus",
+	.ops			= &mt6375_chg_otg_ops,
+	.owner			= THIS_MODULE,
+	.type			= REGULATOR_VOLTAGE,
+	.min_uV			= MT6375_OTGV_MIN_UV,
+	.uV_step		= MT6375_OTGV_STEP_UV,
+	.n_voltages		= MT6375_OTGV_NUM,
+	.linear_min_sel		= MT6375_OTGV_MIN_SEL,
+	.vsel_reg		= MT6375_REG_CHG_OTGV,
+	.vsel_mask		= MT6375_OTGV_MASK,
+	.enable_reg		= MT6375_REG_CHG_TOP1,
+	.enable_mask		= MT6375_OTG_EN_MASK,
+	.curr_table		= mt6375_chg_otg_curr,
+	.n_current_limits	= ARRAY_SIZE(mt6375_chg_otg_curr),
+	.csel_reg		= MT6375_REG_CHG_OTGC,
+	.csel_mask		= MT6375_OTGC_MASK,
+};
+
+static int mt6375_chg_init_otg_regulator(struct mt6375_chg_data *ddata)
+{
+	struct regulator_config cfg = {
+		.dev = ddata->dev,
+		.driver_data = ddata,
+		.regmap = ddata->regmap,
+	};
+	struct regulator_dev *rdev;
+
+	rdev = devm_regulator_register(ddata->dev, &mt6375_chg_otg_rdesc, &cfg);
+	if (IS_ERR(rdev))
+		return dev_err_probe(ddata->dev, PTR_ERR(rdev),
+				     "Failed to register OTG VBUS regulator\n");
+	return 0;
+}
+
 static irqreturn_t mt6375_chg_irq_handler(int irq, void *data)
 {
 	struct mt6375_chg_data *ddata = data;
@@ -518,6 +659,10 @@ static int mt6375_chg_probe(struct platform_device *pdev)
 				     "Failed to register power supply\n");
 
 	platform_set_drvdata(pdev, ddata);
+
+	ret = mt6375_chg_init_otg_regulator(ddata);
+	if (ret)
+		return ret;
 
 	ret = mt6375_chg_request_irq(ddata, "attach");
 	if (ret)
