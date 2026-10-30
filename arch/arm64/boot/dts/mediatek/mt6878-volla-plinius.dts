@@ -702,6 +702,20 @@
 			io-channel-names = "vbat", "ibat";
 			monitored-battery = <&battery>;
 		};
+
+		tcpc {
+			compatible = "mediatek,mt6375-tcpc";
+			interrupts = <MT6375_PD_EVT>;
+
+			connector {
+				compatible = "usb-c-connector";
+				label = "USB-C";
+				power-role = "sink";
+				data-role = "device";
+				pd-disable;
+				typec-power-opmode = "default";
+			};
+		};
 	};
 };
 
