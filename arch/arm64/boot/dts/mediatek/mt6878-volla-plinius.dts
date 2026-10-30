@@ -705,6 +705,17 @@
 	};
 };
 
+&i2c9 {
+	status = "okay";
+
+	vibrator@5a {
+		compatible = "awinic,aw86927";
+		reg = <0x5a>;
+		interrupts-extended = <&pio 107 IRQ_TYPE_EDGE_FALLING>;
+		reset-gpios = <&pio 116 GPIO_ACTIVE_LOW>;
+	};
+};
+
 / {
 	/*
 	 * Open-circuit-voltage / capacity table derived from the stock
