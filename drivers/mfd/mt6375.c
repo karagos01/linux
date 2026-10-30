@@ -102,6 +102,7 @@ static const struct mfd_cell mt6375_devices[] = {
 	MFD_CELL_OF("mt6375-adc", NULL, NULL, 0, 0, "mediatek,mt6375-adc"),
 	MFD_CELL_OF("mt6375-charger", NULL, NULL, 0, 0, "mediatek,mt6375-charger"),
 	MFD_CELL_OF("mt6375-gauge", NULL, NULL, 0, 0, "mediatek,mt6375-gauge"),
+	MFD_CELL_OF("mt6375-tcpc", NULL, NULL, 0, 0, "mediatek,mt6375-tcpc"),
 };
 
 static struct i2c_client *mt6375_bank_to_i2c(struct mt6375_info *info, u8 bank)
