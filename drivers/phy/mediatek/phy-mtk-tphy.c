@@ -349,6 +349,7 @@ struct mtk_phy_instance {
 	bool bc12_en;
 	bool type_force_mode;
 	bool software_role_switch;
+	bool force_vbus;
 };
 
 struct mtk_tphy {
@@ -1023,6 +1024,16 @@ static void u2_phy_instance_power_on(struct mtk_tphy *tphy,
 
 		if (!instance->role_switch)
 			schedule_delayed_work(&instance->dr_work, msecs_to_jiffies(100));
+	} else if (instance->force_vbus) {
+		/*
+		 * No VBUS sense is wired to this PHY, so pin the device-side
+		 * session valid (A/VBUS valid, session not ended, B valid).
+		 * RG_VBUSVALID/RG_AVALID are already set and RG_SESSEND already
+		 * cleared above; IDDIG is left to the external role switch.
+		 */
+		mtk_phy_set_bits(com + U3P_U2PHYDTM1, P2C_FORCE_AVALID
+			| P2C_FORCE_VBUSVALID | P2C_FORCE_SESSEND);
+		mtk_phy_set_bits(com + U3P_U2PHYDTM1, P2C_RG_BVALID);
 	}
 
 	dev_dbg(tphy->dev, "%s(%d)\n", __func__, index);
@@ -1041,6 +1052,10 @@ static void u2_phy_instance_power_off(struct mtk_tphy *tphy,
 	mtk_phy_clear_bits(com + U3P_U2PHYDTM1, P2C_RG_VBUSVALID | P2C_RG_AVALID);
 
 	mtk_phy_set_bits(com + U3P_U2PHYDTM1, P2C_RG_SESSEND);
+
+	if (instance->force_vbus)
+		mtk_phy_clear_bits(com + U3P_U2PHYDTM1, P2C_FORCE_AVALID
+			| P2C_FORCE_VBUSVALID | P2C_FORCE_SESSEND | P2C_RG_BVALID);
 
 	if (tphy->pdata->avoid_rx_sen_degradation && index) {
 		mtk_phy_clear_bits(com + U3P_U2PHYDTM0, P2C_RG_SUSPENDM | P2C_FORCE_SUSPENDM);
@@ -1284,6 +1299,14 @@ static void phy_parse_property(struct mtk_tphy *tphy,
 
 	if (instance->type != PHY_TYPE_USB2)
 		return;
+
+	/*
+	 * Boards that do not route a VBUS sense signal to the USB2 PHY can
+	 * force the device-side session valid so the gadget enumerates while
+	 * in the device role (the role itself is still driven externally, e.g.
+	 * by the mtu3 IPPC via a USB role switch).
+	 */
+	instance->force_vbus = device_property_read_bool(dev, "mediatek,force-vbus");
 
 	instance->bc12_en = device_property_read_bool(dev, "mediatek,bc12");
 	device_property_read_u32(dev, "mediatek,eye-src",
