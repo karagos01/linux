@@ -705,6 +705,8 @@
 	dr_mode = "otg";
 	usb-role-switch;
 	role-switch-default-mode = "peripheral";
+	/* MT6375 OTG boost sources VBUS when the port acts as host */
+	vbus-supply = <&mt6375_otg_vbus>;
 
 	port {
 		ssusb_role_sw: endpoint {
@@ -734,6 +736,14 @@
 				     <MT6375_FL_DETACH>,
 				     <MT6375_FL_BC12_DN>;
 			interrupt-names = "attach", "detach", "bc12_done";
+
+			mt6375_otg_vbus: usb-otg-vbus-regulator {
+				regulator-name = "mt6375-usb-otg-vbus";
+				regulator-min-microvolt = <5000000>;
+				regulator-max-microvolt = <5000000>;
+				regulator-min-microamp = <500000>;
+				regulator-max-microamp = <1500000>;
+			};
 		};
 
 		gauge {
