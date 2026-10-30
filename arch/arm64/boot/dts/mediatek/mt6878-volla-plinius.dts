@@ -673,6 +673,46 @@
 	status = "okay";
 };
 
+&u2port {
+	/*
+	 * The Type-C Port Manager drives the data role through the mtu3
+	 * usb-role-switch below, so drop the t-phy's own polling role
+	 * switch to avoid two writers forcing IDDIG against each other.
+	 * Also drop its now-unused OF-graph: the stale t-phy<->xhci graph
+	 * would otherwise form a second fw_devlink dependency cycle.
+	 *
+	 * This board does not route a VBUS sense signal to the USB2 PHY,
+	 * so force the device-side session valid; otherwise the gadget
+	 * never sees VBUS and will not enumerate while in the device role
+	 * (the software-role-switch used to do this as a side effect).
+	 */
+	/delete-property/ mediatek,software-role-switch;
+	mediatek,force-vbus;
+	/delete-node/ port;
+};
+
+&usb_host {
+	/* Drop the stale software-role-switch graph endpoint (see &u2port). */
+	/delete-node/ port;
+};
+
+&ssusb {
+	/*
+	 * Dual-role: the USB-C connector's TCPM switches the data role
+	 * through this role switch. Default to peripheral so the USB
+	 * gadget stays up at boot and when attached to a host.
+	 */
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
+
+	port {
+		ssusb_role_sw: endpoint {
+			remote-endpoint = <&con_ep>;
+		};
+	};
+};
+
 &i2c5 {
 	status = "okay";
 
@@ -711,20 +751,39 @@
 			connector {
 				compatible = "usb-c-connector";
 				label = "USB-C";
-				power-role = "sink";
-				data-role = "device";
+				power-role = "dual";
+				data-role = "dual";
+				try-power-role = "sink";
 				typec-power-opmode = "default";
 				/*
-				 * USB-PD sink, 5 V only for now: negotiate an
-				 * explicit contract at vSafe5V without raising
-				 * VBUS. Higher-voltage PDOs need the charger to
-				 * follow the contract (AICR), which is a later
-				 * step; data-role stays device so the USB gadget
-				 * is undisturbed (no data-role swap advertised).
+				 * Dual-role port. As a sink it negotiates a 5 V
+				 * USB-PD contract (the charger follows the
+				 * contract current, see mt6375-charger). As a
+				 * source it only advertises vSafe5V for now;
+				 * actually sourcing VBUS for bus-powered devices
+				 * needs the MT6375 OTG boost regulator, which is
+				 * a later step. try-power-role is sink, so
+				 * attaching to a host or charger keeps the port a
+				 * device/sink and leaves the USB gadget intact.
 				 */
 				op-sink-microwatt = <5000000>;
 				sink-pdos = <PDO_FIXED(5000, 3000,
 						       PDO_FIXED_USB_COMM)>;
+				source-pdos = <PDO_FIXED(5000, 500,
+							 PDO_FIXED_USB_COMM |
+							 PDO_FIXED_DATA_SWAP)>;
+
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					port@0 {
+						reg = <0>;
+						con_ep: endpoint {
+							remote-endpoint = <&ssusb_role_sw>;
+						};
+					};
+				};
 			};
 		};
 	};
