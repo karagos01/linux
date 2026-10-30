@@ -16554,6 +16554,40 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/mmc/mtk-sd.yaml
 F:	drivers/mmc/host/mtk-sd.c
 
+MEDIATEK MT6363 AND MT6685 SPMI PMIC DRIVERS
+M:	Kara <karagos01@gmail.com>
+L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
+S:	Maintained
+F:	Documentation/devicetree/bindings/mfd/mediatek,mt6363.yaml
+F:	Documentation/devicetree/bindings/mfd/mediatek,mt6685.yaml
+F:	drivers/mfd/mt6685-spmi.c
+F:	drivers/mfd/mtk-spmi-pmic.c
+F:	drivers/rtc/rtc-mt6685.c
+F:	include/linux/mfd/mt63x3_spmi/registers.h
+
+MEDIATEK MT6369 REGULATOR DRIVER
+M:	Kara <karagos01@gmail.com>
+L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
+S:	Maintained
+F:	Documentation/devicetree/bindings/regulator/mediatek,mt6369-regulator.yaml
+F:	drivers/regulator/mt6369-regulator.c
+
+MEDIATEK MT6375 SUBPMIC DRIVERS
+M:	Kara <karagos01@gmail.com>
+L:	linux-pm@vger.kernel.org
+L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
+S:	Maintained
+F:	Documentation/devicetree/bindings/mfd/mediatek,mt6375.yaml
+F:	Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml
+F:	Documentation/devicetree/bindings/power/supply/mediatek,mt6375-gauge.yaml
+F:	drivers/iio/adc/mt6375-adc.c
+F:	drivers/mfd/mt6375.c
+F:	drivers/mfd/mt6375.h
+F:	drivers/power/supply/mt6375-charger.c
+F:	drivers/power/supply/mt6375-gauge.c
+F:	include/dt-bindings/iio/adc/mediatek,mt6375_adc.h
+F:	include/dt-bindings/mfd/mt6375.h
+
 MEDIATEK MT6735 CLOCK & RESET DRIVERS
 M:	Yassine Oudjana <y.oudjana@protonmail.com>
 L:	linux-clk@vger.kernel.org
@@ -16579,6 +16613,30 @@ F:	include/dt-bindings/reset/mediatek,mt6735-infracfg.h
 F:	include/dt-bindings/reset/mediatek,mt6735-mfgcfg.h
 F:	include/dt-bindings/reset/mediatek,mt6735-pericfg.h
 F:	include/dt-bindings/reset/mediatek,mt6735-vdecsys.h
+
+MEDIATEK MT6878 SoC AND VOLLA PHONE PLINIUS SUPPORT
+M:	Kara <karagos01@gmail.com>
+L:	linux-arm-kernel@lists.infradead.org (moderated for non-subscribers)
+L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
+S:	Maintained
+F:	Documentation/devicetree/bindings/clock/mediatek,mt6878-clock.yaml
+F:	Documentation/devicetree/bindings/clock/mediatek,mt6878-ufscfg.yaml
+F:	Documentation/devicetree/bindings/net/bluetooth/mediatek,mt6878-bluetooth.yaml
+F:	Documentation/devicetree/bindings/remoteproc/mediatek,mt6878-scp.yaml
+F:	Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6878-ccci.yaml
+F:	Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6878-connsys.yaml
+F:	Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6878-disp-refresh.yaml
+F:	Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6878-gps.yaml
+F:	arch/arm64/boot/dts/mediatek/mt6878-volla-plinius.dts
+F:	drivers/bluetooth/btmtk_connsys.c
+F:	drivers/pmdomain/mediatek/mt6878-pm-domains.h
+F:	drivers/remoteproc/mtk_scp_rv55.c
+F:	drivers/soc/mediatek/mtk-ccci.c
+F:	drivers/soc/mediatek/mtk-connsys-gnss.c
+F:	drivers/soc/mediatek/mtk-connsys.c
+F:	drivers/soc/mediatek/mtk-disp-refresh.c
+F:	include/dt-bindings/power/mediatek,mt6878-power.h
+F:	include/linux/soc/mediatek/mtk-connsys.h
 
 MEDIATEK MT76 WIRELESS LAN DRIVER
 M:	Felix Fietkau <nbd@nbd.name>
