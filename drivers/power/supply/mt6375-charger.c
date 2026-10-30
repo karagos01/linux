@@ -13,10 +13,13 @@
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/notifier.h>
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
+#include <linux/string.h>
+#include <linux/workqueue.h>
 
 #define MT6375_REG_CHG_TOP1	0x120
 #define MT6375_REG_CHG_AICR	0x122
@@ -92,11 +95,17 @@ static const struct reg_field mt6375_chg_fields[F_MAX] = {
 #define MT6375_CV_STEP_UV	10000
 #define MT6375_CV_MAX_UV	4710000
 
+/* Input current to fall back to when there is no Type-C/PD contract (USB2 SDP) */
+#define MT6375_AICR_DEFAULT_UA	500000
+
 struct mt6375_chg_data {
 	struct device *dev;
 	struct regmap *regmap;
 	struct regmap_field *rm_field[F_MAX];
 	struct power_supply *psy;
+	struct power_supply *tcpm_psy;
+	struct notifier_block psy_nb;
+	struct work_struct pd_work;
 };
 
 static int mt6375_chg_field_get(struct mt6375_chg_data *ddata,
@@ -379,6 +388,71 @@ static const struct power_supply_desc mt6375_chg_psy_desc = {
 	.property_is_writeable	= mt6375_chg_prop_writeable,
 };
 
+/*
+ * Follow the input current the Type-C Port Manager negotiated: when the TCPM
+ * sink contract is online, use its CURRENT_MAX (the PD PDO current, or the
+ * Type-C Rp current) as our input current limit, otherwise fall back to a safe
+ * SDP limit so a later non-PD source is not over-drawn.
+ */
+static void mt6375_chg_pd_work(struct work_struct *work)
+{
+	struct mt6375_chg_data *ddata =
+		container_of(work, struct mt6375_chg_data, pd_work);
+	union power_supply_propval online, curr;
+	int ret, ilim;
+
+	if (!ddata->tcpm_psy)
+		return;
+
+	ret = power_supply_get_property(ddata->tcpm_psy,
+					POWER_SUPPLY_PROP_ONLINE, &online);
+	if (ret)
+		return;
+
+	if (online.intval) {
+		ret = power_supply_get_property(ddata->tcpm_psy,
+						POWER_SUPPLY_PROP_CURRENT_MAX,
+						&curr);
+		if (ret || curr.intval <= 0)
+			return;
+		ilim = curr.intval;
+	} else {
+		ilim = MT6375_AICR_DEFAULT_UA;
+	}
+
+	ret = mt6375_chg_set_value(ddata, F_AICR, ilim);
+	if (ret)
+		dev_err(ddata->dev, "Failed to set input current %d uA: %d\n",
+			ilim, ret);
+	else
+		dev_dbg(ddata->dev, "Input current limit set to %d uA\n", ilim);
+}
+
+static int mt6375_chg_psy_notify(struct notifier_block *nb,
+				 unsigned long evt, void *data)
+{
+	struct mt6375_chg_data *ddata =
+		container_of(nb, struct mt6375_chg_data, psy_nb);
+	struct power_supply *psy = data;
+
+	if (evt != PSY_EVENT_PROP_CHANGED ||
+	    !strstarts(psy->desc->name, "tcpm-source"))
+		return NOTIFY_OK;
+
+	ddata->tcpm_psy = psy;
+	schedule_work(&ddata->pd_work);
+
+	return NOTIFY_OK;
+}
+
+static void mt6375_chg_psy_notifier_remove(void *data)
+{
+	struct mt6375_chg_data *ddata = data;
+
+	power_supply_unreg_notifier(&ddata->psy_nb);
+	cancel_work_sync(&ddata->pd_work);
+}
+
 static irqreturn_t mt6375_chg_irq_handler(int irq, void *data)
 {
 	struct mt6375_chg_data *ddata = data;
@@ -455,7 +529,15 @@ static int mt6375_chg_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	return 0;
+	INIT_WORK(&ddata->pd_work, mt6375_chg_pd_work);
+	ddata->psy_nb.notifier_call = mt6375_chg_psy_notify;
+	ret = power_supply_reg_notifier(&ddata->psy_nb);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "Failed to register power supply notifier\n");
+
+	return devm_add_action_or_reset(dev, mt6375_chg_psy_notifier_remove,
+					ddata);
 }
 
 static const struct of_device_id mt6375_chg_of_match[] = {
