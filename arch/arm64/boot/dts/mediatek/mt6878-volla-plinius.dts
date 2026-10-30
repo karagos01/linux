@@ -15,6 +15,7 @@
 #include <dt-bindings/spmi/spmi.h>
 #include <dt-bindings/thermal/mediatek,lvts-thermal.h>
 #include <dt-bindings/thermal/thermal.h>
+#include <dt-bindings/usb/pd.h>
 
 /*
  * The SoC dtsi carries the CMF Phone 1 carveouts, Plinius gets its own
@@ -712,8 +713,18 @@
 				label = "USB-C";
 				power-role = "sink";
 				data-role = "device";
-				pd-disable;
 				typec-power-opmode = "default";
+				/*
+				 * USB-PD sink, 5 V only for now: negotiate an
+				 * explicit contract at vSafe5V without raising
+				 * VBUS. Higher-voltage PDOs need the charger to
+				 * follow the contract (AICR), which is a later
+				 * step; data-role stays device so the USB gadget
+				 * is undisturbed (no data-role swap advertised).
+				 */
+				op-sink-microwatt = <5000000>;
+				sink-pdos = <PDO_FIXED(5000, 3000,
+						       PDO_FIXED_USB_COMM)>;
 			};
 		};
 	};
