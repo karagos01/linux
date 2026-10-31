@@ -49,6 +49,16 @@
 #define MT6375_VENDOR_ID		0x29CF
 #define MT6375_PRODUCT_ID		0x6375
 
+/*
+ * Alert sources the TCPCI core actually services (this mirrors the mask it
+ * computes in tcpci_init()).  Fault, the voltage alarms and the extended
+ * alerts are deliberately left out -- see mt6375_tcpc_init().
+ */
+#define MT6375_ALERT_MASK	(TCPC_ALERT_CC_STATUS | TCPC_ALERT_POWER_STATUS | \
+				 TCPC_ALERT_RX_STATUS | TCPC_ALERT_RX_HARD_RST | \
+				 TCPC_ALERT_TX_SUCCESS | TCPC_ALERT_TX_FAILED | \
+				 TCPC_ALERT_TX_DISCARDED)
+
 struct mt6375_tcpc_priv {
 	struct device *dev;
 	struct tcpci *tcpci;
@@ -77,6 +87,7 @@ static const struct reg_sequence mt6375_reg_init[] = {
 
 static int mt6375_tcpc_init(struct tcpci *tcpci, struct tcpci_data *data)
 {
+	__le16 alert_mask;
 	int ret;
 
 	ret = regmap_register_patch(data->regmap, mt6375_reg_init,
@@ -103,8 +114,30 @@ static int mt6375_tcpc_init(struct tcpci *tcpci, struct tcpci_data *data)
 		return ret;
 
 	/* Disable bleed discharge for lower IQ */
-	return regmap_clear_bits(data->regmap, TCPC_POWER_CTRL,
-				 TCPC_POWER_CTRL_BLEED_DISCHARGE);
+	ret = regmap_clear_bits(data->regmap, TCPC_POWER_CTRL,
+				TCPC_POWER_CTRL_BLEED_DISCHARGE);
+	if (ret)
+		return ret;
+
+	/*
+	 * Program the hardware Alert mask.  The TCPCI core computes
+	 * tcpci->alert_mask but only writes it to TCPC_ALERT_MASK from the I2C
+	 * tcpci_probe() path; drivers that bind through tcpci_register_port()
+	 * (like this one) never do, so the register keeps its reset default
+	 * with every source -- including Fault -- left unmasked.
+	 *
+	 * On this board VBUS for the host/OTG role is supplied by an external
+	 * boost, so the TCPC's own force-discharge cannot pull VBUS down and
+	 * TCPC_FAULT_STATUS latches a fault the core never clears.  With Fault
+	 * unmasked that holds Alert# permanently asserted, and because the
+	 * MT6375 routes Alert# to an edge-latched PMIC interrupt (PD_EVT) the
+	 * stuck-high line produces no further edges: TCPM then stops seeing CC
+	 * changes and hot-plug/flip is missed.  Mask every source the core
+	 * does not service so Alert# can fall again after each handled alert.
+	 */
+	alert_mask = cpu_to_le16(MT6375_ALERT_MASK);
+	return regmap_raw_write(data->regmap, TCPC_ALERT_MASK, &alert_mask,
+				sizeof(alert_mask));
 }
 
 static irqreturn_t mt6375_irq_handler(int irq, void *dev_id)
