@@ -7,6 +7,7 @@
  * Author: Chunfeng Yun <chunfeng.yun@mediatek.com>
  */
 
+#include <linux/delay.h>
 #include <linux/iopoll.h>
 #include <linux/of_platform.h>
 #include <linux/string_choices.h>
@@ -102,7 +103,8 @@ static int ssusb_port0_switch(struct ssusb_mtk *ssusb,
 
 static void switch_port_to_host(struct ssusb_mtk *ssusb)
 {
-	u32 check_clk = 0;
+	void __iomem *ibase = ssusb->ippc_base;
+	u32 sts;
 	int i;
 
 	dev_dbg(ssusb->dev, "%s\n", __func__);
@@ -110,47 +112,77 @@ static void switch_port_to_host(struct ssusb_mtk *ssusb)
 	/*
 	 * MT6878: the IPPC U2 port-select bits only latch after a fresh IP
 	 * software reset, which also resets the xHCI MAC underneath the running
-	 * host controller. Mirror the vendor bring-up: tear the host controller
-	 * down, reset the IP and route the port, then bring a fresh host
-	 * controller up against the newly-routed port.
+	 * host controller. Tear the host controller down so a fresh one can be
+	 * brought up against the newly-routed port.
 	 */
 	of_platform_depopulate(ssusb->dev);
 
-	ssusb_ip_sw_reset(ssusb);
+	/*
+	 * Enable VBUS up front. When this switch is taken from a sink (the port
+	 * had been charging from a host/charger), the MT6375 has to turn its
+	 * charge path into an OTG 5V boost, which ramps far slower than from
+	 * idle. Starting it here gives the boost the whole power-down/bring-up
+	 * below to stabilise, so the device is powered and pulling up D+ well
+	 * before the root hub first scans the port; otherwise the scan races the
+	 * boost ramp and PORTSC.CCS is read as 0.
+	 */
+	ssusb_set_vbus(&ssusb->otg_switch, 1);
 
 	/*
-	 * Put the PHY(s) into host mode so the U2 PHY presents host
-	 * terminations and detects a device connecting. Boards that let the
-	 * PHY manage the role itself (mediatek,software-role-switch) do not
-	 * reach this usb-role-switch path.
+	 * Power the SSUSB IP fully down to its sleep state before bringing the
+	 * host up. A device->host switch taken after the port had been a USB
+	 * *sink* (real VBUS / B-session from a host or charger) otherwise comes
+	 * up with PORTSC.CCS stuck at 0 until a reboot: a plain ip_sw_reset and
+	 * re-route do not clear the session state the sink leaves latched in the
+	 * SSUSB analog. The stock driver passes through switch_port_to_off
+	 * between roles, which power-gates the IP; mirror its core here - power
+	 * down both ports and the host/device IP, wait for the IP to sleep, and
+	 * drop the PHY - so the host is re-initialised from a clean gated state
+	 * exactly as at boot.
 	 */
+	ssusb_host_disable(ssusb);	/* U2/U3 ports PDN+DIS, HOST_PDN */
+	mtu3_setbits(ibase, U3D_SSUSB_IP_PW_CTRL2, SSUSB_IP_DEV_PDN);
+	if (readl_poll_timeout(ibase + U3D_SSUSB_IP_PW_STS1, sts,
+			       sts & SSUSB_IP_SLEEP_STS, 100, 100000))
+		dev_info(ssusb->dev, "IP sleep timeout before host switch\n");
 	for (i = 0; i < ssusb->num_phys; i++)
+		phy_power_off(ssusb->phys[i]);
+
+	/* bring the PHY(s) back up and select host mode from the gated state */
+	for (i = 0; i < ssusb->num_phys; i++) {
+		phy_power_on(ssusb->phys[i]);
 		phy_set_mode(ssusb->phys[i], PHY_MODE_USB_HOST);
-
-	ssusb_port0_switch(ssusb, USB2_PORT, true);
-
-	if (ssusb->otg_switch.is_u3_drd) {
-		ssusb_port0_switch(ssusb, USB3_PORT, true);
-		check_clk = SSUSB_U3_MAC_RST_B_STS;
 	}
+
+	ssusb_ip_sw_reset(ssusb);
 
 	/* request the host hardware resources (MT6878+) */
 	ssusb_hwrscs_req(ssusb, true);
 
-	ssusb_check_clocks(ssusb, check_clk);
+	/*
+	 * Enable the host IP and all ports exactly as the probe-time host init
+	 * does (ssusb_host_init -> ssusb_host_setup -> ssusb_host_enable), not
+	 * just a single-port toggle: the probe path is the one that reliably
+	 * enumerates a device attached at boot. ssusb_host_enable also waits
+	 * for the MAC/xHCI reset-done, so no separate ssusb_check_clocks here.
+	 */
+	ssusb_host_enable(ssusb);
 
 	/* after all clocks are stable */
 	toggle_opstate(ssusb);
 
-	/* bring a fresh xHCI up against the freshly-routed port */
+	/*
+	 * Make sure VBUS (enabled at the top) has fully settled before the root
+	 * hub scans the port, so a device attached across a sink->source switch
+	 * is powered and detected on the first scan rather than racing the OTG
+	 * boost ramp.
+	 */
+	msleep(50);
+
+	/* bring a fresh xHCI up against the freshly-routed, powered port */
 	if (of_platform_populate(ssusb->dev->of_node, NULL, NULL, ssusb->dev))
 		dev_err(ssusb->dev, "failed to repopulate host\n");
 
-	/*
-	 * of_platform_populate re-ran the PHY power-on, which with
-	 * mediatek,force-vbus re-asserts the device-side session; put the
-	 * PHY back into host mode so the host session/terminations win.
-	 */
 	for (i = 0; i < ssusb->num_phys; i++)
 		phy_set_mode(ssusb->phys[i], PHY_MODE_USB_HOST);
 }
@@ -232,8 +264,8 @@ static void ssusb_mode_sw_work(struct work_struct *work)
 	case USB_ROLE_HOST:
 		ssusb_set_force_mode(ssusb, MTU3_DR_FORCE_HOST);
 		mtu3_stop(mtu);
+		/* switch_port_to_host() enables VBUS before populating xHCI */
 		switch_port_to_host(ssusb);
-		ssusb_set_vbus(otg_sx, 1);
 		ssusb->is_host = true;
 		break;
 	case USB_ROLE_DEVICE:
