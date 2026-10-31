@@ -58,9 +58,19 @@
 #define P2A5_RG_HSTX_SRCAL_EN	BIT(15)
 #define P2A5_RG_HSTX_SRCTRL		GENMASK(14, 12)
 
+#define XSP_USBPHYACR8		((SSUSB_SIFSLV_U2PHY_COM) + 0x020)
+
 #define XSP_USBPHYACR6		((SSUSB_SIFSLV_U2PHY_COM) + 0x018)
 #define P2A6_RG_BC11_SW_EN	BIT(23)
 #define P2A6_RG_OTG_VBUSCMP_EN	BIT(20)
+
+/* DTM0 operational config: clear every FORCE_* override, keep working bits */
+#define XSP_U2PHYDTM0_OPER_MSK	0xff41c30bU
+
+#define XSP_U2PHYDTM0		((SSUSB_SIFSLV_U2PHY_COM) + 0x068)
+#define P2D_FORCE_UART_EN	BIT(26)
+#define P2D_FORCE_SUSPENDM	BIT(18)
+#define P2D_RG_SUSPENDM		BIT(3)
 
 #define XSP_U2PHYDTM1		((SSUSB_SIFSLV_U2PHY_COM) + 0x06C)
 #define P2D_FORCE_IDDIG		BIT(9)
@@ -193,11 +203,44 @@ static void u2_phy_instance_power_on(struct mtk_xsphy *xsphy,
 	void __iomem *pbase = inst->port_base;
 	u32 index = inst->index;
 
+	/*
+	 * Mirror the vendor U2 power-on. Mainline previously only set VBUSCMP +
+	 * VBUSVALID, which left both the connect detector and the DTM0 line
+	 * overrides in whatever state the previous role left them. A runtime
+	 * device->host switch taken after the port had been a USB device/sink
+	 * then came up with PORTSC.CCS=0 (connect never detected) and, once that
+	 * was fixed, with the data lines still force-driven so a high-speed
+	 * device failed to enumerate (descriptor read -71, full-speed fallback).
+	 *
+	 * Pulse FORCE_SUSPENDM to suspend then resume the PHY digital (resets the
+	 * connect detector), then force DTM0 back to its operational config so
+	 * every stale FORCE_* line override is cleared and the PHY drives D+/D-
+	 * normally.  This matches the vendor sequence and runs on every power-on.
+	 */
+	mtk_phy_set_bits(pbase + XSP_U2PHYDTM0, P2D_FORCE_SUSPENDM);
+	mtk_phy_clear_bits(pbase + XSP_U2PHYDTM0, P2D_RG_SUSPENDM);
+	mtk_phy_set_bits(pbase + XSP_U2PHYDTM0, P2D_RG_SUSPENDM);
+	usleep_range(30, 60);
+	mtk_phy_clear_bits(pbase + XSP_U2PHYDTM0,
+			   P2D_FORCE_SUSPENDM | P2D_RG_SUSPENDM | P2D_FORCE_UART_EN);
+
+	mtk_phy_clear_bits(pbase + XSP_U2PHYDTM1, BIT(16));
+	mtk_phy_clear_bits(pbase + XSP_USBPHYACR8, GENMASK(9, 8));
+
+	/* clear every DTM0 FORCE_* line override, keep only operational bits */
+	mtk_phy_clear_bits(pbase + XSP_U2PHYDTM0, ~XSP_U2PHYDTM0_OPER_MSK);
+
+	mtk_phy_clear_bits(pbase + XSP_USBPHYACR6, P2A6_RG_BC11_SW_EN);
 	mtk_phy_set_bits(pbase + XSP_USBPHYACR6, P2A6_RG_OTG_VBUSCMP_EN);
 
 	mtk_phy_update_bits(pbase + XSP_U2PHYDTM1,
 			    P2D_RG_VBUSVALID | P2D_RG_AVALID | P2D_RG_SESSEND,
 			    P2D_RG_VBUSVALID | P2D_RG_AVALID);
+
+	mtk_phy_clear_bits(pbase + XSP_USBPHYACR0, GENMASK(26, 24));
+	mtk_phy_clear_bits(pbase + XSP_USBPHYACR6, BIT(31) | BIT(30) | BIT(25));
+	mtk_phy_set_bits(pbase + XSP_USBPHYACR6, BIT(30));
+	usleep_range(800, 1000);
 
 	dev_dbg(xsphy->dev, "%s(%d)\n", __func__, index);
 }
@@ -418,6 +461,15 @@ static int mtk_phy_power_on(struct phy *phy)
 	if (inst->type == PHY_TYPE_USB2) {
 		u2_phy_instance_power_on(xsphy, inst);
 		u2_phy_slew_rate_calibrate(xsphy, inst);
+		/*
+		 * The FORCE_SUSPENDM pulse in u2_phy_instance_power_on reloads
+		 * the PHY's default HS trims, so re-apply the DT eye tuning
+		 * (HS VRT/TERM/INTR) here. init() only runs once, but power_on()
+		 * runs on every role switch, after which the HS termination must
+		 * be restored or a high-speed device fails to enumerate
+		 * (descriptor read -71) and falls back to full speed.
+		 */
+		u2_phy_props_set(xsphy, inst);
 	}
 
 	return 0;
