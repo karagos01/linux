@@ -272,6 +272,12 @@ struct ssusb_mtk {
 	struct regmap *uwk;
 	u32 uwk_reg_base;
 	u32 uwk_vers;
+	/*
+	 * Hardware resource control (MT6878 and later): the host clocks and
+	 * power are gated until requested through the IPPC HWRSCS registers.
+	 * Non-zero when the "mediatek,hwrscs-vers" property is present.
+	 */
+	u32 hwrscs_vers;
 };
 
 /**
@@ -423,6 +429,7 @@ static inline void mtu3_clrbits(void __iomem *base, u32 offset, u32 bits)
 }
 
 int ssusb_check_clocks(struct ssusb_mtk *ssusb, u32 ex_clks);
+void ssusb_ip_sw_reset(struct ssusb_mtk *ssusb);
 struct usb_request *mtu3_alloc_request(struct usb_ep *ep, gfp_t gfp_flags);
 void mtu3_free_request(struct usb_ep *ep, struct usb_request *req);
 void mtu3_req_complete(struct mtu3_ep *mep,

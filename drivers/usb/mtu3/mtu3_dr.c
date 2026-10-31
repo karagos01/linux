@@ -7,6 +7,8 @@
  * Author: Chunfeng Yun <chunfeng.yun@mediatek.com>
  */
 
+#include <linux/iopoll.h>
+#include <linux/of_platform.h>
 #include <linux/string_choices.h>
 #include "mtu3.h"
 #include "mtu3_dr.h"
@@ -18,6 +20,39 @@
 static inline struct ssusb_mtk *otg_sx_to_ssusb(struct otg_switch_mtk *otg_sx)
 {
 	return container_of(otg_sx, struct ssusb_mtk, otg_switch);
+}
+
+/*
+ * On MT6878 and later the host clocks and power are gated until requested
+ * through the IPPC hardware resource-control registers; without the request
+ * the IPPC port-control writes (e.g. the U2 host-select) do not take effect
+ * and the root hub never sees a device. Request the resources before routing
+ * the port to the host, and release them when going back to device mode.
+ * No-op on SoCs that do not advertise "mediatek,hwrscs-vers".
+ */
+static void ssusb_hwrscs_req(struct ssusb_mtk *ssusb, bool on)
+{
+	void __iomem *ibase = ssusb->ippc_base;
+	u32 con, sts;
+	int ret;
+
+	if (!ssusb->hwrscs_vers)
+		return;
+
+	con = mtu3_readl(ibase, U3D_SSUSB_HWRSCS_CON) & ~SSUSB_HWRSCS_CON_MSK;
+	if (on)
+		con |= SSUSB_HWRSCS_REQ;
+	else
+		con &= ~SSUSB_HWRSCS_REQ;
+	mtu3_writel(ibase, U3D_SSUSB_HWRSCS_CON, con);
+
+	/* wait for the SPM to (de)assert the resources; non-fatal on timeout */
+	ret = readl_poll_timeout(ibase + U3D_SSUSB_HWRSCS_STS, sts,
+				 (sts & SSUSB_HWRSCS_REQ) == (con & SSUSB_HWRSCS_REQ),
+				 100, 20000);
+	if (ret)
+		dev_info(ssusb->dev, "hwrscs %s timeout, sts=0x%x\n",
+			 str_on_off(on), sts);
 }
 
 static void toggle_opstate(struct ssusb_mtk *ssusb)
@@ -73,6 +108,17 @@ static void switch_port_to_host(struct ssusb_mtk *ssusb)
 	dev_dbg(ssusb->dev, "%s\n", __func__);
 
 	/*
+	 * MT6878: the IPPC U2 port-select bits only latch after a fresh IP
+	 * software reset, which also resets the xHCI MAC underneath the running
+	 * host controller. Mirror the vendor bring-up: tear the host controller
+	 * down, reset the IP and route the port, then bring a fresh host
+	 * controller up against the newly-routed port.
+	 */
+	of_platform_depopulate(ssusb->dev);
+
+	ssusb_ip_sw_reset(ssusb);
+
+	/*
 	 * Put the PHY(s) into host mode so the U2 PHY presents host
 	 * terminations and detects a device connecting. Boards that let the
 	 * PHY manage the role itself (mediatek,software-role-switch) do not
@@ -88,10 +134,25 @@ static void switch_port_to_host(struct ssusb_mtk *ssusb)
 		check_clk = SSUSB_U3_MAC_RST_B_STS;
 	}
 
+	/* request the host hardware resources (MT6878+) */
+	ssusb_hwrscs_req(ssusb, true);
+
 	ssusb_check_clocks(ssusb, check_clk);
 
 	/* after all clocks are stable */
 	toggle_opstate(ssusb);
+
+	/* bring a fresh xHCI up against the freshly-routed port */
+	if (of_platform_populate(ssusb->dev->of_node, NULL, NULL, ssusb->dev))
+		dev_err(ssusb->dev, "failed to repopulate host\n");
+
+	/*
+	 * of_platform_populate re-ran the PHY power-on, which with
+	 * mediatek,force-vbus re-asserts the device-side session; put the
+	 * PHY back into host mode so the host session/terminations win.
+	 */
+	for (i = 0; i < ssusb->num_phys; i++)
+		phy_set_mode(ssusb->phys[i], PHY_MODE_USB_HOST);
 }
 
 static void switch_port_to_device(struct ssusb_mtk *ssusb)
@@ -112,6 +173,9 @@ static void switch_port_to_device(struct ssusb_mtk *ssusb)
 	}
 
 	ssusb_check_clocks(ssusb, check_clk);
+
+	/* release the host clocks/power now the port is back in device mode */
+	ssusb_hwrscs_req(ssusb, false);
 }
 
 int ssusb_set_vbus(struct otg_switch_mtk *otg_sx, int is_on)

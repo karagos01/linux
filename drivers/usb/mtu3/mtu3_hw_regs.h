@@ -461,6 +461,8 @@
 #define U3D_SSUSB_IP_DEV_CAP	(SSUSB_SIFSLV_IPPC_BASE + 0x0028)
 #define U3D_SSUSB_OTG_INT_EN	(SSUSB_SIFSLV_IPPC_BASE + 0x002C)
 #define U3D_SSUSB_U3_CTRL_0P	(SSUSB_SIFSLV_IPPC_BASE + 0x0030)
+#define U3D_SSUSB_HWRSCS_CON	(SSUSB_SIFSLV_IPPC_BASE + 0x0040)
+#define U3D_SSUSB_HWRSCS_STS	(SSUSB_SIFSLV_IPPC_BASE + 0x0044)
 #define U3D_SSUSB_U2_CTRL_0P	(SSUSB_SIFSLV_IPPC_BASE + 0x0050)
 #define U3D_SSUSB_REF_CK_CTRL	(SSUSB_SIFSLV_IPPC_BASE + 0x008C)
 #define U3D_SSUSB_DEV_RST_CTRL	(SSUSB_SIFSLV_IPPC_BASE + 0x0098)
@@ -533,6 +535,16 @@
 #define SSUSB_U2_PORT_PDN		BIT(1)
 #define SSUSB_U2_PORT_DIS		BIT(0)
 #define SSUSB_U2_PORT_HOST_SEL	(SSUSB_U2_PORT_VBUSVALID | SSUSB_U2_PORT_HOST)
+
+/*
+ * U3D_SSUSB_HWRSCS_CON / U3D_SSUSB_HWRSCS_STS
+ * Hardware resource-control request: writing the request bits asks the SPM to
+ * ungate the host clocks/power; the same bits read back in the status register
+ * once the request is granted. SSUSB_HWRSCS_CON_MSK is cleared and the request
+ * bits set for "on"; cleared for "off". The upper bits are preserved.
+ */
+#define SSUSB_HWRSCS_REQ		0x5f
+#define SSUSB_HWRSCS_CON_MSK		GENMASK(14, 8)
 
 /* U3D_SSUSB_DEV_RST_CTRL */
 #define SSUSB_DEV_SW_RST		BIT(0)
