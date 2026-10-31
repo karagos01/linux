@@ -684,15 +684,27 @@
 	/delete-node/ port;
 };
 
-&usb_host {
+/ {
 	/*
-	 * The xhci-mtk host enables this regulator (the MT6375 OTG boost)
-	 * from its runtime PM, so VBUS is sourced whenever the host is active
-	 * (OTG) and turned off when it is suspended (device/sink mode). This
-	 * is the standard MTK DRD binding (see mt8195/mt8395 boards) and lets
-	 * the TCPM source attach see VBUS present in time.
+	 * OTG VBUS enable. The MT6375 boost alone only drives VBUS onto the
+	 * charger's internal node; a board power-path switch (gated by GPIO
+	 * 110, the stock "otg_en") actually connects it to the USB-C
+	 * receptacle. Model both as one regulator: enabling it asserts GPIO
+	 * 110 and (via vin-supply) turns the MT6375 boost on. The mtu3 role
+	 * switch enables it in host mode and disables it in device/sink mode.
 	 */
-	vbus-supply = <&mt6375_otg_vbus>;
+	otg_vbus_en: regulator-otg-vbus-en {
+		compatible = "regulator-fixed";
+		regulator-name = "otg-vbus-en";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		gpio = <&pio 110 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		vin-supply = <&mt6375_otg_vbus>;
+	};
+};
+
+&usb_host {
 	/* Drop the stale software-role-switch graph endpoint (see &u2port). */
 	/delete-node/ port;
 };
@@ -702,10 +714,14 @@
 	 * Dual-role: the USB-C connector's TCPM switches the data role
 	 * through this role switch. Default to peripheral so the USB
 	 * gadget stays up at boot and when attached to a host.
+	 *
+	 * VBUS for the host role is this GPIO-gated OTG switch; the mtu3 role
+	 * switch enables it when entering host and disables it for device/sink.
 	 */
 	dr_mode = "otg";
 	usb-role-switch;
 	role-switch-default-mode = "peripheral";
+	vbus-supply = <&otg_vbus_en>;
 
 	port {
 		ssusb_role_sw: endpoint {
