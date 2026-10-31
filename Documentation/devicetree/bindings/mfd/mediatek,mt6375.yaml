@@ -58,6 +58,10 @@ properties:
     type: object
     $ref: /schemas/power/supply/mediatek,mt6375-gauge.yaml#
 
+  tcpc:
+    type: object
+    $ref: /schemas/usb/mediatek,mt6375-tcpc.yaml#
+
 required:
   - compatible
   - reg
@@ -72,6 +76,7 @@ examples:
     #include <dt-bindings/interrupt-controller/irq.h>
     #include <dt-bindings/iio/adc/mediatek,mt6375_adc.h>
     #include <dt-bindings/mfd/mt6375.h>
+    #include <dt-bindings/usb/pd.h>
     i2c {
       #address-cells = <1>;
       #size-cells = <0>;
@@ -102,6 +107,23 @@ examples:
                         <&mt6375_adc MT6375_ADC_IBAT>;
           io-channel-names = "vbat", "ibat";
           monitored-battery = <&battery>;
+        };
+
+        tcpc {
+          compatible = "mediatek,mt6375-tcpc";
+          interrupts = <MT6375_PD_EVT>;
+
+          connector {
+            compatible = "usb-c-connector";
+            label = "USB-C";
+            power-role = "dual";
+            data-role = "dual";
+            try-power-role = "sink";
+            op-sink-microwatt = <5000000>;
+            sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>;
+            source-pdos = <PDO_FIXED(5000, 500,
+                                     PDO_FIXED_USB_COMM | PDO_FIXED_DATA_SWAP)>;
+          };
         };
       };
     };

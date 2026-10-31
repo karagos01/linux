@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/usb/mediatek,mt6375-tcpc.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6375 Type-C Port Switch and Power Delivery controller
+
+maintainers:
+  - Jan Benedikt <karagos01@gmail.com>
+
+description: |
+  The MT6375 SubPMIC integrates a TCPCI-compliant USB Type-C Port Controller
+  with a Power Delivery physical layer. It performs Type-C attach and
+  orientation detection and the BMC PD signalling. This document describes
+  only the Type-C Port Switch and Power Delivery controller; it is one
+  function of the MT6375 MFD device (see mfd/mediatek,mt6375.yaml).
+
+properties:
+  compatible:
+    enum:
+      - mediatek,mt6375-tcpc
+
+  interrupts:
+    maxItems: 1
+
+  connector:
+    type: object
+    $ref: /schemas/connector/usb-connector.yaml#
+    unevaluatedProperties: false
+
+additionalProperties: false
+
+required:
+  - compatible
+  - interrupts
+  - connector
+
+...
