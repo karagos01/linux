@@ -218,6 +218,16 @@ properties:
       bit1 for u2port1, ... etc; but can't disable u2port0 if dual role mode
       is enabled, so will be skipped in this case.
 
+  mediatek,hwrscs-vers:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: |
+      Version of the IPPC hardware resource-control (HWRSCS) interface.
+      On this SoC generation the host clocks and power are gated until
+      they are requested through the IPPC HWRSCS registers, so the glue
+      layer must issue that request on the host role switch. Omit the
+      property on SoCs where the resources are always available.
+    enum: [1]
+
 # Required child node when support dual-role
 patternProperties:
   "^usb@[0-9a-f]+$":
