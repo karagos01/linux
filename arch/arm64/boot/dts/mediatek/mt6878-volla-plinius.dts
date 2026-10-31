@@ -692,6 +692,14 @@
 };
 
 &usb_host {
+	/*
+	 * The xhci-mtk host enables this regulator (the MT6375 OTG boost)
+	 * from its runtime PM, so VBUS is sourced whenever the host is active
+	 * (OTG) and turned off when it is suspended (device/sink mode). This
+	 * is the standard MTK DRD binding (see mt8195/mt8395 boards) and lets
+	 * the TCPM source attach see VBUS present in time.
+	 */
+	vbus-supply = <&mt6375_otg_vbus>;
 	/* Drop the stale software-role-switch graph endpoint (see &u2port). */
 	/delete-node/ port;
 };
@@ -705,8 +713,6 @@
 	dr_mode = "otg";
 	usb-role-switch;
 	role-switch-default-mode = "peripheral";
-	/* MT6375 OTG boost sources VBUS when the port acts as host */
-	vbus-supply = <&mt6375_otg_vbus>;
 
 	port {
 		ssusb_role_sw: endpoint {
@@ -769,10 +775,10 @@
 				 * Dual-role port. As a sink it negotiates a 5 V
 				 * USB-PD contract (the charger follows the
 				 * contract current, see mt6375-charger). As a
-				 * source it only advertises vSafe5V for now;
-				 * actually sourcing VBUS for bus-powered devices
-				 * needs the MT6375 OTG boost regulator, which is
-				 * a later step. try-power-role is sink, so
+				 * source it advertises vSafe5V and sources VBUS
+				 * from the MT6375 OTG boost (vbus-supply on the
+				 * xhci usb_host node, enabled by the host's
+				 * runtime PM). try-power-role is sink, so
 				 * attaching to a host or charger keeps the port a
 				 * device/sink and leaves the USB gadget intact.
 				 */
