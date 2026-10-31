@@ -16580,11 +16580,13 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/mfd/mediatek,mt6375.yaml
 F:	Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml
 F:	Documentation/devicetree/bindings/power/supply/mediatek,mt6375-gauge.yaml
+F:	Documentation/devicetree/bindings/usb/mediatek,mt6375-tcpc.yaml
 F:	drivers/iio/adc/mt6375-adc.c
 F:	drivers/mfd/mt6375.c
 F:	drivers/mfd/mt6375.h
 F:	drivers/power/supply/mt6375-charger.c
 F:	drivers/power/supply/mt6375-gauge.c
+F:	drivers/usb/typec/tcpm/tcpci_mt6375.c
 F:	include/dt-bindings/iio/adc/mediatek,mt6375_adc.h
 F:	include/dt-bindings/mfd/mt6375.h
 
