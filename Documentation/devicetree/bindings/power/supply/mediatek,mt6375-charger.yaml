@@ -33,6 +33,14 @@ properties:
       - const: detach
       - const: bc12_done
 
+  usb-otg-vbus-regulator:
+    type: object
+    $ref: /schemas/regulator/regulator.yaml#
+    description:
+      The VBUS boost regulator that sources 5V on the USB Type-C port in
+      OTG/host mode.
+    unevaluatedProperties: false
+
 required:
   - compatible
   - interrupts
