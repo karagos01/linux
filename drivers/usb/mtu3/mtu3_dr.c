@@ -68,8 +68,18 @@ static int ssusb_port0_switch(struct ssusb_mtk *ssusb,
 static void switch_port_to_host(struct ssusb_mtk *ssusb)
 {
 	u32 check_clk = 0;
+	int i;
 
 	dev_dbg(ssusb->dev, "%s\n", __func__);
+
+	/*
+	 * Put the PHY(s) into host mode so the U2 PHY presents host
+	 * terminations and detects a device connecting. Boards that let the
+	 * PHY manage the role itself (mediatek,software-role-switch) do not
+	 * reach this usb-role-switch path.
+	 */
+	for (i = 0; i < ssusb->num_phys; i++)
+		phy_set_mode(ssusb->phys[i], PHY_MODE_USB_HOST);
 
 	ssusb_port0_switch(ssusb, USB2_PORT, true);
 
@@ -87,8 +97,12 @@ static void switch_port_to_host(struct ssusb_mtk *ssusb)
 static void switch_port_to_device(struct ssusb_mtk *ssusb)
 {
 	u32 check_clk = 0;
+	int i;
 
 	dev_dbg(ssusb->dev, "%s\n", __func__);
+
+	for (i = 0; i < ssusb->num_phys; i++)
+		phy_set_mode(ssusb->phys[i], PHY_MODE_USB_DEVICE);
 
 	ssusb_port0_switch(ssusb, USB2_PORT, false);
 
