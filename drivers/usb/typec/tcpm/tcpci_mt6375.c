@@ -140,6 +140,40 @@ static int mt6375_tcpc_init(struct tcpci *tcpci, struct tcpci_data *data)
 				sizeof(alert_mask));
 }
 
+/*
+ * The MT6375's POWER_STATUS/VBUS_PRES only flags VBUS supplied by an external
+ * source (the sink role); it does NOT report VBUS the MT6375 sources itself for
+ * OTG, and it raises no Alert when its own sourcing starts or stops.  VBUS for
+ * the host port is driven by the xhci-mtk "vbus" regulator.  So when the TCPM
+ * drives the source role the attach would otherwise time out at
+ * PD_T_PS_SOURCE_ON waiting for VBUS, and it would never learn VBUS went away.
+ *
+ * Signal the VBUS transitions to the TCPM the same way the Maxim TCPC derives
+ * them from POWER_STATUS.SOURCING_VBUS: announce sourcing on source-on, and on
+ * source-off let the TCPM re-read VBUS (and find it absent through the standard
+ * POWER_STATUS path).  Return zero so the TCPCI core issues the actual VBUS
+ * commands.
+ */
+static int mt6375_tcpc_set_vbus(struct tcpci *tcpci, struct tcpci_data *data,
+				bool source, bool sink)
+{
+	struct tcpm_port *port = tcpci_get_tcpm_port(tcpci);
+
+	/*
+	 * The port is NULL while it is still being registered (the TCPM core
+	 * calls set_vbus from tcpm_init(), before tcpci_register_port() has
+	 * returned the handle); nothing to signal in that case.
+	 */
+	if (port) {
+		if (source)
+			tcpm_sourcing_vbus(port);
+		else
+			tcpm_vbus_change(port);
+	}
+
+	return 0;
+}
+
 static irqreturn_t mt6375_irq_handler(int irq, void *dev_id)
 {
 	struct mt6375_tcpc_priv *priv = dev_id;
@@ -201,6 +235,7 @@ static int mt6375_tcpc_probe(struct platform_device *pdev)
 
 	priv->tcpci_data.auto_discharge_disconnect = 1;
 	priv->tcpci_data.init = mt6375_tcpc_init;
+	priv->tcpci_data.set_vbus = mt6375_tcpc_set_vbus;
 
 	priv->tcpci = tcpci_register_port(dev, &priv->tcpci_data);
 	if (IS_ERR(priv->tcpci))
