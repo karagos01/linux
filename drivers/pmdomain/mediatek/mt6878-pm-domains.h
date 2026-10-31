@@ -16,11 +16,15 @@
 #define MT6878_TOP_AXI_PROT_EN_MCU_SET_0		0xc94
 #define MT6878_TOP_AXI_PROT_EN_MCU_CLR_0		0xc98
 #define MT6878_TOP_AXI_PROT_EN_MCU_STA_0		0xc9c
+#define MT6878_TOP_AXI_PROT_EN_PERISYS_SET_0		0xc84
+#define MT6878_TOP_AXI_PROT_EN_PERISYS_CLR_0		0xc88
+#define MT6878_TOP_AXI_PROT_EN_PERISYS_STA_0		0xc8c
 
 #define MT6878_TOP_AXI_PROT_EN_MCU_0_CONN		BIT(1)
 #define MT6878_TOP_AXI_PROT_EN_INFRASYS_1_CONN		BIT(12)
 #define MT6878_TOP_AXI_PROT_EN_MCU_0_CONN_2ND		BIT(0)
 #define MT6878_TOP_AXI_PROT_EN_INFRASYS_0_CONN		BIT(8)
+#define MT6878_TOP_AXI_PROT_EN_PERISYS_0_SSUSB		BIT(7)
 
 /*
  * MT6878 keeps the power acks in the PWR_CON register of each domain
@@ -56,6 +60,22 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 					MT6878_TOP_AXI_PROT_EN_INFRASYS_STA_0),
 		},
 		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
+	},
+	[MT6878_POWER_DOMAIN_SSUSB] = {
+		.name = "ssusb",
+		.sta_mask = MT6878_PWR_ACK,
+		.sta2nd_mask = MT6878_PWR_ACK_2ND,
+		.ctl_offs = 0xea8,
+		.pwr_sta_offs = 0xea8,
+		.pwr_sta2nd_offs = 0xea8,
+		.sram_pdn_bits = BIT(8),
+		.sram_pdn_ack_bits = BIT(12),
+		.bp_cfg = {
+			BUS_PROT_WR_IGN(INFRA, MT6878_TOP_AXI_PROT_EN_PERISYS_0_SSUSB,
+					MT6878_TOP_AXI_PROT_EN_PERISYS_SET_0,
+					MT6878_TOP_AXI_PROT_EN_PERISYS_CLR_0,
+					MT6878_TOP_AXI_PROT_EN_PERISYS_STA_0),
+		},
 	},
 };
 
