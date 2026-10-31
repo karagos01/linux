@@ -676,18 +676,11 @@
 &u2port {
 	/*
 	 * The Type-C Port Manager drives the data role through the mtu3
-	 * usb-role-switch below, so drop the t-phy's own polling role
-	 * switch to avoid two writers forcing IDDIG against each other.
-	 * Also drop its now-unused OF-graph: the stale t-phy<->xhci graph
-	 * would otherwise form a second fw_devlink dependency cycle.
-	 *
-	 * This board does not route a VBUS sense signal to the USB2 PHY,
-	 * so force the device-side session valid; otherwise the gadget
-	 * never sees VBUS and will not enumerate while in the device role
-	 * (the software-role-switch used to do this as a side effect).
+	 * usb-role-switch, so drop the PHY's now-unused OF-graph: the stale
+	 * phy<->xhci role-switch graph would otherwise form a second
+	 * fw_devlink dependency cycle. The xsphy driver handles the host and
+	 * device sessions itself (no VBUS-sense forcing needed here).
 	 */
-	/delete-property/ mediatek,software-role-switch;
-	mediatek,force-vbus;
 	/delete-node/ port;
 };
 
@@ -799,7 +792,38 @@
 							remote-endpoint = <&ssusb_role_sw>;
 						};
 					};
+
+					port@2 {
+						reg = <2>;
+						con_sbu: endpoint {
+							remote-endpoint = <&fsa4480_mux>;
+						};
+					};
 				};
+			};
+		};
+	};
+};
+
+&i2c3 {
+	status = "okay";
+
+	/*
+	 * USB-C analog crosspoint switch (FSA4480/HL5280). It routes the USB2
+	 * D+/D- and the SBU lines to the receptacle for the attached CC
+	 * orientation; the Type-C Port Manager sets its orientation on attach
+	 * via the connector OF-graph. Without it the host port's data lines are
+	 * only connected for one plug orientation, so a device may not be seen.
+	 */
+	typec-mux@42 {
+		compatible = "fcs,fsa4480";
+		reg = <0x42>;
+		mode-switch;
+		orientation-switch;
+
+		port {
+			fsa4480_mux: endpoint {
+				remote-endpoint = <&con_sbu>;
 			};
 		};
 	};
