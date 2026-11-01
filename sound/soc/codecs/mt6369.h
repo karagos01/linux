@@ -51,6 +51,11 @@
 #define MT6369_AFUNC_AUD_CON1		0x2393
 #define MT6369_AFUNC_AUD_CON4		0x2396
 
+/* MTKAIF serial-link config (RE from mt6369_mtkaif_tx_enable()). */
+#define MT6369_AFE_MTKAIF_CFG0		0x23bc
+#define MT6369_AFE_MTKAIF_CFG1		0x23bd
+#define MT6369_AFE_MTKAIF_RX		0x23d3
+
 /* Audio top clock gating (RE: bits 2 and 5 cleared at init) */
 #define MT6369_AUD_TOP_CKPDN_CON0	0x23d7
 
@@ -108,6 +113,7 @@
 
 /* Low-power idle value for the HP/receiver gain registers. */
 #define MT6369_HPGAIN_IDLE		0x1f
+#define MT6369_RCV_GAIN			0x0	/* 0 dB playback gain */
 
 /* HP DC-offset trim calibration value lives in the PMIC efuse. */
 #define MT6369_HP_EFUSE_OFFSET		0x9e

@@ -96,8 +96,11 @@ static int mt_rcv_event(struct snd_soc_dapm_widget *w,
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON10, 0x92);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON10, 0x93);
 
-		/* Receiver gain and output switch. */
-		regmap_write(regmap, MT6369_AUDDEC_ANA_CON133, MT6369_HPGAIN_IDLE);
+		/* Receiver gain (0 dB) and output switch. The idle value only
+		 * applies on power-down; using it here would keep the output
+		 * muted while playing.
+		 */
+		regmap_write(regmap, MT6369_AUDDEC_ANA_CON133, MT6369_RCV_GAIN);
 		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON24, 0x1, 0x1);
 		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON0, 0x9, 0x9);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON16, 0x1);
@@ -183,6 +186,30 @@ static int mt_sdm_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+/* Enable the codec side of the MTKAIF serial link so it latches the
+ * downlink samples from the AFE. Protocol 1, from mt6369_mtkaif_tx_enable().
+ */
+static int mt_mtkaif_tx_event(struct snd_soc_dapm_widget *w,
+			      struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	struct regmap *regmap = priv->regmap;
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		regmap_update_bits(regmap, MT6369_AFE_MTKAIF_CFG0, 0xff, 0x10);
+		regmap_update_bits(regmap, MT6369_AFE_MTKAIF_CFG1, 0xff, 0x02);
+		regmap_update_bits(regmap, MT6369_AFE_MTKAIF_RX, 0xff, 0x11);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		regmap_update_bits(regmap, MT6369_AFE_MTKAIF_RX, 0xff, 0x10);
+		break;
+	}
+
+	return 0;
+}
+
 /* One-time analog configuration. Recovered from mt6369_codec_init_reg(). */
 static void mt6369_codec_init_reg(struct mt6369_priv *priv)
 {
@@ -243,6 +270,8 @@ static const struct snd_soc_dapm_widget mt6369_dapm_widgets[] = {
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 	SND_SOC_DAPM_SUPPLY("DL SDM", SND_SOC_NOPM, 0, 0, mt_sdm_event,
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_SUPPLY("MTKAIF_TX", SND_SOC_NOPM, 0, 0, mt_mtkaif_tx_event,
+			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 
 	SND_SOC_DAPM_DAC("DACL", NULL, SND_SOC_NOPM, 0, 0),
 
@@ -262,6 +291,7 @@ static const struct snd_soc_dapm_route mt6369_dapm_routes[] = {
 	{"DACL", NULL, "AIF_RX"},
 	{"DACL", NULL, "DL GPIO"},
 	{"DACL", NULL, "DL SDM"},
+	{"DACL", NULL, "MTKAIF_TX"},
 	{"RCV", NULL, "DACL"},
 	{"Receiver", NULL, "RCV"},
 };
