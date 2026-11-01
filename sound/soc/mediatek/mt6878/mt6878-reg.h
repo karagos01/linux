@@ -22,6 +22,20 @@
 #ifndef _MT6878_REG_H_
 #define _MT6878_REG_H_
 
+/* ---- Top level: audio sub-block clock gates and engine enable ---- */
+/*
+ * AUDIO_TOP_CON0..CON4 are the AFE's own clock-gate registers (a cleared bit
+ * ungates the corresponding sub-block). AUDIO_ENGEN_CON0 bit 0 enables the
+ * audio engine (26 MHz). These are driven from runtime-PM resume/suspend.
+ */
+#define AUDIO_TOP_CON0			0x0000
+#define AUDIO_TOP_CON1			0x0004
+#define AUDIO_TOP_CON2			0x0008
+#define AUDIO_TOP_CON3			0x000c
+#define AUDIO_TOP_CON4			0x0010
+#define AUDIO_ENGEN_CON0		0x0014
+#define AUDIO_ENGEN_CON0_ENGEN_ON	BIT(0)
+
 /* ---- Top level / interrupt controller (AFE_IRQ_MCU) ---- */
 #define AFE_IRQ_MCU_EN			0x0100
 #define AFE_IRQ_MCU_STATUS		0x010c

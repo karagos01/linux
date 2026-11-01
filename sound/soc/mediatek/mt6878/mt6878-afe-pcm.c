@@ -10,10 +10,11 @@
  * framework (sound/soc/mediatek/common/). It follows the MT8196 sibling,
  * which shares the MT6878 register generation.
  *
- * Not yet wired up: the audio clocks (mt6878_init_clock() and the runtime-PM
- * helpers are stubs for now; the real clock bring-up lands in a follow-up
- * mt6878-afe-clk.c), so the AFE does not run on hardware with this change
- * alone. The ADDA/I2S backend DAIs and the uplink memifs follow too.
+ * The audio clock bring-up lives in mt6878-afe-clk.c and is driven from the
+ * runtime-PM callbacks here. The aud_* gate clocks are provided by the
+ * audiosys clock controller (a separate driver sharing the AFE register
+ * region); until that controller is present the AFE probe defers. The
+ * ADDA/I2S backend DAIs and the uplink memifs follow in later changes.
  */
 
 #include <linux/dma-mapping.h>
@@ -27,6 +28,7 @@
 #include <sound/pcm.h>
 #include <sound/soc.h>
 
+#include "mt6878-afe-clk.h"
 #include "mt6878-afe-common.h"
 
 #include "../common/mtk-afe-fe-dai.h"
@@ -270,8 +272,8 @@ static const struct regmap_config mt6878_afe_regmap_config = {
 	.reg_bits = 32,
 	.reg_stride = 4,
 	.val_bits = 32,
-	/* TODO: set to the real AFE_MAX_REGISTER and switch to REGCACHE_FLAT */
-	.max_register = 0x6000,
+	.max_register = 0x78fc,	/* AFE_MAX_REGISTER (RE from the stock regmap config) */
+	/* TODO: switch to REGCACHE_FLAT with a volatile_reg callback */
 	.cache_type = REGCACHE_NONE,
 };
 
@@ -310,24 +312,43 @@ static irqreturn_t mt6878_afe_irq_handler(int irq_id, void *dev)
 	return IRQ_HANDLED;
 }
 
-/*
- * TODO: real audio clock bring-up. The AFE clock gates are registered from
- * within the driver (the audiosys block) together with the APLL/topckgen
- * muxes; until that mt6878-afe-clk.c lands these are no-ops and the AFE does
- * not run on hardware.
- */
-static int mt6878_init_clock(struct mtk_base_afe *afe)
-{
-	return 0;
-}
-
 static int mt6878_afe_runtime_suspend(struct device *dev)
 {
+	struct mtk_base_afe *afe = dev_get_drvdata(dev);
+
+	if (!afe->regmap)
+		goto disable;
+
+	/* stop the audio engine */
+	regmap_update_bits(afe->regmap, AUDIO_ENGEN_CON0,
+			   AUDIO_ENGEN_CON0_ENGEN_ON, 0);
+
+disable:
+	mt6878_afe_disable_clock(afe);
 	return 0;
 }
 
 static int mt6878_afe_runtime_resume(struct device *dev)
 {
+	struct mtk_base_afe *afe = dev_get_drvdata(dev);
+	int ret;
+
+	ret = mt6878_afe_enable_clock(afe);
+	if (ret)
+		return ret;
+
+	if (!afe->regmap)
+		return 0;
+
+	/* ungate the AFE sub-block clocks and start the audio engine */
+	regmap_write(afe->regmap, AUDIO_TOP_CON0, 0);
+	regmap_write(afe->regmap, AUDIO_TOP_CON1, 0);
+	regmap_write(afe->regmap, AUDIO_TOP_CON2, 0);
+	regmap_write(afe->regmap, AUDIO_TOP_CON3, 0);
+	regmap_write(afe->regmap, AUDIO_TOP_CON4, 0);
+	regmap_update_bits(afe->regmap, AUDIO_ENGEN_CON0,
+			   AUDIO_ENGEN_CON0_ENGEN_ON, AUDIO_ENGEN_CON0_ENGEN_ON);
+
 	return 0;
 }
 

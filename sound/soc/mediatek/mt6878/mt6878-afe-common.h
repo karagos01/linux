@@ -96,8 +96,13 @@ struct mtk_base_afe;
  * so the ADDA path can reach the analog codec.
  */
 struct mt6878_afe_private {
+	/* audio clocks, indexed by MT6878_CLK_* (see mt6878-afe-clk.h) */
 	struct clk **clk;
-	int num_clks;
+
+	/* syscon regmaps used by the clock bring-up */
+	struct regmap *topckgen;
+	struct regmap *apmixedsys;
+	struct regmap *infracfg;
 
 	/* per-DAI private data, indexed by DAI id */
 	void *dai_priv[MT6878_MEMIF_NUM];
