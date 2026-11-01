@@ -2838,7 +2838,8 @@ config SND_SOC_MT6359_ACCDET
 
 config SND_SOC_MT6369
 	tristate "MediaTek MT6369 Codec"
-	depends on MFD_MTK_SPMI_PMIC || COMPILE_TEST
+	depends on MFD_MTK_SPMI_PMIC
+	depends on MFD_MT6685
 	help
 	  Enable support for the audio codec inside the MediaTek MT6369 SPMI
 	  sub-PMIC. It provides the downlink (playback) path to the earpiece,

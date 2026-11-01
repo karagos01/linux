@@ -14,6 +14,7 @@
  * 26 MHz DCXO enable that lives in the companion MT6685 clock buffer.
  */
 
+#include <linux/mfd/mt6685.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -186,6 +187,22 @@ static int mt_sdm_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+/* 26 MHz audio DCXO buffer on the companion MT6685, from mt_dcxo_event(). */
+static int mt_dcxo_event(struct snd_soc_dapm_widget *w,
+			 struct snd_kcontrol *kcontrol, int event)
+{
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		mt6685_set_dcxo(true);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		mt6685_set_dcxo(false);
+		break;
+	}
+
+	return 0;
+}
+
 /* Enable the codec side of the MTKAIF serial link so it latches the
  * downlink samples from the AFE. Protocol 1, from mt6369_mtkaif_tx_enable().
  */
@@ -216,10 +233,12 @@ static void mt6369_codec_init_reg(struct mt6369_priv *priv)
 	struct regmap *regmap = priv->regmap;
 
 	/*
-	 * TODO: the 26 MHz audio DCXO buffer is enabled here in the stock
-	 * driver via the companion MT6685 clock chip (mt6685_set_dcxo*());
-	 * that path is not wired up yet, so no downlink audio clock runs.
+	 * The analog registers below are clocked by the 26 MHz audio DCXO
+	 * buffer on the companion MT6685, so enable it for the duration of
+	 * the one-time init (the downlink path re-enables it at stream time).
 	 */
+	mt6685_set_dcxo_mode(0);
+	mt6685_set_dcxo(true);
 
 	regmap_update_bits(regmap, MT6369_AUDENC_ANA_CON27, 0x2, 0x0);
 	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON1, 0x10, 0x10);
@@ -248,6 +267,8 @@ static void mt6369_codec_init_reg(struct mt6369_priv *priv)
 	mt6369_zcd_enable(priv, false, 5);
 
 	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON14, 0x40, 0x40);
+
+	mt6685_set_dcxo(false);
 }
 
 static int mt6369_codec_probe(struct snd_soc_component *cmpnt)
@@ -272,6 +293,8 @@ static const struct snd_soc_dapm_widget mt6369_dapm_widgets[] = {
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 	SND_SOC_DAPM_SUPPLY("MTKAIF_TX", SND_SOC_NOPM, 0, 0, mt_mtkaif_tx_event,
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_SUPPLY("DCXO", SND_SOC_NOPM, 0, 0, mt_dcxo_event,
+			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 
 	SND_SOC_DAPM_DAC("DACL", NULL, SND_SOC_NOPM, 0, 0),
 
@@ -292,6 +315,7 @@ static const struct snd_soc_dapm_route mt6369_dapm_routes[] = {
 	{"DACL", NULL, "DL GPIO"},
 	{"DACL", NULL, "DL SDM"},
 	{"DACL", NULL, "MTKAIF_TX"},
+	{"DACL", NULL, "DCXO"},
 	{"RCV", NULL, "DACL"},
 	{"Receiver", NULL, "RCV"},
 };
