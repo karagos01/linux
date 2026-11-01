@@ -6,9 +6,10 @@
  *
  * The MT6878 AFE is a standard MediaTek AFE built on the shared
  * sound/soc/mediatek/common/ framework (mtk-base-afe, memif/irq helpers).
- * Its register bank lives at 0x11050000 and belongs to the same generation
- * as MT8188/MT6991: the ADDA, MTKAIF and interrupt blocks share the layout
- * of that family.
+ * Its register bank lives at 0x11050000 and belongs to the MT8196
+ * generation: the memif, MTKAIF and interrupt blocks share that SoC's
+ * offsets exactly (see sound/soc/mediatek/mt8196/). The ADDA block is laid
+ * out differently on the MT6878 and its offsets come straight from the RE.
  *
  * The offsets below were recovered from the downstream vendor module
  * (snd-soc-mt6878-afe.ko): the ADDA constants come from the register writes
@@ -88,10 +89,11 @@
 /* ADDA DL_SRC2_CON0 48 kHz output-rate word (rate field already positioned). */
 #define AFE_ADDA_DL_SRC2_48K		0x0a0c1800
 
-/* ---- ADDA MTKAIF (serial link to the MT6369 PMIC codec) ---- */
-#define AFE_ADDA_MTKAIF_CFG0		0x1190
-#define AFE_ADDA_MTKAIF_RX_CFG0		0x11a0
-#define AFE_ADDA6_MTKAIF_CFG0		0x11f0
-#define AFE_ADDA6_MTKAIF_RX_CFG0	0x1200
+/* ---- MTKAIF (serial link to the MT6369 PMIC codec) ---- */
+/* Same offsets and naming as the MT8196-generation sibling. */
+#define AFE_MTKAIF0_CFG0		0x1190
+#define AFE_MTKAIF0_RX_CFG2		0x11a0
+#define AFE_MTKAIF1_CFG0		0x11f0
+#define AFE_MTKAIF1_RX_CFG2		0x1200
 
 #endif /* _MT6878_REG_H_ */
