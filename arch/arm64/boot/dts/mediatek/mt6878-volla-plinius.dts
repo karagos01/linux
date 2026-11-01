@@ -619,6 +619,10 @@
 		compatible = "mediatek,mt6369";
 		reg = <0x5 SPMI_USID>;
 
+		codec {
+			compatible = "mediatek,mt6369-sound";
+		};
+
 		regulators {
 			compatible = "mediatek,mt6369-regulator";
 
