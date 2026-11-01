@@ -77,6 +77,17 @@ config SND_SOC_MT6878
 	  Select Y if you have such a device.
 	  If unsure select "N".
 
+config SND_SOC_MT6878_MT6369
+	tristate "ASoC Audio driver for MT6878 with MT6369 codec"
+	depends on SND_SOC_MT6878
+	select SND_SOC_MT6369
+	help
+	  This adds the ASoC machine driver for MediaTek MT6878 boards
+	  with the MT6369 PMIC audio codec, as used on the Volla Phone
+	  Plinius.
+	  Select Y if you have such a device.
+	  If unsure select "N".
+
 config SND_SOC_MT7986
 	tristate "ASoC support for Mediatek MT7986 chip"
 	depends on ARCH_MEDIATEK

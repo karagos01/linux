@@ -7,3 +7,6 @@ snd-soc-mt6878-afe-objs += \
 	mt6878-dai-adda.o
 
 obj-$(CONFIG_SND_SOC_MT6878) += snd-soc-mt6878-afe.o
+
+# machine driver
+obj-$(CONFIG_SND_SOC_MT6878_MT6369) += mt6878-mt6369.o
