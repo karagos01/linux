@@ -2836,6 +2836,14 @@ config SND_SOC_MT6359_ACCDET
 	  for ASoC codec soc-jack detection mechanism.
 	  Select N if you don't have jack on board.
 
+config SND_SOC_MT6369
+	tristate "MediaTek MT6369 Codec"
+	depends on MFD_MTK_SPMI_PMIC || COMPILE_TEST
+	help
+	  Enable support for the audio codec inside the MediaTek MT6369 SPMI
+	  sub-PMIC. It provides the downlink (playback) path to the earpiece,
+	  headphone and line-out and the uplink (microphone) capture path.
+
 config SND_SOC_MT6660
 	tristate "Mediatek MT6660 Speaker Amplifier"
 	depends on I2C
