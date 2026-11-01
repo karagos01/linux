@@ -69,6 +69,12 @@ enum {
 	MT6878_MEMIF_DL7,
 	MT6878_MEMIF_DL8,
 	MT6878_MEMIF_NUM,
+	/*
+	 * Backend DAIs continue the id space after the memifs (the DAI id is
+	 * used to index dai_priv[]). Only the ADDA downlink is wired up so far.
+	 */
+	MT6878_DAI_ADDA = MT6878_MEMIF_NUM,
+	MT6878_DAI_NUM,
 };
 
 /* MCU interrupt identifiers (irq_data[] index; IRQn CON=0x140+n*8). */
@@ -88,6 +94,12 @@ enum {
 struct clk;
 struct mtk_base_afe;
 
+/* per-ADDA-DAI private data (dai_priv[]) */
+struct mtk_afe_adda_priv {
+	int dl_rate;
+	int ul_rate;
+};
+
 /*
  * SoC-specific platform private data (mtk_base_afe::platform_priv).
  *
@@ -105,12 +117,14 @@ struct mt6878_afe_private {
 	struct regmap *infracfg;
 
 	/* per-DAI private data, indexed by DAI id */
-	void *dai_priv[MT6878_MEMIF_NUM];
+	void *dai_priv[MT6878_DAI_NUM];
 
 	/* regmap of the MT6369 PMIC that carries the analog codec */
 	struct regmap *pmic_regmap;
 
 	int mtkaif_protocol;
 };
+
+int mt6878_dai_adda_register(struct mtk_base_afe *afe);
 
 #endif /* _MT6878_AFE_COMMON_H_ */

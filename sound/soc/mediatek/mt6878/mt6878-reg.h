@@ -91,18 +91,35 @@
 #define AFE_DL_CON0_FS_SHIFT		8
 #define AFE_DL_CON0_FS_MASK		0x1f
 
+/* ---- Connection matrix (interconnect) ---- */
+/*
+ * Each output port O_xx has an AFE_CONN register whose bits select the input
+ * ports I_xx feeding it. The downlink memif DL0 (ports I_DL0_CH1/CH2) is routed
+ * into the ADDA downlink via the O_ADDA_DL_CH1/CH2 connection registers (RE from
+ * the stock mtk_adda_dl_ch{1,2}_mix mixer controls).
+ */
+#define AFE_CONN_ADDA_DL_CH1		0x2244
+#define AFE_CONN_ADDA_DL_CH2		0x2264
+#define I_DL0_CH1			0
+#define I_DL0_CH2			1
+
 /* ---- ADDA (internal PMIC-codec link) downlink / uplink ---- */
-#define AFE_ADDA_DL_SRC2_CON0		0x04d0	/* rate<<28 | 0xc1800 | enable(bit1) */
+#define AFE_ADDA_DL_SRC2_CON0		0x04d0	/* rate<<24 | 0xc1800 | enable(bit1) */
 #define AFE_ADDA_DL_SRC2_CON1		0x04d4
 #define AFE_ADDA_DL_SDM_DCCOMP_CON	0x04dc
 #define AFE_ADDA_DL_SDM_TEST		0x04e0
 #define AFE_ADDA_UL_DL_CON0		0x04ec	/* bits[5:0] clock, bit28 = AFE_ADDA on */
 #define AFE_ADDA_DL_SDM_DITHER_CON	0x0510	/* RE: offset confirmed, name tentative */
 
+#define AFE_ADDA_DL_SRC2_CON0_SRC_ON_SFT	1	/* DL SRC enable bit */
 #define AFE_ADDA_UL_DL_CON0_ADDA_AFE_ON	BIT(28)
+#define AFE_ADDA_UL_DL_CON0_ADDA_AFE_ON_SFT	28
 
 /* ADDA DL_SRC2_CON0 48 kHz output-rate word (rate field already positioned). */
 #define AFE_ADDA_DL_SRC2_48K		0x0a0c1800
+
+/* ---- MTKAIF RX pad-top control (uplink side) ---- */
+#define AFE_ADDA_MTKAIF_RX_CFG0		0x1204
 
 /* ---- MTKAIF (serial link to the MT6369 PMIC codec) ---- */
 /* Same offsets and naming as the MT8196-generation sibling. */

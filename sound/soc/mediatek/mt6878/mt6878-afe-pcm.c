@@ -451,6 +451,10 @@ static int mt6878_afe_pcm_dev_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	ret = mt6878_dai_adda_register(afe);
+	if (ret)
+		return ret;
+
 	ret = mtk_afe_combine_sub_dai(afe);
 	if (ret)
 		return dev_err_probe(dev, ret, "mtk_afe_combine_sub_dai fail\n");
