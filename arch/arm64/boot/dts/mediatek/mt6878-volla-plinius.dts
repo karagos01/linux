@@ -615,11 +615,13 @@
 		};
 	};
 
-	pmic@5 {
-		compatible = "mediatek,mt6369-regulator";
+	mt6369: pmic@5 {
+		compatible = "mediatek,mt6369";
 		reg = <0x5 SPMI_USID>;
 
 		regulators {
+			compatible = "mediatek,mt6369-regulator";
+
 			mt6369_vcn33_1: vcn33-1 {
 				regulator-name = "mt6369_vcn33_1";
 				regulator-min-microvolt = <3300000>;

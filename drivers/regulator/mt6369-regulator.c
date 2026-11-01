@@ -8,11 +8,11 @@
  */
 
 #include <linux/delay.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/regmap.h>
-#include <linux/spmi.h>
 
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
@@ -114,7 +114,6 @@ static const struct regulator_ops mt6369_vmch_ops = {
 [_id] = {							\
 	.name = _name,						\
 	.of_match = of_match_ptr(_name),			\
-	.regulators_node = of_match_ptr("regulators"),		\
 	.ops = &mt6369_ldo_ops,					\
 	.type = REGULATOR_VOLTAGE,				\
 	.id = _id,						\
@@ -138,7 +137,6 @@ static const struct regulator_desc mt6369_regulators[] = {
 	[MT6369_ID_VMCH] = {
 		.name = "vmch",
 		.of_match = of_match_ptr("vmch"),
-		.regulators_node = of_match_ptr("regulators"),
 		.ops = &mt6369_vmch_ops,
 		.type = REGULATOR_VOLTAGE,
 		.id = MT6369_ID_VMCH,
@@ -155,41 +153,32 @@ static const struct regulator_desc mt6369_regulators[] = {
 		   MT6369_LDO_VMC_CON0, MT6369_VMC_ANA_CON1),
 };
 
-static const struct regmap_config mt6369_spmi_regmap_config = {
-	.reg_bits	= 16,
-	.val_bits	= 8,
-	.max_register	= 0x2000,
-	.fast_io	= true,
-};
-
-static int mt6369_regulator_probe(struct spmi_device *sdev)
+static int mt6369_regulator_probe(struct platform_device *pdev)
 {
+	struct device *dev = &pdev->dev;
 	struct regulator_config config = {};
 	struct regulator_dev *rdev;
 	unsigned int i, val;
-	int ret;
 
-	config.regmap = devm_regmap_init_spmi_ext(sdev, &mt6369_spmi_regmap_config);
-	if (IS_ERR(config.regmap))
-		return PTR_ERR(config.regmap);
+	/* The regmap is created and owned by the MT6369 SPMI core (parent). */
+	config.regmap = dev_get_regmap(dev->parent, NULL);
+	if (!config.regmap)
+		return dev_err_probe(dev, -ENODEV, "Failed to get parent regmap\n");
 
-	/* The PMIC may be asleep: the first access only wakes it up */
+	/* The PMIC may be asleep: the first access only wakes it up. */
 	regmap_read(config.regmap, MT6369_SWCID_H, &val);
-	ret = regmap_read(config.regmap, MT6369_SWCID_H, &val);
-	if (ret)
-		return dev_err_probe(&sdev->dev, ret, "Cannot read chip ID\n");
 
-	config.dev = &sdev->dev;
+	config.dev = dev;
 
 	for (i = 0; i < ARRAY_SIZE(mt6369_regulators); i++) {
-		rdev = devm_regulator_register(&sdev->dev, &mt6369_regulators[i], &config);
+		rdev = devm_regulator_register(dev, &mt6369_regulators[i], &config);
 		if (IS_ERR(rdev))
-			return dev_err_probe(&sdev->dev, PTR_ERR(rdev), "Failed to register %s\n",
+			return dev_err_probe(dev, PTR_ERR(rdev),
+					     "Failed to register %s\n",
 					     mt6369_regulators[i].name);
 	}
 
-	/* Function blocks of this PMIC described as child nodes */
-	return devm_of_platform_populate(&sdev->dev);
+	return 0;
 }
 
 static const struct of_device_id mt6369_regulator_match[] = {
@@ -198,7 +187,7 @@ static const struct of_device_id mt6369_regulator_match[] = {
 };
 MODULE_DEVICE_TABLE(of, mt6369_regulator_match);
 
-static struct spmi_driver mt6369_regulator_driver = {
+static struct platform_driver mt6369_regulator_driver = {
 	.driver = {
 		.name = "mt6369-regulator",
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
@@ -206,7 +195,7 @@ static struct spmi_driver mt6369_regulator_driver = {
 	},
 	.probe = mt6369_regulator_probe,
 };
-module_spmi_driver(mt6369_regulator_driver);
+module_platform_driver(mt6369_regulator_driver);
 
 MODULE_DESCRIPTION("MediaTek MT6369 PMIC Regulator Driver");
 MODULE_LICENSE("GPL");

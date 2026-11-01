@@ -431,6 +431,8 @@ static int mtk_spmi_pmic_probe(struct spmi_device *sdev)
 
 static const struct of_device_id mtk_pmic_spmi_id_table[] = {
 	{ .compatible = "mediatek,mt6363", .data = &mt6363_variant },
+	/* No variant data: the MT6369 sub-device interrupts are not wired up. */
+	{ .compatible = "mediatek,mt6369" },
 	{ .compatible = "mediatek,mt6373", .data = &mt6373_variant },
 	{ /* sentinel */ }
 };
