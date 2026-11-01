@@ -193,6 +193,7 @@ static int mt_dcxo_event(struct snd_soc_dapm_widget *w,
 {
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
+		mt6685_set_dcxo_mode(0);
 		mt6685_set_dcxo(true);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
@@ -239,6 +240,13 @@ static void mt6369_codec_init_reg(struct mt6369_priv *priv)
 	 */
 	mt6685_set_dcxo_mode(0);
 	mt6685_set_dcxo(true);
+
+	/*
+	 * Enable the VAUD28 analog audio supply. TODO: this LDO belongs in the
+	 * mt6369 regulator driver and should be requested through the regulator
+	 * framework; poke it directly for now so the output stage has power.
+	 */
+	regmap_update_bits(regmap, MT6369_RG_LDO_VAUD28_EN, 0x1, 0x1);
 
 	regmap_update_bits(regmap, MT6369_AUDENC_ANA_CON27, 0x2, 0x0);
 	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON1, 0x10, 0x10);

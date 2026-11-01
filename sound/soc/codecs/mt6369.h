@@ -115,6 +115,9 @@
 #define MT6369_HPGAIN_IDLE		0x1f
 #define MT6369_RCV_GAIN			0x0	/* 0 dB playback gain */
 
+/* VAUD28 audio analog supply LDO (bit 0 = enable). */
+#define MT6369_RG_LDO_VAUD28_EN		0x1c31
+
 /* HP DC-offset trim calibration value lives in the PMIC efuse. */
 #define MT6369_HP_EFUSE_OFFSET		0x9e
 
