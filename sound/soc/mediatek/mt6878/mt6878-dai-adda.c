@@ -34,6 +34,8 @@ enum {
 
 /* MTKAIF protocol-1 link enable (serial bus to the MT6369 PMIC codec) */
 #define MTKAIF_CFG_VAL		0x00010000
+/* MTKAIF shared pad-top config for protocol 1 */
+#define MTKAIF_PAD_VAL		0x000000b0
 
 /* downlink SRC2_CON0 rate word (rate field pre-positioned, RE from the .ko) */
 static unsigned int mtk_adda_dl_rate_transform(struct mtk_base_afe *afe,
@@ -119,6 +121,8 @@ static int mtk_adda_mtkaif_event(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
+		/* configure the shared MTKAIF pad, then enable both links */
+		regmap_write(afe->regmap, AFE_ADDA_MTKAIF_RX_CFG0, MTKAIF_PAD_VAL);
 		regmap_write(afe->regmap, AFE_MTKAIF0_CFG0, MTKAIF_CFG_VAL);
 		regmap_write(afe->regmap, AFE_MTKAIF1_CFG0, MTKAIF_CFG_VAL);
 		break;
