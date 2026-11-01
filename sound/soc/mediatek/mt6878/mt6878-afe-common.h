@@ -10,13 +10,13 @@
  * MT8196 generation, so this header follows sound/soc/mediatek/mt8196/.
  *
  * Reverse engineering of the downstream vendor module (snd-soc-mt6878-afe.ko)
- * confirmed: 34 memif entries (memif_data[], 0xb0 bytes each) with the
- * downlink block at reg base 0x4444 (stride 0x30, ON bit 28) and the uplink
- * block from 0x51c4; 27 MCU interrupts (irq_data[], 0x40 bytes each); the
- * IPM2.0 rate encoding below (ADDA 48 kHz == 0xa); and a 32-bit MMIO regmap
- * with a flat cache. The memif/IRQ/DAI identifier lists here are inherited
- * from the MT8196 sibling and reconciled against the memif_data[]/irq_data[]
- * tables as the platform driver (mt6878-afe-pcm.c) is brought up.
+ * confirmed: the IPM2.0 rate encoding below (ADDA 48 kHz == 0xa); the
+ * downlink memif block at reg base 0x4444 (stride 0x30, ON bit 28); the MCU
+ * interrupt block (CON 0x140 + n*8, CNT 0x144 + n*8); and a 32-bit MMIO
+ * regmap. The hardware has 34 memif and 27 MCU interrupts in total; this
+ * driver currently exposes the nine downlink interfaces (DL0..DL8) that make
+ * up the playback path. The uplink/ETDM-in/HDMI memifs and their interrupts
+ * are added as those capture paths are brought up.
  */
 
 #ifndef _MT6878_AFE_COMMON_H_
@@ -54,11 +54,9 @@ enum {
 };
 
 /*
- * Memory-interface identifiers. Provisional: inherited from the MT8196
- * sibling and reconciled against the RE'd 34-entry memif_data[] table when
- * mt6878-afe-pcm.c lands. Confirmed so far: DL0..DL8 at reg base 0x4444 +
- * n*0x30 (ids 0..8); further downlink and the uplink/ETDM-in/HDMI memifs
- * follow. MT6878_MEMIF_NUM is the RE'd count (34).
+ * Memory-interface identifiers. The downlink interfaces DL0..DL8 occupy a
+ * regular 0x30-byte register block from base 0x4444 (confirmed by RE). The
+ * remaining downlink, uplink, ETDM-in and HDMI memifs are added later.
  */
 enum {
 	MT6878_MEMIF_DL0,
@@ -70,30 +68,21 @@ enum {
 	MT6878_MEMIF_DL6,
 	MT6878_MEMIF_DL7,
 	MT6878_MEMIF_DL8,
-	/* ... remaining DL / VUL / ETDM_IN / HDMI memifs, 34 total ... */
+	MT6878_MEMIF_NUM,
 };
 
-#define MT6878_MEMIF_NUM	34
-#define MT6878_IRQ_NUM		27
-
-/* MCU interrupt identifiers (irq_data[] index; IRQ0 CON=0x140, CNT=0x144). */
+/* MCU interrupt identifiers (irq_data[] index; IRQn CON=0x140+n*8). */
 enum {
 	MT6878_IRQ_0,
-	/* ... IRQ_1 .. IRQ_26, 27 total ... */
-};
-
-/* Audio clock-gate identifiers (AUDIO_ENGEN_CON0 / AUDIO_TOP_CON4). */
-enum {
-	MT6878_AUDIO_26M_EN_ON,
-	MT6878_AUDIO_APLL1_EN_ON,
-	MT6878_AUDIO_APLL2_EN_ON,
-	MT6878_CG_AUDIO_HOPPING_CK,
-	MT6878_CG_AUDIO_F26M_CK,
-	MT6878_CG_APLL1_CK,
-	MT6878_CG_APLL2_CK,
-	MT6878_PDN_APLL_TUNER1,
-	MT6878_PDN_APLL_TUNER2,
-	MT6878_AUDIO_CG_NUM,
+	MT6878_IRQ_1,
+	MT6878_IRQ_2,
+	MT6878_IRQ_3,
+	MT6878_IRQ_4,
+	MT6878_IRQ_5,
+	MT6878_IRQ_6,
+	MT6878_IRQ_7,
+	MT6878_IRQ_8,
+	MT6878_IRQ_NUM,
 };
 
 struct clk;
@@ -102,7 +91,7 @@ struct mtk_base_afe;
 /*
  * SoC-specific platform private data (mtk_base_afe::platform_priv).
  *
- * pmic_regmap is the MT6369 PMIC's SPMI regmap, which the AFE probe resolves
+ * pmic_regmap is the MT6369 PMIC's SPMI regmap, which the AFE resolves
  * (of_find_node_by_name() -> of_find_device_by_node() -> dev_get_regmap())
  * so the ADDA path can reach the analog codec.
  */

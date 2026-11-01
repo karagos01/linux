@@ -73,6 +73,7 @@
 
 #define AFE_DL_CON0_ON_SHIFT		28
 #define AFE_DL_CON0_MONO_SHIFT		4
+#define AFE_DL_CON0_HD_SHIFT		3
 #define AFE_DL_CON0_FS_SHIFT		8
 #define AFE_DL_CON0_FS_MASK		0x1f
 
