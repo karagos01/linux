@@ -27,9 +27,13 @@
 #include "../common/mtk-afe-fe-dai.h"
 
 enum {
+	SUPPLY_SEQ_ADDA_MTKAIF_CFG,
 	SUPPLY_SEQ_ADDA_AFE_ON,
 	SUPPLY_SEQ_ADDA_DL_ON,
 };
+
+/* MTKAIF protocol-1 link enable (serial bus to the MT6369 PMIC codec) */
+#define MTKAIF_CFG_VAL		0x00010000
 
 /* downlink SRC2_CON0 rate word (rate field pre-positioned, RE from the .ko) */
 static unsigned int mtk_adda_dl_rate_transform(struct mtk_base_afe *afe,
@@ -103,6 +107,32 @@ static int mtk_adda_dl_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+/* Enable the MTKAIF serial link (protocol 1) that carries the samples to
+ * the MT6369 PMIC codec.  Both links are configured identically.
+ */
+static int mtk_adda_mtkaif_event(struct snd_soc_dapm_widget *w,
+				 struct snd_kcontrol *kcontrol,
+				 int event)
+{
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		regmap_write(afe->regmap, AFE_MTKAIF0_CFG0, MTKAIF_CFG_VAL);
+		regmap_write(afe->regmap, AFE_MTKAIF1_CFG0, MTKAIF_CFG_VAL);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		regmap_write(afe->regmap, AFE_MTKAIF0_CFG0, 0);
+		regmap_write(afe->regmap, AFE_MTKAIF1_CFG0, 0);
+		break;
+	default:
+		break;
+	}
+
+	return 0;
+}
+
 static const struct snd_soc_dapm_widget mtk_dai_adda_widgets[] = {
 	/* inter-connections */
 	SND_SOC_DAPM_MIXER("ADDA_DL_CH1", SND_SOC_NOPM, 0, 0,
@@ -122,6 +152,10 @@ static const struct snd_soc_dapm_widget mtk_dai_adda_widgets[] = {
 			      AFE_ADDA_DL_SRC2_CON0_SRC_ON_SFT, 0,
 			      mtk_adda_dl_event,
 			      SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_SUPPLY_S("MTKAIF Config", SUPPLY_SEQ_ADDA_MTKAIF_CFG,
+			      SND_SOC_NOPM, 0, 0, mtk_adda_mtkaif_event,
+			      SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 };
 
 static const struct snd_soc_dapm_route mtk_dai_adda_routes[] = {
@@ -134,6 +168,7 @@ static const struct snd_soc_dapm_route mtk_dai_adda_routes[] = {
 
 	{"ADDA Playback", NULL, "ADDA Enable"},
 	{"ADDA Playback", NULL, "ADDA Playback Enable"},
+	{"ADDA Playback", NULL, "MTKAIF Config"},
 };
 
 /* dai ops */
