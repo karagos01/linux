@@ -549,6 +549,86 @@
 			output-high;
 		};
 	};
+
+	/* MTKAIF serial bus between the AFE and the MT6369 PMIC codec */
+	aud_clk_mosi_off_pins: aud-clk-mosi-off-pins {
+		pins {
+			pinmux = <PINMUX_GPIO164__FUNC_GPIO164>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	aud_clk_mosi_on_pins: aud-clk-mosi-on-pins {
+		pins {
+			pinmux = <PINMUX_GPIO164__FUNC_AUD_CLK_MOSI>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	aud_dat_mosi_off_pins: aud-dat-mosi-off-pins {
+		pins {
+			pinmux = <PINMUX_GPIO166__FUNC_GPIO166>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	aud_dat_mosi_on_pins: aud-dat-mosi-on-pins {
+		pins {
+			pinmux = <PINMUX_GPIO166__FUNC_AUD_DAT_MOSI0>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	aud_dat_miso0_off_pins: aud-dat-miso0-off-pins {
+		pins {
+			pinmux = <PINMUX_GPIO170__FUNC_GPIO170>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	aud_dat_miso0_on_pins: aud-dat-miso0-on-pins {
+		pins {
+			pinmux = <PINMUX_GPIO170__FUNC_AUD_DAT_MISO0>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	aud_dat_miso1_off_pins: aud-dat-miso1-off-pins {
+		pins {
+			pinmux = <PINMUX_GPIO171__FUNC_GPIO171>;
+			input-enable;
+			bias-disable;
+		};
+	};
+
+	aud_dat_miso1_on_pins: aud-dat-miso1-on-pins {
+		pins {
+			pinmux = <PINMUX_GPIO171__FUNC_AUD_DAT_MISO1>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+};
+
+&afe {
+	pinctrl-names = "aud_clk_mosi_off", "aud_clk_mosi_on",
+			"aud_dat_mosi_off", "aud_dat_mosi_on",
+			"aud_dat_miso0_off", "aud_dat_miso0_on",
+			"aud_dat_miso1_off", "aud_dat_miso1_on";
+	pinctrl-0 = <&aud_clk_mosi_off_pins>;
+	pinctrl-1 = <&aud_clk_mosi_on_pins>;
+	pinctrl-2 = <&aud_dat_mosi_off_pins>;
+	pinctrl-3 = <&aud_dat_mosi_on_pins>;
+	pinctrl-4 = <&aud_dat_miso0_off_pins>;
+	pinctrl-5 = <&aud_dat_miso0_on_pins>;
+	pinctrl-6 = <&aud_dat_miso1_off_pins>;
+	pinctrl-7 = <&aud_dat_miso1_on_pins>;
 };
 
 &spmi {
