@@ -31,6 +31,7 @@
 
 #include "mt6878-afe-clk.h"
 #include "mt6878-afe-common.h"
+#include "mt6878-afe-gpio.h"
 
 #include "../common/mtk-afe-fe-dai.h"
 #include "../common/mtk-afe-platform-driver.h"
@@ -480,6 +481,10 @@ static int mt6878_afe_pcm_dev_probe(struct platform_device *pdev)
 	ret = regmap_attach_dev(dev, afe->regmap, &mt6878_afe_regmap_config);
 	if (ret)
 		return dev_err_probe(dev, ret, "regmap_attach_dev failed\n");
+
+	ret = mt6878_afe_gpio_init(afe);
+	if (ret)
+		return dev_err_probe(dev, ret, "init gpio error\n");
 
 	ret = devm_pm_runtime_enable(dev);
 	if (ret)

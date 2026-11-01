@@ -4,6 +4,7 @@
 snd-soc-mt6878-afe-objs += \
 	mt6878-afe-pcm.o \
 	mt6878-afe-clk.o \
+	mt6878-afe-gpio.o \
 	mt6878-dai-adda.o
 
 obj-$(CONFIG_SND_SOC_MT6878) += snd-soc-mt6878-afe.o

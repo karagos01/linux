@@ -23,6 +23,7 @@
 #include <sound/soc.h>
 
 #include "mt6878-afe-common.h"
+#include "mt6878-afe-gpio.h"
 #include "../common/mtk-afe-fe-dai.h"
 
 enum {
@@ -87,15 +88,13 @@ static int mtk_adda_dl_event(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
-		/*
-		 * TODO: mux the MTKAIF mosi pins to the audio function here
-		 * (stock requests AFE GPIO id 0x22). Until the AFE pinctrl is
-		 * wired up the bootloader pin state is relied upon.
-		 */
+		/* mux the MTKAIF downlink data line to the audio function */
+		mt6878_afe_gpio_request(afe, true, MT6878_DAI_ADDA, 0);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		/* let the downlink SRC drain before the pins are released */
 		usleep_range(125, 150);
+		mt6878_afe_gpio_request(afe, false, MT6878_DAI_ADDA, 0);
 		break;
 	default:
 		break;
