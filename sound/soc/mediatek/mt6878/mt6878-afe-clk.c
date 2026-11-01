@@ -225,12 +225,16 @@ int mt6878_init_clock(struct mtk_base_afe *afe)
 
 	for (i = 0; i < MT6878_CLK_NUM; i++) {
 		/*
-		 * The I2S/FM master-clock dividers (apll12_div_i2sin1 and
-		 * apll12_div_fmi2s) are only needed for the external I2S/ETDM
-		 * paths and are not yet modelled by the mainline topckgen
-		 * driver; treat them as optional until those DAIs are added.
+		 * The I2S/FM master-clock muxes (i2sin1_m_sel, fmi2s_m_sel) and
+		 * their dividers (apll12_div_i2sin1, apll12_div_fmi2s) are only
+		 * needed for the external I2S/ETDM paths and are not provided by
+		 * the mainline topckgen driver; treat them as optional until
+		 * those DAIs are added.  The internal ADDA downlink does not use
+		 * them.
 		 */
-		if (i == MT6878_CLK_TOP_APLL12_DIV_I2SIN1 ||
+		if (i == MT6878_CLK_TOP_I2SIN1_M_SEL ||
+		    i == MT6878_CLK_TOP_FMI2S_M_SEL ||
+		    i == MT6878_CLK_TOP_APLL12_DIV_I2SIN1 ||
 		    i == MT6878_CLK_TOP_APLL12_DIV_FMI2S)
 			afe_priv->clk[i] = devm_clk_get_optional(afe->dev,
 								 aud_clks[i]);
