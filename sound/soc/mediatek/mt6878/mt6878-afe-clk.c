@@ -224,24 +224,38 @@ int mt6878_init_clock(struct mtk_base_afe *afe)
 		return -ENOMEM;
 
 	for (i = 0; i < MT6878_CLK_NUM; i++) {
-		afe_priv->clk[i] = devm_clk_get(afe->dev, aud_clks[i]);
+		/*
+		 * The I2S/FM master-clock dividers (apll12_div_i2sin1 and
+		 * apll12_div_fmi2s) are only needed for the external I2S/ETDM
+		 * paths and are not yet modelled by the mainline topckgen
+		 * driver; treat them as optional until those DAIs are added.
+		 */
+		if (i == MT6878_CLK_TOP_APLL12_DIV_I2SIN1 ||
+		    i == MT6878_CLK_TOP_APLL12_DIV_FMI2S)
+			afe_priv->clk[i] = devm_clk_get_optional(afe->dev,
+								 aud_clks[i]);
+		else
+			afe_priv->clk[i] = devm_clk_get(afe->dev, aud_clks[i]);
 		if (IS_ERR(afe_priv->clk[i]))
 			return dev_err_probe(afe->dev, PTR_ERR(afe_priv->clk[i]),
 					     "devm_clk_get %s failed\n",
 					     aud_clks[i]);
 	}
 
-	afe_priv->topckgen = syscon_regmap_lookup_by_phandle(np, "topckgen");
+	afe_priv->topckgen = syscon_regmap_lookup_by_phandle(np,
+							     "mediatek,topckgen");
 	if (IS_ERR(afe_priv->topckgen))
 		return dev_err_probe(afe->dev, PTR_ERR(afe_priv->topckgen),
 				     "cannot find topckgen controller\n");
 
-	afe_priv->apmixedsys = syscon_regmap_lookup_by_phandle(np, "apmixedsys");
+	afe_priv->apmixedsys = syscon_regmap_lookup_by_phandle(np,
+							       "mediatek,apmixedsys");
 	if (IS_ERR(afe_priv->apmixedsys))
 		return dev_err_probe(afe->dev, PTR_ERR(afe_priv->apmixedsys),
 				     "cannot find apmixedsys controller\n");
 
-	afe_priv->infracfg = syscon_regmap_lookup_by_phandle(np, "infracfg");
+	afe_priv->infracfg = syscon_regmap_lookup_by_phandle(np,
+							     "mediatek,infracfg");
 	if (IS_ERR(afe_priv->infracfg))
 		return dev_err_probe(afe->dev, PTR_ERR(afe_priv->infracfg),
 				     "cannot find infracfg controller\n");

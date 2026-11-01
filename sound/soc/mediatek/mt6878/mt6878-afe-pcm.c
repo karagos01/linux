@@ -19,6 +19,7 @@
 
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -403,11 +404,6 @@ static int mt6878_afe_pcm_dev_probe(struct platform_device *pdev)
 	afe_priv = afe->platform_priv;
 	afe->dev = dev;
 
-	afe->base_addr = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(afe->base_addr))
-		return dev_err_probe(dev, PTR_ERR(afe->base_addr),
-				     "AFE base_addr not found\n");
-
 	ret = mt6878_init_clock(afe);
 	if (ret)
 		return dev_err_probe(dev, ret, "init clock error\n");
@@ -467,11 +463,19 @@ static int mt6878_afe_pcm_dev_probe(struct platform_device *pdev)
 	afe->runtime_resume = mt6878_afe_runtime_resume;
 	afe->runtime_suspend = mt6878_afe_runtime_suspend;
 
-	afe->regmap = devm_regmap_init_mmio(dev, afe->base_addr,
-					    &mt6878_afe_regmap_config);
+	/*
+	 * The AFE register block is exposed as the parent "audiosys" syscon
+	 * (it also provides the AFE gate clocks); borrow its regmap and attach
+	 * this device to it so the AFE register definitions apply.
+	 */
+	afe->regmap = syscon_node_to_regmap(dev->parent->of_node);
 	if (IS_ERR(afe->regmap))
 		return dev_err_probe(dev, PTR_ERR(afe->regmap),
-				     "regmap init failed\n");
+				     "could not get regmap from parent\n");
+
+	ret = regmap_attach_dev(dev, afe->regmap, &mt6878_afe_regmap_config);
+	if (ret)
+		return dev_err_probe(dev, ret, "regmap_attach_dev failed\n");
 
 	ret = devm_pm_runtime_enable(dev);
 	if (ret)
