@@ -67,6 +67,12 @@
 		mediatek,mutex-id = <0>;
 	};
 
+	sound {
+		compatible = "mediatek,mt6878-mt6369-sound";
+		mediatek,platform = <&afe>;
+		mediatek,audio-codec = <&mt6369_codec>;
+	};
+
 	/* Connectivity subsystem (WiFi/BT/GPS) with the MT6637 A-die */
 	consys: connsys@18000000 {
 		compatible = "mediatek,mt6878-connsys";
@@ -619,7 +625,7 @@
 		compatible = "mediatek,mt6369";
 		reg = <0x5 SPMI_USID>;
 
-		codec {
+		mt6369_codec: codec {
 			compatible = "mediatek,mt6369-sound";
 		};
 
