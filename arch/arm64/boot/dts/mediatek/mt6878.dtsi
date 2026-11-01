@@ -396,6 +396,89 @@
 			#clock-cells = <1>;
 		};
 
+		audiosys: syscon@11050000 {
+			compatible = "mediatek,mt6878-audiosys", "syscon";
+			reg = <0x11050000 0x9000>;
+			#clock-cells = <1>;
+
+			afe: audio-controller {
+				compatible = "mediatek,mt6878-sound";
+				interrupts = <GIC_SPI 392 IRQ_TYPE_LEVEL_HIGH 0>;
+				mediatek,topckgen = <&topckgen>;
+				mediatek,apmixedsys = <&apmixedsys>;
+				mediatek,infracfg = <&infracfg_ao>;
+				/*
+				 * TODO: add power-domains = <&spm
+				 * MT6878_POWER_DOMAIN_AUDIO> once the audio
+				 * power domain is described by the SPM driver.
+				 */
+				clocks = <&audiosys CLK_AFE_AUDIO_HOPPING>,
+					 <&audiosys CLK_AFE_AUDIO_F26M>,
+					 <&audiosys CLK_AFE_DL0_DAC>,
+					 <&audiosys CLK_AFE_DL0_DAC_HIRES>,
+					 <&audiosys CLK_AFE_DL0_PREDIS>,
+					 <&audiosys CLK_AFE_UL0_ADC>,
+					 <&audiosys CLK_AFE_UL0_ADC_HIRES>,
+					 <&audiosys CLK_AFE_UL1_ADC>,
+					 <&audiosys CLK_AFE_UL1_ADC_HIRES>,
+					 <&audiosys CLK_AFE_APLL1>,
+					 <&audiosys CLK_AFE_APLL2>,
+					 <&audiosys CLK_AFE_APLL_TUNER1>,
+					 <&audiosys CLK_AFE_APLL_TUNER2>,
+					 <&topckgen CLK_TOP_AUD_INTBUS_SEL>,
+					 <&topckgen CLK_TOP_MAINPLL_D4_D4>,
+					 <&topckgen CLK_TOP_AUD_1_SEL>,
+					 <&topckgen CLK_TOP_APLL1>,
+					 <&topckgen CLK_TOP_AUD_2_SEL>,
+					 <&topckgen CLK_TOP_APLL2>,
+					 <&topckgen CLK_TOP_AUD_ENGEN1_SEL>,
+					 <&topckgen CLK_TOP_APLL1_D4>,
+					 <&topckgen CLK_TOP_AUD_ENGEN2_SEL>,
+					 <&topckgen CLK_TOP_APLL2_D4>,
+					 <&topckgen CLK_TOP_AUDIO_H_SEL>,
+					 <&topckgen CLK_TOP_APLL1_D2>,
+					 <&topckgen CLK_TOP_APLL2_D2>,
+					 <&topckgen CLK_TOP_APLL_SI1_MCK_SEL>,
+					 <&topckgen CLK_TOP_APLL_FMI2S_MCK_SEL>,
+					 <&topckgen CLK_TOP_TCK_26M_MX9>,
+					 <&pericfg_ao CLK_PERAOP_AUDIO0>,
+					 <&pericfg_ao CLK_PERAOP_AUDIO1>,
+					 <&pericfg_ao CLK_PERAOP_AUDIO2>;
+				clock-names = "aud_hopping_clk",
+					      "aud_f26m_clk",
+					      "aud_dl0_dac_clk",
+					      "aud_dl0_dac_hires_clk",
+					      "aud_dl0_dac_predis_clk",
+					      "aud_ul0_adc_clk",
+					      "aud_ul0_adc_hires_clk",
+					      "aud_ul1_adc_clk",
+					      "aud_ul1_adc_hires_clk",
+					      "aud_apll1_clk",
+					      "aud_apll2_clk",
+					      "aud_apll_tuner1_clk",
+					      "aud_apll_tuner2_clk",
+					      "top_mux_audio_int",
+					      "top_mainpll_d4_d4",
+					      "top_mux_aud_1",
+					      "top_apll1_ck",
+					      "top_mux_aud_2",
+					      "top_apll2_ck",
+					      "top_mux_aud_eng1",
+					      "top_apll1_d4",
+					      "top_mux_aud_eng2",
+					      "top_apll2_d4",
+					      "top_mux_audio_h",
+					      "top_apll1_d2",
+					      "top_apll2_d2",
+					      "top_i2sin1_m_sel",
+					      "top_fmi2s_m_sel",
+					      "top_clk26m_clk",
+					      "aud_slv_ck_peri",
+					      "aud_mst_ck_peri",
+					      "aud_intbus_ck_peri";
+			};
+		};
+
 		ssusb: usb@11201000 {
 			compatible = "mediatek,mt6878-mtu3", "mediatek,mtu3";
 			reg = <0x11201000 0x2e00>,
