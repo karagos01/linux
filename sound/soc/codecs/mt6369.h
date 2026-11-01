@@ -28,8 +28,28 @@
 #define MT6369_DRV_CON5			0x002c
 #define MT6369_DRV_CON6			0x002d
 #define MT6369_GPIO_DIR0		0x008b
-#define MT6369_GPIO_MODE2		0x00cc
-#define MT6369_GPIO_MODE3		0x00d2
+
+/*
+ * GPIO pin mux. Each mode register has adjacent SET (+1) and CLR (+2)
+ * aliases; the audio MTKAIF (MOSI clk/data) pins live in MODE0..MODE2.
+ */
+#define MT6369_GPIO_MODE0		0x00c7
+#define MT6369_GPIO_MODE0_SET		0x00c8
+#define MT6369_GPIO_MODE0_CLR		0x00c9
+#define MT6369_GPIO_MODE1		0x00ca
+#define MT6369_GPIO_MODE1_SET		0x00cb
+#define MT6369_GPIO_MODE1_CLR		0x00cc
+#define MT6369_GPIO_MODE2		0x00cd
+#define MT6369_GPIO_MODE2_SET		0x00ce
+#define MT6369_GPIO_MODE2_CLR		0x00cf
+#define MT6369_GPIO_MODE3		0x00d0
+#define MT6369_GPIO_MODE3_SET		0x00d1
+#define MT6369_GPIO_MODE3_CLR		0x00d2
+
+/* Downlink digital: sigma-delta modulator (DAC) config. */
+#define MT6369_AFUNC_AUD_CON0		0x2392
+#define MT6369_AFUNC_AUD_CON1		0x2393
+#define MT6369_AFUNC_AUD_CON4		0x2396
 
 /* Audio top clock gating (RE: bits 2 and 5 cleared at init) */
 #define MT6369_AUD_TOP_CKPDN_CON0	0x23d7

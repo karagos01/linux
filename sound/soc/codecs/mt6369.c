@@ -120,6 +120,69 @@ static int mt_rcv_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+/* Configure the MTKAIF downlink GPIO pins. From mt6369_set_playback_gpio(). */
+static void mt6369_set_playback_gpio(struct mt6369_priv *priv)
+{
+	struct regmap *regmap = priv->regmap;
+	unsigned int val = 0;
+
+	regmap_read(regmap, MT6369_GPIO_MODE0, &val);
+	if ((val & 0x38) != 0x8) {
+		regmap_write(regmap, MT6369_GPIO_MODE0_CLR, 0x38);
+		regmap_write(regmap, MT6369_GPIO_MODE0_SET, 0x8);
+	}
+	regmap_write(regmap, MT6369_GPIO_MODE1_CLR, 0x3f);
+	regmap_write(regmap, MT6369_GPIO_MODE1_SET, 0x9);
+	regmap_write(regmap, MT6369_GPIO_MODE2_CLR, 0x7);
+	regmap_write(regmap, MT6369_GPIO_MODE2_SET, 0x1);
+}
+
+/* Downlink MTKAIF GPIO supply. From mt_dl_gpio_event(). */
+static int mt_dl_gpio_event(struct snd_soc_dapm_widget *w,
+			    struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		mt6369_set_playback_gpio(priv);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		regmap_write(priv->regmap, MT6369_GPIO_MODE1_CLR, 0x3f);
+		regmap_update_bits(priv->regmap, MT6369_GPIO_DIR0, 0xc, 0x0);
+		break;
+	}
+
+	return 0;
+}
+
+/* Downlink sigma-delta modulator (DAC digital). From mt_sdm_event(). */
+static int mt_sdm_event(struct snd_soc_dapm_widget *w,
+			struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	struct regmap *regmap = priv->regmap;
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		regmap_update_bits(regmap, MT6369_AFUNC_AUD_CON4, 0xfd, 0x6);
+		regmap_write(regmap, MT6369_AFUNC_AUD_CON1, 0xcb);
+		regmap_write(regmap, MT6369_AFUNC_AUD_CON0, 0xa1);
+		regmap_update_bits(regmap, MT6369_AFUNC_AUD_CON4, 0xfd, 0x3);
+		regmap_update_bits(regmap, MT6369_AFUNC_AUD_CON4, 0xfd, 0xb);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		regmap_update_bits(regmap, MT6369_AFUNC_AUD_CON4, 0xfd, 0x0);
+		regmap_write(regmap, MT6369_AFUNC_AUD_CON1, 0xcb);
+		regmap_write(regmap, MT6369_AFUNC_AUD_CON0, 0xa0);
+		break;
+	}
+
+	return 0;
+}
+
 /* One-time analog configuration. Recovered from mt6369_codec_init_reg(). */
 static void mt6369_codec_init_reg(struct mt6369_priv *priv)
 {
@@ -147,9 +210,9 @@ static void mt6369_codec_init_reg(struct mt6369_priv *priv)
 	regmap_update_bits(regmap, MT6369_DRV_CON6, 0xff, 0x88);
 
 	/* Audio GPIO defaults. */
-	regmap_write(regmap, MT6369_GPIO_MODE2, 0x3f);
+	regmap_write(regmap, MT6369_GPIO_MODE1_CLR, 0x3f);
 	regmap_update_bits(regmap, MT6369_GPIO_DIR0, 0xc, 0x0);
-	regmap_write(regmap, MT6369_GPIO_MODE3, 0x3f);
+	regmap_write(regmap, MT6369_GPIO_MODE3_CLR, 0x3f);
 	regmap_update_bits(regmap, MT6369_GPIO_DIR0, 0xc0, 0x0);
 
 	regmap_update_bits(regmap, MT6369_AUD_TOP_CKPDN_CON0, 0x4, 0x0);
@@ -175,10 +238,17 @@ static const struct snd_soc_dapm_widget mt6369_dapm_widgets[] = {
 	SND_SOC_DAPM_AIF_IN("AIF_RX", "mt6369-snd-codec-aif1 Playback", 0,
 			    SND_SOC_NOPM, 0, 0),
 
+	/* Downlink digital supplies: MTKAIF pins and the sigma-delta DAC. */
+	SND_SOC_DAPM_SUPPLY("DL GPIO", SND_SOC_NOPM, 0, 0, mt_dl_gpio_event,
+			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_SUPPLY("DL SDM", SND_SOC_NOPM, 0, 0, mt_sdm_event,
+			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_DAC("DACL", NULL, SND_SOC_NOPM, 0, 0),
+
 	/*
-	 * TODO: downlink DAC and its clock / negative-charge-pump supplies
-	 * (mt_sdm_event / mt_ncp_event / mt_dl_gpio_event) still to be ported;
-	 * until then the receiver has no audio data and stays silent.
+	 * TODO: the 26 MHz audio DCXO (mt_dcxo_event -> MT6685) and the MT6878
+	 * AFE are still missing, so the DAC gets no clock or data yet.
 	 */
 
 	/* Analog earpiece (receiver) output. */
@@ -189,7 +259,10 @@ static const struct snd_soc_dapm_widget mt6369_dapm_widgets[] = {
 };
 
 static const struct snd_soc_dapm_route mt6369_dapm_routes[] = {
-	{"RCV", NULL, "AIF_RX"},
+	{"DACL", NULL, "AIF_RX"},
+	{"DACL", NULL, "DL GPIO"},
+	{"DACL", NULL, "DL SDM"},
+	{"RCV", NULL, "DACL"},
 	{"Receiver", NULL, "RCV"},
 };
 
