@@ -21,12 +21,18 @@
 #include <linux/of_platform.h>
 #include <linux/regmap.h>
 #include <linux/spmi.h>
+#include <linux/mfd/mt6685.h>
 
 /* SCK_TOP interrupt group: 8 sources in one status/enable register. */
 #define MT6685_SCK_TOP_INT_CON0		0x528	/* per-source enable */
 #define MT6685_SCK_TOP_INT_STATUS0	0x534	/* per-source status, W1C */
 #define MT6685_RCS_IRQ_DONE		0x41b	/* release the SPMI RCS flag */
 #define MT6685_NR_INT			8
+
+/* Audio DCXO buffer: bit 2 enables it, bits [1:0] select the output mode. */
+#define MT6685_DCXO_CW00		0x79e
+#define MT6685_DCXO_AUD_ENABLE		BIT(2)
+#define MT6685_DCXO_MODE_MASK		GENMASK(1, 0)
 
 static const struct regmap_config mt6685_regmap_config = {
 	.reg_bits	= 16,
@@ -151,6 +157,39 @@ static int mt6685_irq_init(struct mt6685 *mt)
 	return 0;
 }
 
+/*
+ * The audio DCXO buffer lives on the MT6685 but is driven from the MT6369
+ * codec's downlink path. Keep a reference to the regmap for those helpers;
+ * there is only ever one MT6685 in a system.
+ */
+static struct regmap *mt6685_regmap;
+
+void mt6685_set_dcxo(bool enable)
+{
+	if (!mt6685_regmap)
+		return;
+
+	if (enable) {
+		regmap_update_bits(mt6685_regmap, MT6685_DCXO_CW00,
+				   MT6685_DCXO_AUD_ENABLE, MT6685_DCXO_AUD_ENABLE);
+		usleep_range(400, 420);
+	} else {
+		regmap_update_bits(mt6685_regmap, MT6685_DCXO_CW00,
+				   MT6685_DCXO_AUD_ENABLE, 0);
+	}
+}
+EXPORT_SYMBOL_GPL(mt6685_set_dcxo);
+
+void mt6685_set_dcxo_mode(u8 mode)
+{
+	if (!mt6685_regmap)
+		return;
+
+	regmap_update_bits(mt6685_regmap, MT6685_DCXO_CW00,
+			   MT6685_DCXO_MODE_MASK, mode);
+}
+EXPORT_SYMBOL_GPL(mt6685_set_dcxo_mode);
+
 static int mt6685_spmi_probe(struct spmi_device *sdev)
 {
 	struct device *dev = &sdev->dev;
@@ -165,6 +204,8 @@ static int mt6685_spmi_probe(struct spmi_device *sdev)
 	mt->regmap = devm_regmap_init_spmi_ext(sdev, &mt6685_regmap_config);
 	if (IS_ERR(mt->regmap))
 		return PTR_ERR(mt->regmap);
+
+	mt6685_regmap = mt->regmap;
 
 	/*
 	 * No chip ID check: reading the ID (0x8) from the AP times out and
