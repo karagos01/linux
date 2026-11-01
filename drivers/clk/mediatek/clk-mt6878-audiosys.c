@@ -16,6 +16,7 @@
 #include <linux/clk-provider.h>
 #include <linux/module.h>
 #include <linux/of_device.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 
 #include "clk-gate.h"
@@ -56,21 +57,29 @@ static const struct mtk_gate_regs afe4_cg_regs = {
 	.sta_ofs = 0x10,
 };
 
-#define GATE_AFE0(_id, _name, _parent, _shift)			\
-	GATE_MTK(_id, _name, _parent, &afe0_cg_regs, _shift,	\
-		 &mtk_clk_gate_ops_no_setclr)
-#define GATE_AFE1(_id, _name, _parent, _shift)			\
-	GATE_MTK(_id, _name, _parent, &afe1_cg_regs, _shift,	\
-		 &mtk_clk_gate_ops_no_setclr)
-#define GATE_AFE2(_id, _name, _parent, _shift)			\
-	GATE_MTK(_id, _name, _parent, &afe2_cg_regs, _shift,	\
-		 &mtk_clk_gate_ops_no_setclr)
-#define GATE_AFE3(_id, _name, _parent, _shift)			\
-	GATE_MTK(_id, _name, _parent, &afe3_cg_regs, _shift,	\
-		 &mtk_clk_gate_ops_no_setclr)
-#define GATE_AFE4(_id, _name, _parent, _shift)			\
-	GATE_MTK(_id, _name, _parent, &afe4_cg_regs, _shift,	\
-		 &mtk_clk_gate_ops_no_setclr)
+/*
+ * These gates live inside the AFE register block, which sits in the audio
+ * SPM power domain. That domain is not modelled by the SPM driver yet, so
+ * reaching the gate registers while it is off would fault. Mark the gates
+ * CLK_IGNORE_UNUSED so the clk_disable_unused sweep does not probe them at
+ * boot; the AFE driver only touches them from runtime PM, once the domain
+ * is powered. Drop the flag when the audio power domain is wired up.
+ */
+#define GATE_AFE0(_id, _name, _parent, _shift)				\
+	GATE_MTK_FLAGS(_id, _name, _parent, &afe0_cg_regs, _shift,	\
+		       &mtk_clk_gate_ops_no_setclr, CLK_IGNORE_UNUSED)
+#define GATE_AFE1(_id, _name, _parent, _shift)				\
+	GATE_MTK_FLAGS(_id, _name, _parent, &afe1_cg_regs, _shift,	\
+		       &mtk_clk_gate_ops_no_setclr, CLK_IGNORE_UNUSED)
+#define GATE_AFE2(_id, _name, _parent, _shift)				\
+	GATE_MTK_FLAGS(_id, _name, _parent, &afe2_cg_regs, _shift,	\
+		       &mtk_clk_gate_ops_no_setclr, CLK_IGNORE_UNUSED)
+#define GATE_AFE3(_id, _name, _parent, _shift)				\
+	GATE_MTK_FLAGS(_id, _name, _parent, &afe3_cg_regs, _shift,	\
+		       &mtk_clk_gate_ops_no_setclr, CLK_IGNORE_UNUSED)
+#define GATE_AFE4(_id, _name, _parent, _shift)				\
+	GATE_MTK_FLAGS(_id, _name, _parent, &afe4_cg_regs, _shift,	\
+		       &mtk_clk_gate_ops_no_setclr, CLK_IGNORE_UNUSED)
 
 static const struct mtk_gate afe_clks[] = {
 	/* AUDIO_TOP_CON0 */
@@ -124,6 +133,33 @@ static const struct mtk_clk_desc afe_mcd = {
 	.num_clks = ARRAY_SIZE(afe_clks),
 };
 
+/*
+ * The AFE register block (0x11050000) is shared between this gate-clock
+ * provider and the AFE platform device, which lives as a child node and
+ * borrows this node's syscon regmap. Register the clocks first, then
+ * populate the child so the AFE binds once its gates are available.
+ */
+static int clk_mt6878_audiosys_probe(struct platform_device *pdev)
+{
+	int ret;
+
+	ret = mtk_clk_simple_probe(pdev);
+	if (ret)
+		return ret;
+
+	ret = devm_of_platform_populate(&pdev->dev);
+	if (ret)
+		mtk_clk_simple_remove(pdev);
+
+	return ret;
+}
+
+static void clk_mt6878_audiosys_remove(struct platform_device *pdev)
+{
+	of_platform_depopulate(&pdev->dev);
+	mtk_clk_simple_remove(pdev);
+}
+
 static const struct of_device_id of_match_clk_mt6878_audiosys[] = {
 	{ .compatible = "mediatek,mt6878-audiosys", .data = &afe_mcd },
 	{ /* sentinel */ }
@@ -131,8 +167,8 @@ static const struct of_device_id of_match_clk_mt6878_audiosys[] = {
 MODULE_DEVICE_TABLE(of, of_match_clk_mt6878_audiosys);
 
 static struct platform_driver clk_mt6878_audiosys_drv = {
-	.probe = mtk_clk_simple_probe,
-	.remove = mtk_clk_simple_remove,
+	.probe = clk_mt6878_audiosys_probe,
+	.remove = clk_mt6878_audiosys_remove,
 	.driver = {
 		.name = "clk-mt6878-audiosys",
 		.of_match_table = of_match_clk_mt6878_audiosys,
