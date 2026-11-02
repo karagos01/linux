@@ -68,6 +68,8 @@ enum {
 	MT6878_MEMIF_DL6,
 	MT6878_MEMIF_DL7,
 	MT6878_MEMIF_DL8,
+	/* uplink (capture) memif; VUL9 is the primary ADDA capture interface */
+	MT6878_MEMIF_VUL9,
 	MT6878_MEMIF_NUM,
 	/*
 	 * Backend DAIs continue the id space after the memifs (the DAI id is
@@ -88,6 +90,8 @@ enum {
 	MT6878_IRQ_6,
 	MT6878_IRQ_7,
 	MT6878_IRQ_8,
+	/* dedicated periodic counter for the VUL9 capture memif */
+	MT6878_IRQ_9,
 	MT6878_IRQ_NUM,
 };
 
@@ -123,6 +127,14 @@ struct mt6878_afe_private {
 	struct regmap *pmic_regmap;
 
 	int mtkaif_protocol;
+
+	/*
+	 * MTKAIF RX lock phase per MISO data line, found by the machine-driver
+	 * calibration at card init. Index 0 = MISO0 (MTKAIF0), 1 = MISO1
+	 * (MTKAIF1). The uplink bring-up derives the per-line RX_CFG2 sampling
+	 * delay from the difference between the two.
+	 */
+	int mtkaif_phase_cycle[2];
 };
 
 int mt6878_dai_adda_register(struct mtk_base_afe *afe);

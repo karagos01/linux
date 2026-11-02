@@ -97,12 +97,12 @@ static int mt_rcv_event(struct snd_soc_dapm_widget *w,
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON10, 0x92);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON10, 0x93);
 
-		/* Receiver gain (0 dB) and output switch. The idle value only
+		/* Receiver playback gain and output switch. The idle value only
 		 * applies on power-down; using it here would keep the output
 		 * muted while playing.
 		 */
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON133, MT6369_RCV_GAIN);
-		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON24, 0x1, 0x1);
+		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON24, 0x11, 0x1);
 		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON0, 0x9, 0x9);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON16, 0x1);
 		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON10, 0xc, 0x8);
@@ -175,7 +175,7 @@ static int mt_sdm_event(struct snd_soc_dapm_widget *w,
 		regmap_write(regmap, MT6369_AFUNC_AUD_CON1, 0xcb);
 		regmap_write(regmap, MT6369_AFUNC_AUD_CON0, 0xa1);
 		regmap_update_bits(regmap, MT6369_AFUNC_AUD_CON4, 0xfd, 0x3);
-		regmap_update_bits(regmap, MT6369_AFUNC_AUD_CON4, 0xfd, 0xb);
+		regmap_update_bits(regmap, MT6369_AFUNC_AUD_CON4, 0xff, 0xb);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		regmap_update_bits(regmap, MT6369_AFUNC_AUD_CON4, 0xfd, 0x0);
@@ -191,10 +191,29 @@ static int mt_sdm_event(struct snd_soc_dapm_widget *w,
 static int mt_dcxo_event(struct snd_soc_dapm_widget *w,
 			 struct snd_kcontrol *kcontrol, int event)
 {
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	struct regmap *regmap = priv->regmap;
+
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
 		mt6685_set_dcxo_mode(0);
 		mt6685_set_dcxo(true);
+		usleep_range(100, 120);
+		/*
+		 * PMIC-side AFE/MTKAIF downlink sub-block that is only writable
+		 * while the 26 MHz audio DCXO is running, so it is configured
+		 * here (not at init, where the DCXO is turned back off and these
+		 * registers would reset). Values match the running stock earpiece
+		 * state (full regmap dump during playback); 0x23a9/0x23aa are
+		 * read-only datapath monitors and are not written.
+		 */
+		regmap_write(regmap, 0x23b1, 0x5c);
+		regmap_write(regmap, 0x23b2, 0x03);
+		regmap_write(regmap, 0x23b4, 0x00);
+		regmap_write(regmap, 0x23b9, 0x14);
+		regmap_write(regmap, 0x23ba, 0x14);
+		regmap_write(regmap, 0x260f, 0x32);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		mt6685_set_dcxo(false);
@@ -204,11 +223,26 @@ static int mt_dcxo_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
-/* Enable the codec side of the MTKAIF serial link so it latches the
- * downlink samples from the AFE. Protocol 1, from mt6369_mtkaif_tx_enable().
+/* Enable the codec side of the MTKAIF serial link (protocol 2, as the stock
+ * machine driver selects for MT6878+MT6369). From mt6369_mtkaif_tx_enable().
  */
-static int mt_mtkaif_tx_event(struct snd_soc_dapm_widget *w,
-			      struct snd_kcontrol *kcontrol, int event)
+static void mt6369_mtkaif_tx_enable(struct regmap *regmap)
+{
+	regmap_update_bits(regmap, MT6369_AFE_MTKAIF_CFG0, 0xff, 0x10);
+	regmap_update_bits(regmap, MT6369_AFE_MTKAIF_CFG1, 0xff, 0x02);
+	regmap_update_bits(regmap, MT6369_AFE_MTKAIF_RX, 0xff, 0x12);
+	regmap_update_bits(regmap, MT6369_AFE_MTKAIF_RX, 0xff, 0x13);
+}
+
+/*
+ * Uplink (microphone) capture path. The whole analog-mic -> ADC -> AFE-UL-SRC
+ * -> MTKAIF-TX bring-up is emitted here in the exact order captured from a
+ * stock capture ftrace (arecord on the primary mic): ADC clock, top clock,
+ * MIC bias, the UL SRC datapath, the mic preamp (PGA) and ADC, the MTKAIF TX
+ * link, then the UL SRC latch pulse. The teardown reverses it.
+ */
+static int mt_mic_event(struct snd_soc_dapm_widget *w,
+			struct snd_kcontrol *kcontrol, int event)
 {
 	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
 	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
@@ -216,17 +250,121 @@ static int mt_mtkaif_tx_event(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
-		regmap_update_bits(regmap, MT6369_AFE_MTKAIF_CFG0, 0xff, 0x10);
-		regmap_update_bits(regmap, MT6369_AFE_MTKAIF_CFG1, 0xff, 0x02);
-		regmap_update_bits(regmap, MT6369_AFE_MTKAIF_RX, 0xff, 0x11);
+		/* ADC + top audio clock */
+		regmap_write(regmap, MT6369_AUDDEC_ANA_CON24, 0x00);
+		regmap_write(regmap, MT6369_AUD_TOP_CKPDN, 0x3f);
+		regmap_write(regmap, MT6369_AUD_TOP_CKSEL, 0x09);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON27, 0x01);
+		regmap_write(regmap, MT6369_AUDDEC_ANA_CON24, 0x20);
+		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x01);
+		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x05);
+		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x25);
+		/* MTKAIF calibration-control idle for normal capture */
+		regmap_write(regmap, MT6369_MTKAIF_CAL_CON, 0x62);
+		regmap_write(regmap, MT6369_MTKAIF_CAL_CON, 0x60);
+		/* MIC bias */
+		regmap_write(regmap, MT6369_AUDENC_MICBIAS0, 0x20);
+		regmap_write(regmap, MT6369_AUDENC_MICBIAS0, 0x21);
+		/* UL SRC datapath reset-release, then SRC on */
+		regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0xc0);
+		regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0x40);
+		regmap_write(regmap, MT6369_AFE_UL_SRC_CON0, 0x01);
+		/* mic preamp (PGA) and ADC, both channels */
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON16, 0x41);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON18, 0xc1);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON17, 0x50);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON19, 0x50);
+		/* MTKAIF TX link (protocol 2) */
+		mt6369_mtkaif_tx_enable(regmap);
+		/* latch the UL SRC */
+		regmap_write(regmap, MT6369_AFE_UL_SRC_CON3, 0x01);
+		regmap_write(regmap, MT6369_AFE_UL_SRC_CON3, 0x00);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
-		regmap_update_bits(regmap, MT6369_AFE_MTKAIF_RX, 0xff, 0x10);
+		/* MTKAIF TX off */
+		regmap_write(regmap, MT6369_AFE_MTKAIF_RX, 0x10);
+		/* ADC + PGA off */
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON17, 0x40);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON19, 0x40);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON16, 0x40);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON18, 0xc0);
+		/* UL SRC off + datapath reset */
+		regmap_write(regmap, MT6369_AFE_UL_SRC_CON0, 0x00);
+		regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0xc0);
+		regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0xf5);
+		/* MIC bias off */
+		regmap_write(regmap, MT6369_AUDENC_MICBIAS0, 0x20);
+		regmap_write(regmap, MT6369_AUDENC_MICBIAS0, 0x00);
+		regmap_write(regmap, MT6369_AUDENC_MICBIAS1, 0x00);
+		/* ADC clock off */
+		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x21);
+		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x01);
+		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x00);
+		regmap_write(regmap, MT6369_AUDDEC_ANA_CON24, 0x00);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON27, 0x00);
+		regmap_write(regmap, MT6369_AUD_TOP_CKPDN, 0x3f);
+		regmap_write(regmap, MT6369_AUDDEC_ANA_CON24, 0x10);
 		break;
 	}
 
 	return 0;
 }
+
+/*
+ * MTKAIF RX phase calibration, driven once from the machine driver.
+ * enable/disable set up and tear down the calibration mode; set_phase pokes
+ * the per-channel RX delay. Recovered from the stock mt6369_mtkaif_*() helpers.
+ */
+void mt6369_mtkaif_calibration_enable(struct snd_soc_component *cmpnt)
+{
+	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	struct regmap *regmap = priv->regmap;
+
+	mt6369_set_playback_gpio(priv);
+	regmap_write(regmap, MT6369_GPIO_MODE3_CLR, 0x3f);
+	regmap_write(regmap, MT6369_GPIO_MODE3_SET, 0x09);
+	mt6369_mtkaif_tx_enable(regmap);
+	mt6685_set_dcxo(true);
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON24, 0x10, 0x0);
+	regmap_update_bits(regmap, MT6369_AUDENC_ANA_CON27, 0x1, 0x1);
+	regmap_update_bits(regmap, MT6369_MTKAIF_CAL_CON, 0x66, 0x0);
+	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE1, 0x80, 0x80);
+	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE0, 0x80, 0x80);
+	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE1, 0x80, 0x80);
+}
+EXPORT_SYMBOL_GPL(mt6369_mtkaif_calibration_enable);
+
+void mt6369_set_mtkaif_calibration_phase(struct snd_soc_component *cmpnt,
+					 int phase_1, int phase_2, int phase_3)
+{
+	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	struct regmap *regmap = priv->regmap;
+
+	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE0, 0x7f, phase_1);
+	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE1, 0x7f, phase_2);
+	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE2, 0x7f, phase_3);
+}
+EXPORT_SYMBOL_GPL(mt6369_set_mtkaif_calibration_phase);
+
+void mt6369_mtkaif_calibration_disable(struct snd_soc_component *cmpnt)
+{
+	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	struct regmap *regmap = priv->regmap;
+
+	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE1, 0x80, 0x0);
+	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE0, 0x80, 0x0);
+	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE2, 0x80, 0x0);
+	regmap_update_bits(regmap, MT6369_MTKAIF_CAL_CON, 0x66, 0x66);
+	regmap_update_bits(regmap, MT6369_AUDENC_ANA_CON27, 0x1, 0x0);
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON24, 0x10, 0x10);
+	mt6685_set_dcxo(false);
+	regmap_update_bits(regmap, MT6369_AFE_MTKAIF_RX, 0xff, 0x10);
+	regmap_write(regmap, MT6369_GPIO_MODE1_CLR, 0x3f);
+	regmap_update_bits(regmap, MT6369_GPIO_DIR0, 0xc, 0x0);
+	regmap_write(regmap, MT6369_GPIO_MODE3_CLR, 0x3f);
+	regmap_update_bits(regmap, MT6369_GPIO_DIR0, 0xc0, 0x0);
+}
+EXPORT_SYMBOL_GPL(mt6369_mtkaif_calibration_disable);
 
 /* One-time analog configuration. Recovered from mt6369_codec_init_reg(). */
 static void mt6369_codec_init_reg(struct mt6369_priv *priv)
@@ -274,7 +412,22 @@ static void mt6369_codec_init_reg(struct mt6369_priv *priv)
 
 	mt6369_zcd_enable(priv, false, 5);
 
-	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON14, 0x40, 0x40);
+	/*
+	 * PMIC-side AFE / MTKAIF downlink interface block. The stock codec
+	 * configures this run of registers; without it the MTKAIF downlink
+	 * samples never reach the sigma-delta DAC and the output is silent.
+	 * Values captured verbatim from a working stock earpiece playback.
+	 */
+	regmap_write(regmap, 0x230f, 0x20);
+	regmap_write(regmap, 0x231d, 0x06);
+	regmap_write(regmap, 0x2388, 0x01);
+	regmap_write(regmap, 0x2389, 0x01);
+	regmap_write(regmap, 0x238f, 0x30);
+	regmap_write(regmap, 0x23c8, 0x40);
+	regmap_write(regmap, 0x23d0, 0x03);
+	regmap_write(regmap, 0x23d1, 0x03);
+	regmap_write(regmap, 0x23da, 0x2c);
+	regmap_write(regmap, 0x2595, 0x01);
 
 	mt6685_set_dcxo(false);
 }
@@ -299,33 +452,40 @@ static const struct snd_soc_dapm_widget mt6369_dapm_widgets[] = {
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 	SND_SOC_DAPM_SUPPLY("DL SDM", SND_SOC_NOPM, 0, 0, mt_sdm_event,
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
-	SND_SOC_DAPM_SUPPLY("MTKAIF_TX", SND_SOC_NOPM, 0, 0, mt_mtkaif_tx_event,
-			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 	SND_SOC_DAPM_SUPPLY("DCXO", SND_SOC_NOPM, 0, 0, mt_dcxo_event,
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 
 	SND_SOC_DAPM_DAC("DACL", NULL, SND_SOC_NOPM, 0, 0),
-
-	/*
-	 * TODO: the 26 MHz audio DCXO (mt_dcxo_event -> MT6685) and the MT6878
-	 * AFE are still missing, so the DAC gets no clock or data yet.
-	 */
 
 	/* Analog earpiece (receiver) output. */
 	SND_SOC_DAPM_OUT_DRV_E("RCV", SND_SOC_NOPM, 0, 0, NULL, 0, mt_rcv_event,
 			       SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_PRE_PMD),
 
 	SND_SOC_DAPM_OUTPUT("Receiver"),
+
+	/* Digital uplink (microphone) to the AFE over the MTKAIF serial link. */
+	SND_SOC_DAPM_AIF_OUT("AIF_TX", "mt6369-snd-codec-aif1 Capture", 0,
+			     SND_SOC_NOPM, 0, 0),
+
+	/* Analog mic -> ADC bring-up (full sequence) plus the 26 MHz DCXO. */
+	SND_SOC_DAPM_ADC_E("Mic ADC", NULL, SND_SOC_NOPM, 0, 0, mt_mic_event,
+			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_INPUT("AIN0"),
 };
 
 static const struct snd_soc_dapm_route mt6369_dapm_routes[] = {
 	{"DACL", NULL, "AIF_RX"},
 	{"DACL", NULL, "DL GPIO"},
 	{"DACL", NULL, "DL SDM"},
-	{"DACL", NULL, "MTKAIF_TX"},
 	{"DACL", NULL, "DCXO"},
 	{"RCV", NULL, "DACL"},
 	{"Receiver", NULL, "RCV"},
+
+	/* capture: mic -> ADC -> MTKAIF TX -> AFE */
+	{"Mic ADC", NULL, "AIN0"},
+	{"Mic ADC", NULL, "DCXO"},
+	{"AIF_TX", NULL, "Mic ADC"},
 };
 
 static const struct snd_soc_component_driver mt6369_soc_component_driver = {
@@ -337,11 +497,78 @@ static const struct snd_soc_component_driver mt6369_soc_component_driver = {
 	.endianness		= 1,
 };
 
+/*
+ * Codec downlink-enable preamble. Stock emits this on every playback (via the
+ * AFE's codec DL ops), and crucially only after the AFE back end is already
+ * running: the AFE DL memif is enabled, AFE_ON is set and the MTKAIF RX link
+ * is clocking data. It gates the codec audio clock on (0x2514 bit0), pulses
+ * the MTKAIF calibration-control bit (0x230c) and resets the codec DL
+ * datapath with a 0x238f b0->30 pulse, then re-asserts the DL enable bits.
+ * The 0x238f reset only latches correctly against a live MTKAIF link, so this
+ * must run at stream START (after the AFE back end is up), not from a codec
+ * DAPM supply which powers earlier. Captured from a stock earpiece-playback
+ * regmap trace.
+ */
+static void mt6369_dl_enable(struct regmap *r)
+{
+	/*
+	 * Downlink datapath preamble: re-assert the MTKAIF/audio clock gate and
+	 * pulse the DL datapath reset so it latches against the live MTKAIF link.
+	 * This must run at stream START (after the AFE back end is up), hence from
+	 * the codec DAI .trigger rather than a DAPM supply. It runs in atomic
+	 * context, so it only does quick register writes (no settling delays); the
+	 * receiver analog stage, which needs the delays, is brought up in process
+	 * context by mt_rcv_event.
+	 */
+	regmap_update_bits(r, MT6369_AUDENC_ANA_CON27, 0x1, 0x1);
+	regmap_write(r, MT6369_MTKAIF_CAL_CON, 0x2);
+	regmap_write(r, MT6369_MTKAIF_CAL_CON, 0x0);
+	regmap_write(r, 0x238f, 0xb0);
+	regmap_write(r, 0x238f, 0x30);
+	regmap_write(r, 0x2388, 0x1);
+	regmap_write(r, 0x2389, 0x1);
+}
+
+static int mt6369_codec_dai_trigger(struct snd_pcm_substream *substream,
+				    int cmd, struct snd_soc_dai *dai)
+{
+	struct mt6369_priv *priv = snd_soc_component_get_drvdata(dai->component);
+
+	if (substream->stream != SNDRV_PCM_STREAM_PLAYBACK)
+		return 0;
+
+	switch (cmd) {
+	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_RESUME:
+	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+		mt6369_dl_enable(priv->regmap);
+		break;
+	default:
+		break;
+	}
+
+	return 0;
+}
+
+static const struct snd_soc_dai_ops mt6369_codec_dai_ops = {
+	.trigger = mt6369_codec_dai_trigger,
+};
+
 static struct snd_soc_dai_driver mt6369_dai_driver[] = {
 	{
 		.name = "mt6369-snd-codec-aif1",
+		.ops = &mt6369_codec_dai_ops,
 		.playback = {
 			.stream_name	= "mt6369-snd-codec-aif1 Playback",
+			.channels_min	= 1,
+			.channels_max	= 2,
+			.rates		= SNDRV_PCM_RATE_8000_192000,
+			.formats	= SNDRV_PCM_FMTBIT_S16_LE |
+					  SNDRV_PCM_FMTBIT_S24_LE |
+					  SNDRV_PCM_FMTBIT_S32_LE,
+		},
+		.capture = {
+			.stream_name	= "mt6369-snd-codec-aif1 Capture",
 			.channels_min	= 1,
 			.channels_max	= 2,
 			.rates		= SNDRV_PCM_RATE_8000_192000,

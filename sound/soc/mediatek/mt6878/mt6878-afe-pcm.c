@@ -166,6 +166,20 @@ static const struct snd_soc_dai_ops mt6878_memif_dai_ops = {
 	.ops = &mt6878_memif_dai_ops, \
 }
 
+#define MT6878_FE_CAPTURE_DAI(_name, _id) \
+{ \
+	.name = #_name, \
+	.id = _id, \
+	.capture = { \
+		.stream_name = #_name, \
+		.channels_min = 1, \
+		.channels_max = 2, \
+		.rates = MTK_PCM_RATES, \
+		.formats = MTK_PCM_FORMATS, \
+	}, \
+	.ops = &mt6878_memif_dai_ops, \
+}
+
 static struct snd_soc_dai_driver mt6878_memif_dai_driver[] = {
 	MT6878_FE_PLAYBACK_DAI(DL0, MT6878_MEMIF_DL0),
 	MT6878_FE_PLAYBACK_DAI(DL1, MT6878_MEMIF_DL1),
@@ -176,6 +190,7 @@ static struct snd_soc_dai_driver mt6878_memif_dai_driver[] = {
 	MT6878_FE_PLAYBACK_DAI(DL6, MT6878_MEMIF_DL6),
 	MT6878_FE_PLAYBACK_DAI(DL7, MT6878_MEMIF_DL7),
 	MT6878_FE_PLAYBACK_DAI(DL8, MT6878_MEMIF_DL8),
+	MT6878_FE_CAPTURE_DAI(UL9, MT6878_MEMIF_VUL9),
 };
 
 /*
@@ -219,6 +234,48 @@ static struct snd_soc_dai_driver mt6878_memif_dai_driver[] = {
 		.minlen_reg = -1, \
 	}
 
+/*
+ * Uplink memif descriptor. The VUL memifs share the same 0x30-byte block shape
+ * as the downlink ones but their CON0 field layout differs (HD mode in the low
+ * two bits, a half-align bit, fs at bit 8). Modelled on the MT8196-generation
+ * MT8196_UL_MEMIF: only fs/mono/enable/hd/hd-align are driven; the remaining
+ * CON0 config bits keep their (correct) reset values, as on that sibling.
+ */
+#define MT6878_UL_MEMIF(_id, _n) \
+	[MT6878_MEMIF_##_id] = { \
+		.name = #_id, \
+		.id = MT6878_MEMIF_##_id, \
+		.reg_ofs_base = AFE_VUL_BASE(_n), \
+		.reg_ofs_cur = AFE_VUL_CUR(_n), \
+		.reg_ofs_end = AFE_VUL_END(_n), \
+		.reg_ofs_base_msb = AFE_VUL_BASE_MSB(_n), \
+		.reg_ofs_cur_msb = AFE_VUL_CUR_MSB(_n), \
+		.reg_ofs_end_msb = AFE_VUL_END_MSB(_n), \
+		.fs_reg = AFE_VUL_CON0(_n), \
+		.fs_shift = AFE_VUL_CON0_FS_SHIFT, \
+		.fs_maskbit = AFE_VUL_CON0_FS_MASK, \
+		.mono_reg = AFE_VUL_CON0(_n), \
+		.mono_shift = AFE_VUL_CON0_MONO_SHIFT, \
+		.mono_invert = 0, \
+		.quad_ch_reg = -1, \
+		.int_odd_flag_reg = -1, \
+		.enable_reg = AFE_VUL_CON0(_n), \
+		.enable_shift = AFE_VUL_CON0_ON_SHIFT, \
+		.hd_reg = AFE_VUL_CON0(_n), \
+		.hd_shift = AFE_VUL_CON0_HD_SHIFT, \
+		.hd_align_reg = AFE_VUL_CON0(_n), \
+		.hd_align_mshift = AFE_VUL_CON0_HALIGN_SHIFT, \
+		.msb_reg = -1, \
+		.msb_shift = -1, \
+		.msb_end_reg = -1, \
+		.msb_end_shift = -1, \
+		.agent_disable_reg = -1, \
+		.agent_disable_shift = -1, \
+		.ch_num_reg = -1, \
+		.pbuf_reg = -1, \
+		.minlen_reg = -1, \
+	}
+
 static const struct mtk_base_memif_data memif_data[MT6878_MEMIF_NUM] = {
 	MT6878_DL_MEMIF(DL0, 0),
 	MT6878_DL_MEMIF(DL1, 1),
@@ -229,6 +286,7 @@ static const struct mtk_base_memif_data memif_data[MT6878_MEMIF_NUM] = {
 	MT6878_DL_MEMIF(DL6, 6),
 	MT6878_DL_MEMIF(DL7, 7),
 	MT6878_DL_MEMIF(DL8, 8),
+	MT6878_UL_MEMIF(VUL9, 9),
 };
 
 #define MT6878_AFE_IRQ(_n) \
@@ -256,6 +314,7 @@ static const struct mtk_base_irq_data irq_data[MT6878_IRQ_NUM] = {
 	MT6878_AFE_IRQ(6),
 	MT6878_AFE_IRQ(7),
 	MT6878_AFE_IRQ(8),
+	MT6878_AFE_IRQ(9),
 };
 
 static const int memif_irq_usage[MT6878_MEMIF_NUM] = {
@@ -268,6 +327,7 @@ static const int memif_irq_usage[MT6878_MEMIF_NUM] = {
 	[MT6878_MEMIF_DL6] = MT6878_IRQ_6,
 	[MT6878_MEMIF_DL7] = MT6878_IRQ_7,
 	[MT6878_MEMIF_DL8] = MT6878_IRQ_8,
+	[MT6878_MEMIF_VUL9] = MT6878_IRQ_9,
 };
 
 static const struct regmap_config mt6878_afe_regmap_config = {
@@ -282,7 +342,7 @@ static const struct regmap_config mt6878_afe_regmap_config = {
 static irqreturn_t mt6878_afe_irq_handler(int irq_id, void *dev)
 {
 	struct mtk_base_afe *afe = dev;
-	unsigned int status, mcu_en;
+	unsigned int status, mcu_en, con;
 	int i, ret;
 
 	ret = regmap_read(afe->regmap, AFE_IRQ_MCU_EN, &mcu_en);
@@ -292,7 +352,8 @@ static irqreturn_t mt6878_afe_irq_handler(int irq_id, void *dev)
 	if (ret)
 		return IRQ_NONE;
 
-	status &= mcu_en;
+	/* Only the low MT6878_IRQ_NUM sources are wired; mask off the rest. */
+	status &= mcu_en & GENMASK(MT6878_IRQ_NUM - 1, 0);
 	if (!status)
 		return IRQ_NONE;
 
@@ -308,8 +369,22 @@ static irqreturn_t mt6878_afe_irq_handler(int irq_id, void *dev)
 			snd_pcm_period_elapsed(memif->substream);
 	}
 
-	/* TODO: confirm the interrupt-clear semantics against the hardware */
-	regmap_write(afe->regmap, AFE_IRQ_MCU_STATUS, status);
+	/*
+	 * Acknowledge each asserted source by toggling the clear-config bits
+	 * [31:30] (CLR_CFG | MISS_FLAG_CLR_CFG) of its AFE_IRQ_MCU_CNT (CFG1)
+	 * register, the hardware's edge-clear. Writing the status register does
+	 * not clear the interrupt, and the clear bits live in CFG1, not CFG0
+	 * (CON); without this the line stays asserted and the kernel disables it
+	 * as a runaway IRQ.
+	 */
+	for (i = 0; i < MT6878_IRQ_NUM; i++) {
+		if (!(status & BIT(i)))
+			continue;
+		if (regmap_read(afe->regmap, AFE_IRQ_MCU_CNT(i), &con))
+			continue;
+		regmap_update_bits(afe->regmap, AFE_IRQ_MCU_CNT(i),
+				   GENMASK(31, 30), con ^ GENMASK(31, 30));
+	}
 
 	return IRQ_HANDLED;
 }
@@ -448,11 +523,20 @@ static int mt6878_afe_pcm_dev_probe(struct platform_device *pdev)
 	/* init sub_dais */
 	INIT_LIST_HEAD(&afe->sub_dais);
 
-	ret = mt6878_dai_memif_register(afe);
+	/*
+	 * Register the ADDA sub-DAI first: the sub-DAIs are prepended to the
+	 * list, so this leaves the memif DAIs at the head and thus first in the
+	 * combined driver array. That matters because soc-core assigns a DAI
+	 * with a zero .id a fallback id of component->num_dai; keeping the
+	 * memifs first makes DL0..DL8 fall on ids 0..8, matching their memif
+	 * indices (otherwise DL0's id 0 is reassigned and the FE drives the
+	 * wrong memif, so no samples reach the ADDA downlink).
+	 */
+	ret = mt6878_dai_adda_register(afe);
 	if (ret)
 		return ret;
 
-	ret = mt6878_dai_adda_register(afe);
+	ret = mt6878_dai_memif_register(afe);
 	if (ret)
 		return ret;
 

@@ -25,8 +25,11 @@
 /* ---- Top level: audio sub-block clock gates and engine enable ---- */
 /*
  * AUDIO_TOP_CON0..CON4 are the AFE's own clock-gate registers (a cleared bit
- * ungates the corresponding sub-block). AUDIO_ENGEN_CON0 bit 0 enables the
- * audio engine (26 MHz). These are driven from runtime-PM resume/suspend.
+ * ungates the corresponding sub-block). AUDIO_ENGEN_CON0 bits 0 and 1 enable
+ * the audio engine generators (26 MHz base + the second generator the downlink
+ * engine needs); the stock driver sets both (reg reads 0x3 during playback),
+ * while bits 2/3 are the APLL1/APLL2 engens (unused for the 26 MHz ADDA path).
+ * These are driven from runtime-PM resume/suspend.
  */
 #define AUDIO_TOP_CON0			0x0000
 #define AUDIO_TOP_CON1			0x0004
@@ -34,11 +37,11 @@
 #define AUDIO_TOP_CON3			0x000c
 #define AUDIO_TOP_CON4			0x0010
 #define AUDIO_ENGEN_CON0		0x0014
-#define AUDIO_ENGEN_CON0_ENGEN_ON	BIT(0)
+#define AUDIO_ENGEN_CON0_ENGEN_ON	(BIT(0) | BIT(1))
 
 /* ---- Top level / interrupt controller (AFE_IRQ_MCU) ---- */
 #define AFE_IRQ_MCU_EN			0x0100
-#define AFE_IRQ_MCU_STATUS		0x010c
+#define AFE_IRQ_MCU_STATUS		0x0120
 
 /*
  * Per-interrupt control/counter registers. Each MCU IRQ line n occupies an
@@ -91,6 +94,47 @@
 #define AFE_DL_CON0_FS_SHIFT		8
 #define AFE_DL_CON0_FS_MASK		0x1f
 
+/* ---- DRAM uplink memory interfaces (VUL memif) ---- */
+/*
+ * The uplink (capture) memifs VUL0..VUL10 occupy a second 0x30-byte-strided
+ * block starting at reg base 0x4d64 (confirmed by a stock capture ftrace:
+ * arecord on "Capture_1" drives memif VUL9 at reg_ofs_base 0x4f14). The block
+ * layout and the CON0 field positions are identical to the MT8196-generation
+ * sibling (sound/soc/mediatek/mt8196/, AFE_VUL9_* == these offsets exactly):
+ *   BASE_MSB = 0x4d60 + n*0x30
+ *   BASE     = 0x4d64 + n*0x30
+ *   CUR_MSB  = 0x4d68 + n*0x30
+ *   CUR      = 0x4d6c + n*0x30
+ *   END_MSB  = 0x4d70 + n*0x30
+ *   END      = 0x4d74 + n*0x30
+ *   CON0     = 0x4d80 + n*0x30   (ON bit28, fs[12:8], mono bit4, hd[1:0])
+ * Only VUL9 (the primary ADDA capture interface) is wired up so far.
+ */
+#define AFE_VUL_BLOCK_STRIDE		0x30
+#define AFE_VUL_BASE_MSB(n)		(0x4d60 + (n) * AFE_VUL_BLOCK_STRIDE)
+#define AFE_VUL_BASE(n)			(0x4d64 + (n) * AFE_VUL_BLOCK_STRIDE)
+#define AFE_VUL_CUR_MSB(n)		(0x4d68 + (n) * AFE_VUL_BLOCK_STRIDE)
+#define AFE_VUL_CUR(n)			(0x4d6c + (n) * AFE_VUL_BLOCK_STRIDE)
+#define AFE_VUL_END_MSB(n)		(0x4d70 + (n) * AFE_VUL_BLOCK_STRIDE)
+#define AFE_VUL_END(n)			(0x4d74 + (n) * AFE_VUL_BLOCK_STRIDE)
+#define AFE_VUL_CON0(n)			(0x4d80 + (n) * AFE_VUL_BLOCK_STRIDE)
+
+/* VUL9 - the primary uplink memif (name "VUL9", reg_ofs_base 0x4f14). */
+#define AFE_VUL9_BASE_MSB		AFE_VUL_BASE_MSB(9)
+#define AFE_VUL9_BASE			AFE_VUL_BASE(9)
+#define AFE_VUL9_CUR_MSB		AFE_VUL_CUR_MSB(9)
+#define AFE_VUL9_CUR			AFE_VUL_CUR(9)
+#define AFE_VUL9_END_MSB		AFE_VUL_END_MSB(9)
+#define AFE_VUL9_END			AFE_VUL_END(9)
+#define AFE_VUL9_CON0			AFE_VUL_CON0(9)
+
+#define AFE_VUL_CON0_ON_SHIFT		28
+#define AFE_VUL_CON0_FS_SHIFT		8
+#define AFE_VUL_CON0_FS_MASK		0x1f
+#define AFE_VUL_CON0_MONO_SHIFT		4
+#define AFE_VUL_CON0_HD_SHIFT		0	/* HD_MODE[1:0] */
+#define AFE_VUL_CON0_HALIGN_SHIFT	2
+
 /* ---- Connection matrix (interconnect) ---- */
 /*
  * Each output port O_xx has an AFE_CONN register whose bits select the input
@@ -103,6 +147,20 @@
 #define I_DL0_CH1			0
 #define I_DL0_CH2			1
 
+/*
+ * Uplink interconnect: the VUL9 capture memif input ports O_VUL9_CH1/CH2 are
+ * fed from the ADDA uplink input ports I_ADDA_UL_CH1/CH2 (bits 16/17). The
+ * VUL9 memif reads from interconnect output ports 36/37, i.e. the CONN036/037
+ * registers at 0x2500/0x2520 (matches the MT8196 generation: memif_ul9 uses
+ * AFE_CONN036_0/AFE_CONN037_0). The stock capture ftrace also writes the
+ * CONN020/021 pair at 0x2300/0x2320, but those feed a different memif; VUL9
+ * itself only picks up data from 0x2500/0x2520.
+ */
+#define AFE_CONN_VUL9_CH1		0x2500
+#define AFE_CONN_VUL9_CH2		0x2520
+#define I_ADDA_UL_CH1			16
+#define I_ADDA_UL_CH2			17
+
 /* ---- ADDA (internal PMIC-codec link) downlink / uplink ---- */
 #define AFE_ADDA_DL_SRC2_CON0		0x04d0	/* rate<<24 | 0xc1800 | enable(bit1) */
 #define AFE_ADDA_DL_SRC2_CON1		0x04d4
@@ -114,9 +172,33 @@
 #define AFE_ADDA_DL_SRC2_CON0_SRC_ON_SFT	1	/* DL SRC enable bit */
 #define AFE_ADDA_UL_DL_CON0_ADDA_AFE_ON	BIT(28)
 #define AFE_ADDA_UL_DL_CON0_ADDA_AFE_ON_SFT	28
+/* The uplink shares AFE_ADDA_UL_DL_CON0: bit30 is the UL-side AFE-on, and
+ * bits[14:12] (0x7) are the UL analog-interface config (RE from the stock
+ * capture ftrace: 0x4ec = 0x4000701d = BIT(30) | 0x7000 | clk 0x1d).
+ */
+#define AFE_ADDA_UL_DL_CON0_ADDA_UL_AFE_ON	BIT(30)
+#define AFE_ADDA_UL_DL_CON0_UL_CFG		0x7000
 
 /* ADDA DL_SRC2_CON0 48 kHz output-rate word (rate field already positioned). */
 #define AFE_ADDA_DL_SRC2_48K		0x0a0c1800
+
+/* ---- ADDA uplink (capture) SRC ---- */
+/*
+ * The uplink anti-aliasing SRC. RE from the stock capture ftrace: the rate
+ * word 0x60400 selects 48 kHz (bit0 is the SRC enable), and the fixed
+ * coefficient/voice-mode words below are written verbatim before enable.
+ */
+#define AFE_ADDA_UL_SRC_CON0		0x0bd0	/* rate word | enable(bit0) */
+#define AFE_ADDA_UL_SRC_CON1		0x0bd4	/* UL SRC gain (0x7fff = 0 dB) */
+#define AFE_ADDA_UL_SRC2_CON1		0x0c54	/* parallel UL SRC gain */
+#define AFE_ADDA_UL_SRC_CON1_VAL	0x7fff0412
+#define AFE_ADDA_UL_SRC_VOICE_MODE_CFG1	0x0bec
+#define AFE_ADDA_UL_SRC_VOICE_MODE_CFG2	0x0bf0
+#define AFE_ADDA_UL_SRC_VOICE_MODE_CFG3	0x0bf4
+#define AFE_ADDA_UL_SRC_VOICE_MODE_CFG4	0x0bf8
+#define AFE_ADDA_UL_SRC_VOICE_MODE_CFG5	0x0bfc
+#define AFE_ADDA_UL_SRC_CON0_SRC_ON_SFT	0	/* UL SRC enable bit */
+#define AFE_ADDA_UL_SRC_48K		0x00060400
 
 /* ---- MTKAIF RX pad-top control (uplink side) ---- */
 #define AFE_ADDA_MTKAIF_RX_CFG0		0x1204
@@ -127,5 +209,26 @@
 #define AFE_MTKAIF0_RX_CFG2		0x11a0
 #define AFE_MTKAIF1_CFG0		0x11f0
 #define AFE_MTKAIF1_RX_CFG2		0x1200
+
+/*
+ * MTKAIF enable values for the uplink link, RE from the stock capture ftrace:
+ * CFG0 0x10000 -> 0x80010000 (RX-enable bit31 set on top of the config).
+ */
+#define AFE_MTKAIF_CFG0_EN		0x80010000
+#define AFE_MTKAIF_CFG0_CFG		0x00010000
+#define AFE_ADDA_MTKAIF_RX_CFG0_UL	0x000000b9
+
+/*
+ * MTKAIF RX_CFG2 (one per MISO data line: MTKAIF0 = MISO0, MTKAIF1 = MISO1).
+ * The base word holds the fixed sync-word config (SYNC_WORD0=3, SYNC_WORD1=6);
+ * the per-line receive sampling delay is programmed on top of it from the
+ * calibration result. Field layout matches the MT8196 generation:
+ *   RXIF_DELAY_CYCLE = bits [15:12], RXIF_DELAY_DATA = bit 8.
+ * The line that locks at the lower phase is delayed by the phase difference so
+ * both MISO lines are sampled together (mirrors mt8195 mtkaif_rx_dcc_sync).
+ */
+#define AFE_MTKAIF_RX_CFG2_BASE		0x06300000
+#define AFE_MTKAIF_RXIF_DELAY_DATA	BIT(8)
+#define AFE_MTKAIF_RXIF_DELAY_CYCLE_SFT	12
 
 #endif /* _MT6878_REG_H_ */

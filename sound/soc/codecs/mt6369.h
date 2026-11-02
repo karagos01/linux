@@ -56,14 +56,35 @@
 #define MT6369_AFE_MTKAIF_CFG1		0x23bd
 #define MT6369_AFE_MTKAIF_RX		0x23d3
 
+/* MTKAIF RX phase calibration: bit7 = cal enable, bits[6:0] = phase. */
+#define MT6369_MTKAIF_CAL_CON		0x230c
+#define MT6369_MTKAIF_RXIF_PHASE0	0x23d0
+#define MT6369_MTKAIF_RXIF_PHASE1	0x23d1
+#define MT6369_MTKAIF_RXIF_PHASE2	0x23d2
+
 /* Audio top clock gating (RE: bits 2 and 5 cleared at init) */
 #define MT6369_AUD_TOP_CKPDN_CON0	0x23d7
 
 /* Audio microphone bias / encoder digital config (init only for now) */
-#define MT6369_AUDENC_ANA_CON16		0x2508
-#define MT6369_AUDENC_ANA_CON18		0x250a
+#define MT6369_AUDENC_ANA_CON16		0x2508	/* PGA L (mic preamp) */
+#define MT6369_AUDENC_ANA_CON17		0x2509	/* ADC L */
+#define MT6369_AUDENC_ANA_CON18		0x250a	/* PGA R (mic preamp) */
+#define MT6369_AUDENC_ANA_CON19		0x250b	/* ADC R */
 #define MT6369_AUDENC_ANA_CON27		0x2514
 #define MT6369_AUDENC_ANA_CON38		0x251f
+
+/*
+ * Uplink (capture) path registers, RE from the stock capture ftrace:
+ * the analog mic preamp + ADC above, the MIC bias, and the AFE uplink SRC
+ * digital block that feeds the MTKAIF TX link back to the SoC AFE.
+ */
+#define MT6369_AUDENC_MICBIAS0		0x2519	/* MIC bias 0 enable */
+#define MT6369_AUDENC_MICBIAS1		0x251a	/* MIC bias 1 enable */
+#define MT6369_AFE_UL_SRC_CON0		0x2388	/* UL SRC enable */
+#define MT6369_AFE_UL_SRC_CON3		0x238b	/* UL SRC latch pulse */
+#define MT6369_AFE_UL_SRC_CON7		0x238f	/* UL SRC datapath reset */
+#define MT6369_AUD_TOP_CKSEL		0x00d1	/* audio top clock select */
+#define MT6369_AUD_TOP_CKPDN		0x00d2	/* audio top clock power-down */
 
 /*
  * Negative charge pump / clock divider for the class-AB output amplifiers.
@@ -86,6 +107,8 @@
 #define MT6369_AUDDEC_ANA_CON3		MT6369_AUDDEC_ANA_CON(3)	/* 0x258b HP gain ramp */
 #define MT6369_AUDDEC_ANA_CON4		MT6369_AUDDEC_ANA_CON(4)	/* 0x258c */
 #define MT6369_AUDDEC_ANA_CON5		MT6369_AUDDEC_ANA_CON(5)	/* 0x258d AUDDEC enable */
+#define MT6369_AUDDEC_ANA_CON6		MT6369_AUDDEC_ANA_CON(6)	/* 0x258e */
+#define MT6369_AUDDEC_ANA_CON7		MT6369_AUDDEC_ANA_CON(7)	/* 0x258f */
 #define MT6369_AUDDEC_ANA_CON8		MT6369_AUDDEC_ANA_CON(8)	/* 0x2590 */
 #define MT6369_AUDDEC_ANA_CON10		MT6369_AUDDEC_ANA_CON(10)	/* 0x2592 receiver/DACL */
 #define MT6369_AUDDEC_ANA_CON12		MT6369_AUDDEC_ANA_CON(12)	/* 0x2594 HP DAC */
@@ -113,12 +136,19 @@
 
 /* Low-power idle value for the HP/receiver gain registers. */
 #define MT6369_HPGAIN_IDLE		0x1f
-#define MT6369_RCV_GAIN			0x0	/* 0 dB playback gain */
+#define MT6369_RCV_GAIN			0x12	/* receiver playback gain (stock) */
 
 /* VAUD28 audio analog supply LDO (bit 0 = enable). */
 #define MT6369_RG_LDO_VAUD28_EN		0x1c31
 
 /* HP DC-offset trim calibration value lives in the PMIC efuse. */
 #define MT6369_HP_EFUSE_OFFSET		0x9e
+
+/* MTKAIF RX calibration helpers, called by the machine driver at card init. */
+struct snd_soc_component;
+void mt6369_mtkaif_calibration_enable(struct snd_soc_component *cmpnt);
+void mt6369_mtkaif_calibration_disable(struct snd_soc_component *cmpnt);
+void mt6369_set_mtkaif_calibration_phase(struct snd_soc_component *cmpnt,
+					 int phase_1, int phase_2, int phase_3);
 
 #endif /* __MT6369_H__ */
