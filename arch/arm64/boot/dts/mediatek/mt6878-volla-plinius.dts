@@ -685,6 +685,32 @@
 				regulator-max-microvolt = <1800000>;
 				regulator-always-on;
 			};
+
+			/*
+			 * 1.8 V I/O and 1.2 V analog rails, always on in stock.
+			 * VIO18 powers the PMIC/MTKAIF I/O that carries the serial
+			 * audio link between the SoC AFE and the MT6369 codec.
+			 */
+			vio18 {
+				regulator-name = "mt6363_vio18";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+			};
+
+			va12-1 {
+				regulator-name = "mt6363_va12_1";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-always-on;
+			};
+
+			va12-2 {
+				regulator-name = "mt6363_va12_2";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-always-on;
+			};
 		};
 	};
 
