@@ -29,10 +29,22 @@
 #define MT6685_RCS_IRQ_DONE		0x41b	/* release the SPMI RCS flag */
 #define MT6685_NR_INT			8
 
-/* Audio DCXO buffer: bit 2 enables it, bits [1:0] select the output mode. */
+/*
+ * Audio 26 MHz DCXO external buffer (DCXO_EXTBUF5_CW0). Bit layout:
+ *   [1:0] BBCK5_MODE, [2] BBCK5_EN_M (manual enable),
+ *   [5:3] EXTBUF_BBCK5_RSEL (output resistor select),
+ *   [7:6] EXTBUF_BBCK5_HD   (drive strength).
+ * Enabling bit 2 alone is not enough: the buffer only drives a usable clock
+ * with RSEL and HD set. On stock those are programmed by the clkbuf driver
+ * at boot (which mainline does not have), so the register reads 0xbc while
+ * audio plays (MODE=0, EN=1, RSEL=7, HD=2). Program that whole config here
+ * when enabling; on disable clear only EN_M so the drive config is retained.
+ */
 #define MT6685_DCXO_CW00		0x79e
 #define MT6685_DCXO_AUD_ENABLE		BIT(2)
 #define MT6685_DCXO_MODE_MASK		GENMASK(1, 0)
+#define MT6685_DCXO_AUD_CFG_MASK	GENMASK(7, 2)	/* EN_M | RSEL | HD */
+#define MT6685_DCXO_AUD_CFG_ON		0xbc		/* EN=1, RSEL=7, HD=2 */
 
 static const struct regmap_config mt6685_regmap_config = {
 	.reg_bits	= 16,
@@ -171,7 +183,8 @@ void mt6685_set_dcxo(bool enable)
 
 	if (enable) {
 		regmap_update_bits(mt6685_regmap, MT6685_DCXO_CW00,
-				   MT6685_DCXO_AUD_ENABLE, MT6685_DCXO_AUD_ENABLE);
+				   MT6685_DCXO_AUD_CFG_MASK,
+				   MT6685_DCXO_AUD_CFG_ON);
 		usleep_range(400, 420);
 	} else {
 		regmap_update_bits(mt6685_regmap, MT6685_DCXO_CW00,
