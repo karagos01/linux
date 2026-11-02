@@ -276,9 +276,15 @@ static int mt_mic_event(struct snd_soc_dapm_widget *w,
 		regmap_write(regmap, MT6369_AUDENC_ANA_CON19, 0x50);
 		/* MTKAIF TX link (protocol 2) */
 		mt6369_mtkaif_tx_enable(regmap);
-		/* latch the UL SRC */
+		/*
+		 * Latch the UL SRC and leave it asserted. Despite the "pulse"
+		 * naming this is a level enable: the stock codec writes CON3=1
+		 * once and holds it for the whole capture (verified by a live
+		 * register dump during a working stock recording, where 0x238b
+		 * reads 0x01). Clearing it back to 0 unlatches the SRC and the
+		 * uplink delivers only zero samples.
+		 */
 		regmap_write(regmap, MT6369_AFE_UL_SRC_CON3, 0x01);
-		regmap_write(regmap, MT6369_AFE_UL_SRC_CON3, 0x00);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		/* MTKAIF TX off */
