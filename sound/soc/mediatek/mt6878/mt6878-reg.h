@@ -90,9 +90,19 @@
 
 #define AFE_DL_CON0_ON_SHIFT		28
 #define AFE_DL_CON0_MONO_SHIFT		4
-#define AFE_DL_CON0_HD_SHIFT		3
 #define AFE_DL_CON0_FS_SHIFT		8
 #define AFE_DL_CON0_FS_MASK		0x1f
+/*
+ * The DL CON0 low bits use the same layout as the VUL (uplink) CON0 and the
+ * MT8196-generation sibling: HD_MODE in bits[1:0], a half-align bit at bit 2,
+ * and NORMAL_MODE at bit 3. NORMAL_MODE comes up set at reset; programming the
+ * HD mode at the wrong bit (3, as this header previously did) cleared it, so
+ * the DL memif ran with NORMAL_MODE=0 and CON0 did not match the running stock
+ * state (0x...a68 with bit 3 set). Point the HD field at bits[1:0] and add the
+ * half-align bit so bit 3 is left alone.
+ */
+#define AFE_DL_CON0_HD_SHIFT		0	/* HD_MODE[1:0] */
+#define AFE_DL_CON0_HALIGN_SHIFT	2
 
 /* ---- DRAM uplink memory interfaces (VUL memif) ---- */
 /*
