@@ -124,6 +124,157 @@ static int mt_rcv_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+/*
+ * Loudspeaker analog output: DACL/DACR -> headphone (HP) output stage in
+ * "LoudSPK" mode (HP main path routed through the lineout driver), which on
+ * this board feeds the external aw87xxx boost amplifiers. Ported from the
+ * stock mt6369 HP/HPSPK enable sequence (charge-pump NCP, cap-less LDOs, HP
+ * aux/main output ramps, then the LO sub-stage) with a fixed conservative
+ * -10 dB analog gain; the full headphone volume/impedance/trim machinery is
+ * omitted since the output only drives an external amplifier.
+ */
+#define MT6369_DL_GAIN_N_10DB	18
+#define MT6369_DL_GAIN_MUTE	0x1f
+
+/* Pull HPL/HPR down to AVSS28_AUD, stepped, to avoid a turn-on pop. */
+static void __maybe_unused mt6369_hp_pull_down(struct regmap *regmap, bool enable)
+{
+	int i;
+
+	if (enable)
+		for (i = 0x0; i <= 0x7; i++) {
+			regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON8, 0x7, i);
+			usleep_range(100, 150);
+		}
+	else
+		for (i = 0x7; i >= 0x0; i--) {
+			regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON8, 0x7, i);
+			usleep_range(100, 150);
+		}
+}
+
+/* Ramp the HPL/HPR main output stage drive strength (CON3). */
+static void __maybe_unused mt6369_hp_main_output_ramp(struct regmap *regmap, bool up)
+{
+	int i, stage;
+
+	for (i = 0; i <= 7; i++) {
+		stage = up ? i : 7 - i;
+		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON3, 0x7, stage);
+		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON3, 0x70,
+				   stage << 4);
+		usleep_range(100, 120);
+	}
+}
+
+/* Ramp the HP aux feedback-loop gain (CON17 bits 4-7). */
+static void __maybe_unused mt6369_hp_aux_fbloop_ramp(struct regmap *regmap, bool up)
+{
+	int i, stage;
+
+	for (i = 0; i <= 0xf; i++) {
+		stage = up ? i : 0xf - i;
+		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON17, 0xf0,
+				   stage << 4);
+		usleep_range(100, 120);
+	}
+}
+
+static void mt6369_spk_enable(struct regmap *regmap)
+{
+	/* Reduce AU_REFN ESD resistance. */
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON5, 0x1, 0x1);
+
+	/* Charge-pump (NCP): on, 604 kHz, toggle, 100us soft-start, enable. */
+	regmap_update_bits(regmap, MT6369_AUDNCP_CLKDIV_CON1, 0x1, 0x1);
+	regmap_write(regmap, MT6369_AUDNCP_CLKDIV_CON2, 0x2c);
+	regmap_update_bits(regmap, MT6369_AUDNCP_CLKDIV_CON0, 0x1, 0x1);
+	regmap_update_bits(regmap, MT6369_AUDNCP_CLKDIV_CON4, 0x3, 0x3);
+	regmap_update_bits(regmap, MT6369_AUDNCP_CLKDIV_CON3, 0x1, 0x0);
+	usleep_range(250, 270);
+
+	/* Cap-less LDOs (1.5 V) and NV regulator (-1.2 V). */
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON26, 0x10, 0x10);
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON25, 0x55);
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON27, 0x1, 0x1);
+	usleep_range(100, 120);
+
+	/* Disable ZCD (ZCD_CON0 == ANA_CON128). */
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON128, 0x0);
+
+	/*
+	 * Lineout (LO) output path, driving the LINEOUT pins directly (this is
+	 * the alternative to the HP/LoudSPK route; the external amp may tap the
+	 * lineout rather than the headphone output). CON12 bit4 disables LO
+	 * short-circuit protection, DR bias 6uA (CON22), LO/ZCD IBIAS (CON23).
+	 */
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON12, 0x10, 0x10);
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON22, 0x7, 0x2);
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON23, 0xc0, 0x40);
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON23, 0x30, 0x10);
+
+	/* LO STB enhance + CMFB/cap-size defaults. */
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON13, 0x1);
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON17, 0x0);
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON18, 0x0);
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON19, 0x0);
+
+	/* Enable LO driver bias then core circuits. */
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON12, 0x12);
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON12, 0x13);
+
+	/* Lineout gain (ZCD_CON1/2 == ANA_CON129/130). Match the stock speaker
+	 * playback state captured from the live mt6369: L = 0x09, R = 0x00. */
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON129, 0x09);
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON130, 0x00);
+
+	/* Decoder clock, audio DAC R, low-noise mode. */
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON24, 0x1, 0x1);
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON0, 0x6, 0x6);
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON16, 0x1);
+	usleep_range(100, 120);
+
+	/* Switch the LOL mux to DAC R (CON12 bits[3:2] = 1). */
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON12, 0xc, 0x4);
+}
+
+static void mt6369_spk_disable(struct regmap *regmap)
+{
+	/* LOL mux open, DAC R off, decoder clock off. */
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON12, 0xc, 0x0);
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON0, 0x6, 0x0);
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON24, 0x1, 0x0);
+
+	/* Mute LO gain, then power down the LO driver core and bias. */
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON129, MT6369_DL_GAIN_MUTE);
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON130, MT6369_DL_GAIN_MUTE);
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON12, 0x1, 0x0);
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON12, 0x2, 0x0);
+
+	/* Disable ZCD, restore AU_REFN ESD resistance. */
+	regmap_write(regmap, MT6369_AUDDEC_ANA_CON128, 0x0);
+	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON5, 0x1, 0x0);
+}
+
+/* Loudspeaker (HP/LO) analog output driver. */
+static int mt_spk_event(struct snd_soc_dapm_widget *w,
+			struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		mt6369_spk_enable(priv->regmap);
+		break;
+	case SND_SOC_DAPM_PRE_PMD:
+		mt6369_spk_disable(priv->regmap);
+		break;
+	}
+
+	return 0;
+}
+
 /* Configure the MTKAIF downlink GPIO pins. From mt6369_set_playback_gpio(). */
 static void mt6369_set_playback_gpio(struct mt6369_priv *priv)
 {
@@ -448,6 +599,14 @@ static int mt6369_codec_probe(struct snd_soc_component *cmpnt)
 	return 0;
 }
 
+/*
+ * Virtual switch to select the loudspeaker output. Off by default so ordinary
+ * downlink playback still drives only the receiver; userspace enables it to
+ * route the downlink to the HP/LO speaker stage and the external amplifier.
+ */
+static const struct snd_kcontrol_new mt6369_spk_switch =
+	SOC_DAPM_SINGLE_VIRT("Switch", 1);
+
 static const struct snd_soc_dapm_widget mt6369_dapm_widgets[] = {
 	/* Digital downlink from the AFE over the MTKAIF serial link. */
 	SND_SOC_DAPM_AIF_IN("AIF_RX", "mt6369-snd-codec-aif1 Playback", 0,
@@ -463,11 +622,26 @@ static const struct snd_soc_dapm_widget mt6369_dapm_widgets[] = {
 
 	SND_SOC_DAPM_DAC("DACL", NULL, SND_SOC_NOPM, 0, 0),
 
-	/* Analog earpiece (receiver) output. */
+	/*
+	 * Analog earpiece (receiver) output. Powered whenever the downlink DAC
+	 * runs: it brings up the shared output-stage bias/input the loudspeaker
+	 * LO path also depends on, so stock keeps the receiver active during
+	 * loudspeaker playback too (do NOT gate it off against the speaker).
+	 */
 	SND_SOC_DAPM_OUT_DRV_E("RCV", SND_SOC_NOPM, 0, 0, NULL, 0, mt_rcv_event,
 			       SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_PRE_PMD),
 
 	SND_SOC_DAPM_OUTPUT("Receiver"),
+
+	/* Analog loudspeaker output (HP/LO stage) feeding the external amp. */
+	SND_SOC_DAPM_SWITCH("Speaker Switch", SND_SOC_NOPM, 0, 0,
+			    &mt6369_spk_switch),
+
+	SND_SOC_DAPM_OUT_DRV_E("HP Spk", SND_SOC_NOPM, 0, 0, NULL, 0,
+			       mt_spk_event,
+			       SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_PRE_PMD),
+
+	SND_SOC_DAPM_OUTPUT("Speaker"),
 
 	/* Digital uplink (microphone) to the AFE over the MTKAIF serial link. */
 	SND_SOC_DAPM_AIF_OUT("AIF_TX", "mt6369-snd-codec-aif1 Capture", 0,
@@ -487,6 +661,10 @@ static const struct snd_soc_dapm_route mt6369_dapm_routes[] = {
 	{"DACL", NULL, "DCXO"},
 	{"RCV", NULL, "DACL"},
 	{"Receiver", NULL, "RCV"},
+
+	{"Speaker Switch", "Switch", "DACL"},
+	{"HP Spk", NULL, "Speaker Switch"},
+	{"Speaker", NULL, "HP Spk"},
 
 	/* capture: mic -> ADC -> MTKAIF TX -> AFE */
 	{"Mic ADC", NULL, "AIN0"},
