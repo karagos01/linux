@@ -55,6 +55,7 @@ config SND_SOC_ALL_CODECS
 	imply SND_SOC_AUDIO_IIO_AUX
 	imply SND_SOC_AW8738
 	imply SND_SOC_AW87390
+	imply SND_SOC_AW87565
 	imply SND_SOC_AW88395
 	imply SND_SOC_AW88081
 	imply SND_SOC_AW88166
@@ -212,6 +213,7 @@ config SND_SOC_ALL_CODECS
 	imply SND_SOC_RT1019
 	imply SND_SOC_RT1305
 	imply SND_SOC_RT1308
+	imply SND_SOC_RT5512
 	imply SND_SOC_RT5514
 	imply SND_SOC_RT5575
 	imply SND_SOC_RT5616
@@ -714,6 +716,15 @@ config SND_SOC_AW88081
 	  The awinic AW88081 is an I2S/TDM input, high efficiency
 	  digital Smart K audio amplifier. Due to its 9uV noise
 	  floor and ultra-low distortion, clean listening is guaranteed.
+
+config SND_SOC_AW87565
+	tristate "Soc Audio for awinic aw87565"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  The awinic aw87565 is a boosted audio power amplifier that takes
+	  the codec's analog output and drives the loudspeaker. Enable this
+	  to bring the amplifier up from its stock register profile.
 
 config SND_SOC_AW87390
 	tristate "Soc Audio for awinic aw87390"
@@ -1820,6 +1831,11 @@ config SND_SOC_RT1320_SDW
 	depends on SOUNDWIRE
 	select REGMAP_SOUNDWIRE
 	select REGMAP_SOUNDWIRE_MBQ
+
+config SND_SOC_RT5512
+	tristate "Richtek RT5512 Speaker Amplifier"
+	depends on I2C
+	select REGMAP_I2C
 
 config SND_SOC_RT5514
 	tristate
