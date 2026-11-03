@@ -185,6 +185,7 @@
 #define TOP_MUX_APXGPT_26M_SHIFT		18
 
 /* DIVIDER REG */
+#define CLK_AUDDIV_2				0x0328
 #define CLK_AUDDIV_5				0x033C
 
 /* HW Voter REG */
@@ -1746,6 +1747,17 @@ static const struct mtk_composite top_aud_divs[] = {
 		"apll_td_m_sel"/* parent */, 0x0320/* pdn ofs */,
 		13/* pdn bit */, CLK_AUDDIV_5/* ofs */, 8/* width */,
 		8/* lsb */),
+	/*
+	 * I2SIN1 master-clock divider: the audio front-end feeds the external
+	 * I2S/ETDM port (ETDM_OUT4, used by the speaker smart-amp) from this
+	 * divider. The register layout matches the MT8196 sibling's
+	 * apll_i2sin1_m (divider in CLK_AUDDIV_2[15:8], gate in CLK_AUDDIV_0
+	 * bit 1); the mux half is apll_SI1_m_sel above.
+	 */
+	DIV_GATE(CLK_TOP_APLL12_DIV_SI1/* dts */, "apll12_div_i2sin1"/* ccf */,
+		"apll_SI1_m_sel"/* parent */, 0x0320/* pdn ofs */,
+		1/* pdn bit */, CLK_AUDDIV_2/* ofs */, 8/* width */,
+		8/* lsb */),
 };
 
 static const struct mtk_clk_desc topck_desc = {
@@ -1753,8 +1765,8 @@ static const struct mtk_clk_desc topck_desc = {
 	.num_factor_clks = ARRAY_SIZE(top_divs),
 	.mux_clks = top_muxes,
 	.num_mux_clks = ARRAY_SIZE(top_muxes),
-	//.composite_clks = top_aud_divs,
-	//.num_composite_clks = ARRAY_SIZE(top_aud_divs)
+	.composite_clks = top_aud_divs,
+	.num_composite_clks = ARRAY_SIZE(top_aud_divs),
 };
 
 static const struct of_device_id of_match_clk_mt6878_ck[] = {

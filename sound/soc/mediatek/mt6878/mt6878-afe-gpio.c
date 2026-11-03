@@ -20,6 +20,8 @@ enum mt6878_afe_gpio {
 	MT6878_AFE_GPIO_DAT_MISO0_ON,
 	MT6878_AFE_GPIO_DAT_MISO1_OFF,
 	MT6878_AFE_GPIO_DAT_MISO1_ON,
+	MT6878_AFE_GPIO_I2S_OUT4_OFF,
+	MT6878_AFE_GPIO_I2S_OUT4_ON,
 	MT6878_AFE_GPIO_GPIO_NUM
 };
 
@@ -38,6 +40,8 @@ static struct audio_gpio_attr aud_gpios[MT6878_AFE_GPIO_GPIO_NUM] = {
 	[MT6878_AFE_GPIO_DAT_MISO0_ON] = {"aud_dat_miso0_on", false, NULL},
 	[MT6878_AFE_GPIO_DAT_MISO1_OFF] = {"aud_dat_miso1_off", false, NULL},
 	[MT6878_AFE_GPIO_DAT_MISO1_ON] = {"aud_dat_miso1_on", false, NULL},
+	[MT6878_AFE_GPIO_I2S_OUT4_OFF] = {"aud_gpio_i2s_out4_off", false, NULL},
+	[MT6878_AFE_GPIO_I2S_OUT4_ON] = {"aud_gpio_i2s_out4_on", false, NULL},
 };
 
 static DEFINE_MUTEX(gpio_request_mutex);
@@ -126,6 +130,21 @@ static int mt6878_afe_gpio_adda_ul(struct mtk_base_afe *afe, bool enable)
 	return mt6878_afe_gpio_select(afe, MT6878_AFE_GPIO_DAT_MISO1_OFF);
 }
 
+/*
+ * ETDM_OUT4 drives the external speaker I2S. A single pinctrl state muxes the
+ * output data pin together with the shared I2S4 clock/word-select pad (named
+ * i2sin4 by the pin table) so the SoC can master the bus; the clock and data
+ * pads must switch in one state, as a second pinctrl_select_state() would
+ * release the first.
+ */
+static int mt6878_afe_gpio_i2s_out4(struct mtk_base_afe *afe, bool enable)
+{
+	if (enable)
+		return mt6878_afe_gpio_select(afe, MT6878_AFE_GPIO_I2S_OUT4_ON);
+
+	return mt6878_afe_gpio_select(afe, MT6878_AFE_GPIO_I2S_OUT4_OFF);
+}
+
 int mt6878_afe_gpio_request(struct mtk_base_afe *afe, bool enable,
 			    int dai, int uplink)
 {
@@ -136,6 +155,9 @@ int mt6878_afe_gpio_request(struct mtk_base_afe *afe, bool enable,
 			mt6878_afe_gpio_adda_ul(afe, enable);
 		else
 			mt6878_afe_gpio_adda_dl(afe, enable);
+		break;
+	case MT6878_DAI_I2S_OUT4:
+		mt6878_afe_gpio_i2s_out4(afe, enable);
 		break;
 	default:
 		dev_warn(afe->dev, "%s(), invalid dai %d\n", __func__, dai);

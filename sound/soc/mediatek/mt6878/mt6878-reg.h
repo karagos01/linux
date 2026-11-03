@@ -241,4 +241,95 @@
 #define AFE_MTKAIF_RXIF_DELAY_DATA	BIT(8)
 #define AFE_MTKAIF_RXIF_DELAY_CYCLE_SFT	12
 
+/* ---- ETDM_OUT4 / I2S4 (external I2S to the speaker smart-amp) ---- */
+/*
+ * The ETDM_OUT4 block drives the SoC-side I2S port that feeds the external
+ * speaker smart-amp. Offsets and the CON0/CON1/CON2/CON4 field layout follow
+ * the MT8196-generation sibling (sound/soc/mediatek/mt8196/): ETDM_OUT4 is a
+ * 0x20-byte block based at 0x1580, and all OUT instances share the OUT_REG_*
+ * field positions below. These are confirmed against the stock
+ * snd-soc-mt6878-afe.ko register dump (mt6878_debug_read_reg logs
+ * ETDM_OUT4_CON0..CON8/MON) and verified empirically before enable.
+ */
+#define ETDM_OUT4_CON0			0x1580
+#define ETDM_OUT4_CON1			0x1584
+#define ETDM_OUT4_CON2			0x1588
+#define ETDM_OUT4_CON4			0x1590
+#define ETDM_OUT4_MON			0x15a8
+
+/* ETDM_OUT4_CON0 fields */
+#define ETDM_OUT_CON0_EN_SFT			0
+#define ETDM_OUT_CON0_SYNC_MODE_SFT		1
+#define ETDM_OUT_CON0_FMT_SFT			6	/* mask 0x7, 0 = I2S */
+#define ETDM_OUT_CON0_FMT_MASK			0x7
+#define ETDM_OUT_CON0_BIT_LENGTH_SFT		11	/* mask 0x1f, valid bits-1 */
+#define ETDM_OUT_CON0_BIT_LENGTH_MASK		0x1f
+#define ETDM_OUT_CON0_WORD_LENGTH_SFT		16	/* mask 0x1f, slot bits-1 */
+#define ETDM_OUT_CON0_WORD_LENGTH_MASK		0x1f
+#define ETDM_OUT_CON0_CH_NUM_SFT		23	/* mask 0x1f, channels-1 */
+#define ETDM_OUT_CON0_CH_NUM_MASK		0x1f
+#define ETDM_OUT_CON0_RELATCH_DOMAIN_SFT	28	/* mask 0x7, 1 = APLL */
+#define ETDM_OUT_CON0_RELATCH_DOMAIN_MASK	0x7
+
+/* ETDM_OUT4_CON1 fields */
+#define ETDM_OUT_CON1_INITIAL_COUNT_SFT		0	/* mask 0x1f */
+#define ETDM_OUT_CON1_INITIAL_COUNT_MASK	0x1f
+#define ETDM_OUT_CON1_INITIAL_POINT_SFT		5	/* mask 0x1f */
+#define ETDM_OUT_CON1_INITIAL_POINT_MASK	0x1f
+#define ETDM_OUT_CON1_LRCK_RESET_SFT		15	/* mask 0x1 */
+
+/* ETDM_OUT4_CON2 fields */
+#define ETDM_OUT_CON2_IN2LATCH_TIME_SFT		0	/* mask 0x1f */
+#define ETDM_OUT_CON2_IN2LATCH_TIME_MASK	0x1f
+
+/* ETDM_OUT4_CON4 fields */
+#define ETDM_OUT_CON4_FS_TIMING_SFT		0	/* mask 0x1f, rate code */
+#define ETDM_OUT_CON4_FS_TIMING_MASK		0x1f
+#define ETDM_OUT_CON4_CLOCK_SOURCE_SFT		6	/* mask 0x7, 1 = APLL */
+#define ETDM_OUT_CON4_CLOCK_SOURCE_MASK		0x7
+#define ETDM_OUT_CON4_RELATCH_EN_SFT		24	/* mask 0x1f, inconn code */
+#define ETDM_OUT_CON4_RELATCH_EN_MASK		0x1f
+
+/* ETDM 48 kHz constants (RE from mt8196 get_etdm_rate/get_etdm_inconn_rate) */
+#define ETDM_RATE_48K			0x5	/* FS_TIMING_SEL @48k */
+#define ETDM_CONN_48K			0xa	/* RELATCH_EN_SEL @48k */
+#define ETDM_CLK_SOURCE_APLL		0x1
+#define ETDM_RELATCH_SEL_APLL		0x1
+
+/*
+ * ETDM_4_7_COWORK_CON0 selects the data/sync/slave sources shared by ETDM
+ * 4..7. For a stand-alone ETDM_OUT4 master only SLAVE_SEL is written (= 0,
+ * ETDMIN4 is its own master).
+ */
+#define ETDM_4_7_COWORK_CON0		0x1690
+#define ETDM_OUT4_SLAVE_SEL_SFT		8
+#define ETDM_OUT4_SLAVE_SEL_MASK	0xf
+
+/*
+ * I2S4 pad-top control (shared VLP register): enable the pad clock and park
+ * the output BCK latch edge. ETDM_OUT4 is the only OUT that uses the pad-top.
+ */
+#define AUD_TOP_CFG_VLP_RG		0x0098
+#define RG_I2S4_PAD_TOP_CK_EN_SFT		5
+#define RG_I2S4_OUT_BCK_NEG_EG_LATCH_SFT	20
+
+/*
+ * ETDM sub-block clock gates live in AUDIO_TOP_CON2 (PDN bits: 1 = gated).
+ * ETDM_OUT4 shares the I2S4 pad with ETDM_IN4, so both gates are ungated.
+ */
+#define AUDIO_TOP_CON2_PDN_ETDM_IN4	BIT(9)
+#define AUDIO_TOP_CON2_PDN_ETDM_OUT4	BIT(17)
+
+/*
+ * Connection matrix: route a downlink memif into the ETDM_OUT4 output ports.
+ * The I2SOUT4 channels are driven by interconnect output ports 116 (CH1) and
+ * 117 (CH2); the DL memifs (global input ports 32..63) land in the "_1"
+ * sub-register with the 32-port offset already folded into the bit position
+ * (DLn_CH1 = bit 2n, DLn_CH2 = bit 2n+1). The speaker FE uses DL1.
+ */
+#define AFE_CONN_I2SOUT4_CH1		0x2f04	/* AFE_CONN116_1 */
+#define AFE_CONN_I2SOUT4_CH2		0x2f24	/* AFE_CONN117_1 */
+#define I_DL1_CH1			2
+#define I_DL1_CH2			3
+
 #endif /* _MT6878_REG_H_ */

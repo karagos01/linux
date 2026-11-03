@@ -73,9 +73,11 @@ enum {
 	MT6878_MEMIF_NUM,
 	/*
 	 * Backend DAIs continue the id space after the memifs (the DAI id is
-	 * used to index dai_priv[]). Only the ADDA downlink is wired up so far.
+	 * used to index dai_priv[]). ADDA is the internal PMIC-codec downlink;
+	 * I2S_OUT4 is the external I2S/ETDM port that feeds the speaker amp.
 	 */
 	MT6878_DAI_ADDA = MT6878_MEMIF_NUM,
+	MT6878_DAI_I2S_OUT4,
 	MT6878_DAI_NUM,
 };
 
@@ -102,6 +104,13 @@ struct mtk_base_afe;
 struct mtk_afe_adda_priv {
 	int dl_rate;
 	int ul_rate;
+};
+
+/* per-I2S/ETDM-DAI private data (dai_priv[]) */
+struct mtk_afe_i2s_priv {
+	int rate;
+	int mclk_rate;
+	int mclk_apll;
 };
 
 /*
@@ -138,5 +147,6 @@ struct mt6878_afe_private {
 };
 
 int mt6878_dai_adda_register(struct mtk_base_afe *afe);
+int mt6878_dai_i2s_register(struct mtk_base_afe *afe);
 
 #endif /* _MT6878_AFE_COMMON_H_ */

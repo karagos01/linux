@@ -536,6 +536,10 @@ static int mt6878_afe_pcm_dev_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	ret = mt6878_dai_i2s_register(afe);
+	if (ret)
+		return ret;
+
 	ret = mt6878_dai_memif_register(afe);
 	if (ret)
 		return ret;
