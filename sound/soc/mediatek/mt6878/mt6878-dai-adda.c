@@ -138,7 +138,9 @@ static int mtk_adda_dl_event(struct snd_soc_dapm_widget *w,
 		mt6878_afe_gpio_request(afe, true, MT6878_DAI_ADDA, 0);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
-		/* let the downlink SRC drain before the pins are released */
+		/* drop the downlink AFE-on, then drain before releasing pins */
+		regmap_update_bits(afe->regmap, AFE_ADDA_UL_DL_CON0,
+				   AFE_ADDA_UL_DL_CON0_ADDA_AFE_ON, 0);
 		usleep_range(125, 150);
 		mt6878_afe_gpio_request(afe, false, MT6878_DAI_ADDA, 0);
 		break;
@@ -161,6 +163,17 @@ static int mtk_adda_mtkaif_event(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
+		/*
+		 * Enable both halves of the MTKAIF serial link so the downlink
+		 * can clock samples to the codec. The uplink path enables this
+		 * too; for a playback-only stream it must be done here or the
+		 * MT6369 never receives the downlink data (silent output).
+		 */
+		regmap_write(afe->regmap, AFE_MTKAIF0_CFG0, AFE_MTKAIF_CFG0_CFG);
+		regmap_write(afe->regmap, AFE_MTKAIF1_CFG0, AFE_MTKAIF_CFG0_CFG);
+		regmap_write(afe->regmap, AFE_MTKAIF0_CFG0, AFE_MTKAIF_CFG0_EN);
+		regmap_write(afe->regmap, AFE_MTKAIF1_CFG0, AFE_MTKAIF_CFG0_EN);
+
 		regmap_write(afe->regmap, AFE_ADDA_MTKAIF_RX_CFG0, MTKAIF_PAD_VAL);
 		break;
 	default:
@@ -387,10 +400,16 @@ static int mtk_dai_adda_hw_params(struct snd_pcm_substream *substream,
 		     BIT(AFE_ADDA_DL_SRC2_CON0_SRC_ON_SFT) | BIT(0));
 	regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON1, 0xf74ff74f);
 
-	/* ADDA analog interface clock; the AFE-on bit is driven by DAPM */
+	/*
+	 * ADDA analog interface clock and downlink AFE-on. The AFE-on bit must
+	 * be set for the ADDA downlink to drive the MTKAIF TX link to the codec;
+	 * without it the SRC runs but no samples reach the MT6369 DAC (silent
+	 * receiver and speaker).
+	 */
 	regmap_update_bits(afe->regmap, AFE_ADDA_UL_DL_CON0, 0x3f, 0x1d);
 	regmap_update_bits(afe->regmap, AFE_ADDA_UL_DL_CON0,
-			   AFE_ADDA_UL_DL_CON0_ADDA_AFE_ON, 0);
+			   AFE_ADDA_UL_DL_CON0_ADDA_AFE_ON,
+			   AFE_ADDA_UL_DL_CON0_ADDA_AFE_ON);
 
 	/* sigma-delta dither */
 	regmap_write(afe->regmap, AFE_ADDA_DL_SDM_DITHER_CON, 0x190000);
