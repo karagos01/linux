@@ -34,6 +34,23 @@ SND_SOC_DAILINK_DEFS(primary_codec,
 	DAILINK_COMP_ARRAY(COMP_EMPTY()));
 
 /*
+ * Parked I2S speaker path (DL1 -> ETDM_OUT4/I2S4 -> dummy): the AFE I2S master
+ * is verified but the Volla Plinius has no I2S smart-amp populated, so the real
+ * speaker is driven through the mt6369 headphone output into the external
+ * aw87xxx amplifiers. These links keep the ETDM back end exercisable with a
+ * dummy codec until that work lands.
+ */
+SND_SOC_DAILINK_DEFS(speaker_playback,
+	DAILINK_COMP_ARRAY(COMP_CPU("DL1")),
+	DAILINK_COMP_ARRAY(COMP_DUMMY()),
+	DAILINK_COMP_ARRAY(COMP_EMPTY()));
+
+SND_SOC_DAILINK_DEFS(i2s_out4,
+	DAILINK_COMP_ARRAY(COMP_CPU("I2SOUT4")),
+	DAILINK_COMP_ARRAY(COMP_DUMMY()),
+	DAILINK_COMP_ARRAY(COMP_EMPTY()));
+
+/*
  * MTKAIF RX phase calibration between the MT6878 AFE and the MT6369 codec.
  * The AFE sends a synchronizer pulse while the codec sweeps its RX delay; the
  * phase at which the measured cycle count first changes is the lock edge.
@@ -175,6 +192,15 @@ static struct snd_soc_dai_link mt6878_mt6369_dai_links[] = {
 		.capture_only = 1,
 		SND_SOC_DAILINK_REG(capture_0),
 	},
+	{
+		.name = "Speaker_Playback",
+		.stream_name = "Speaker_Playback",
+		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
+			    SND_SOC_DPCM_TRIGGER_PRE},
+		.dynamic = 1,
+		.playback_only = 1,
+		SND_SOC_DAILINK_REG(speaker_playback),
+	},
 	/* back end */
 	{
 		.name = "Primary Codec",
@@ -183,6 +209,25 @@ static struct snd_soc_dai_link mt6878_mt6369_dai_links[] = {
 		.init = mt6878_mt6369_init,
 		SND_SOC_DAILINK_REG(primary_codec),
 	},
+	{
+		.name = "I2SOUT4 BE",
+		.no_pcm = 1,
+		.playback_only = 1,
+		.ignore_suspend = 1,
+		SND_SOC_DAILINK_REG(i2s_out4),
+	},
+};
+
+/*
+ * External analog boost amplifiers (aw87565) on the mt6369 loudspeaker output.
+ * They carry no DAI, so they are attached as auxiliary components and wired to
+ * the codec's "Speaker" output pin; each powers up with that output.
+ */
+static struct snd_soc_aux_dev mt6878_mt6369_spk_amps[2];
+
+static const struct snd_soc_dapm_route mt6878_mt6369_spk_routes[] = {
+	{ "Spk L IN", NULL, "Speaker" },
+	{ "Spk R IN", NULL, "Speaker" },
 };
 
 static struct snd_soc_card mt6878_mt6369_card = {
@@ -197,7 +242,7 @@ static int mt6878_mt6369_dev_probe(struct platform_device *pdev)
 	struct snd_soc_card *card = &mt6878_mt6369_card;
 	struct device_node *platform_node, *codec_node;
 	struct snd_soc_dai_link *dai_link;
-	int ret, i;
+	int ret, i, num_amps;
 
 	card->dev = &pdev->dev;
 
@@ -227,8 +272,26 @@ static int mt6878_mt6369_dev_probe(struct platform_device *pdev)
 		dai_link->codecs->of_node = codec_node;
 	}
 
+	/* Attach the external speaker amplifiers, if any, as aux components. */
+	num_amps = of_count_phandle_with_args(pdev->dev.of_node,
+					      "mediatek,speaker-amps", NULL);
+	if (num_amps > (int)ARRAY_SIZE(mt6878_mt6369_spk_amps))
+		num_amps = ARRAY_SIZE(mt6878_mt6369_spk_amps);
+	for (i = 0; i < num_amps; i++)
+		mt6878_mt6369_spk_amps[i].dlc.of_node =
+			of_parse_phandle(pdev->dev.of_node,
+					 "mediatek,speaker-amps", i);
+	if (num_amps > 0) {
+		card->aux_dev = mt6878_mt6369_spk_amps;
+		card->num_aux_devs = num_amps;
+		card->dapm_routes = mt6878_mt6369_spk_routes;
+		card->num_dapm_routes = num_amps;
+	}
+
 	ret = devm_snd_soc_register_card(&pdev->dev, card);
 
+	for (i = 0; i < num_amps; i++)
+		of_node_put(mt6878_mt6369_spk_amps[i].dlc.of_node);
 	of_node_put(codec_node);
 put_platform_node:
 	of_node_put(platform_node);
