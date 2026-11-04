@@ -30,6 +30,8 @@ struct mt6369_priv {
 	struct device *dev;
 	struct regmap *regmap;
 	int hp_cal;		/* HP DC-offset trim from the PMIC efuse */
+	bool ul_active;		/* capture (uplink) stream powered */
+	bool dl_active;		/* playback (downlink) stream powered */
 };
 
 /*
@@ -401,6 +403,7 @@ static int mt_mic_event(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
+		priv->ul_active = true;
 		/* ADC + top audio clock */
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON24, 0x00);
 		regmap_write(regmap, MT6369_AUD_TOP_CKPDN, 0x3f);
@@ -410,15 +413,30 @@ static int mt_mic_event(struct snd_soc_dapm_widget *w,
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x01);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x05);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x25);
-		/* MTKAIF calibration-control idle for normal capture */
-		regmap_write(regmap, MT6369_MTKAIF_CAL_CON, 0x62);
-		regmap_write(regmap, MT6369_MTKAIF_CAL_CON, 0x60);
+		/*
+		 * MTKAIF calibration-control idle for normal capture. During
+		 * full duplex the downlink owns this register and leaves it at
+		 * 0x00 (stock sets 0x60 for capture-only, 0x00 whenever playback
+		 * is co-active), so skip the capture-only value when a playback
+		 * is already running and let the downlink value stand.
+		 */
+		if (!priv->dl_active) {
+			regmap_write(regmap, MT6369_MTKAIF_CAL_CON, 0x62);
+			regmap_write(regmap, MT6369_MTKAIF_CAL_CON, 0x60);
+		}
 		/* MIC bias */
 		regmap_write(regmap, MT6369_AUDENC_MICBIAS0, 0x20);
 		regmap_write(regmap, MT6369_AUDENC_MICBIAS0, 0x21);
-		/* UL SRC datapath reset-release, then SRC on */
+		/*
+		 * Audio-top clock gate (named AFE_UL_SRC_CON7 here, really
+		 * AUDIO_TOP_CON0). 0x40 gates the downlink clock and is correct
+		 * for capture-only; whenever a playback is co-active the downlink
+		 * clock must stay on, so full duplex uses 0x00 (both clocks on),
+		 * matching the stock full-duplex register state.
+		 */
 		regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0xc0);
-		regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0x40);
+		regmap_write(regmap, MT6369_AFE_UL_SRC_CON7,
+			     priv->dl_active ? 0x00 : 0x40);
 		regmap_write(regmap, MT6369_AFE_UL_SRC_CON0, 0x01);
 		/*
 		 * ADC analog bias/reference. The stock codec keeps these two
@@ -453,6 +471,7 @@ static int mt_mic_event(struct snd_soc_dapm_widget *w,
 		regmap_write(regmap, MT6369_AFE_UL_SRC_CON3, 0x01);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
+		priv->ul_active = false;
 		/* MTKAIF TX off */
 		regmap_write(regmap, MT6369_AFE_MTKAIF_RX, 0x10);
 		/* ADC + PGA off */
@@ -460,10 +479,17 @@ static int mt_mic_event(struct snd_soc_dapm_widget *w,
 		regmap_write(regmap, MT6369_AUDENC_ANA_CON19, 0x40);
 		regmap_write(regmap, MT6369_AUDENC_ANA_CON16, 0x40);
 		regmap_write(regmap, MT6369_AUDENC_ANA_CON18, 0xc0);
-		/* UL SRC off + datapath reset */
-		regmap_write(regmap, MT6369_AFE_UL_SRC_CON0, 0x00);
-		regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0xc0);
-		regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0xf5);
+		/*
+		 * UL SRC off + datapath reset. 0x2388 (AFE_UL_DL_CON0 top
+		 * enable) and 0x238f (AUDIO_TOP_CON0 clock gate) are shared with
+		 * the downlink, so only tear them down when no playback is
+		 * co-active; otherwise leave them powered for the downlink.
+		 */
+		if (!priv->dl_active) {
+			regmap_write(regmap, MT6369_AFE_UL_SRC_CON0, 0x00);
+			regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0xc0);
+			regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0xf5);
+		}
 		/* MIC bias off */
 		regmap_write(regmap, MT6369_AUDENC_MICBIAS0, 0x20);
 		regmap_write(regmap, MT6369_AUDENC_MICBIAS0, 0x00);
@@ -708,8 +734,10 @@ static const struct snd_soc_component_driver mt6369_soc_component_driver = {
  * DAPM supply which powers earlier. Captured from a stock earpiece-playback
  * regmap trace.
  */
-static void mt6369_dl_enable(struct regmap *r)
+static void mt6369_dl_enable(struct mt6369_priv *priv)
 {
+	struct regmap *r = priv->regmap;
+
 	/*
 	 * Downlink datapath preamble: re-assert the MTKAIF/audio clock gate and
 	 * pulse the DL datapath reset so it latches against the live MTKAIF link.
@@ -722,10 +750,30 @@ static void mt6369_dl_enable(struct regmap *r)
 	regmap_update_bits(r, MT6369_AUDENC_ANA_CON27, 0x1, 0x1);
 	regmap_write(r, MT6369_MTKAIF_CAL_CON, 0x2);
 	regmap_write(r, MT6369_MTKAIF_CAL_CON, 0x0);
-	regmap_write(r, 0x238f, 0xb0);
-	regmap_write(r, 0x238f, 0x30);
+
+	if (!priv->ul_active) {
+		/* Playback only: reset the datapath and leave 0x238f at 0x30. */
+		regmap_write(r, 0x238f, 0xb0);
+		regmap_write(r, 0x238f, 0x30);
+		regmap_write(r, 0x2388, 0x1);
+		regmap_write(r, 0x2389, 0x1);
+		return;
+	}
+
+	/*
+	 * Full duplex: a capture is already running. 0x238f (AUDIO_TOP_CON0) is
+	 * the shared audio-top clock gate; the capture left it at 0x40 (downlink
+	 * clock gated), which silences playback. Stock runs full duplex with it
+	 * at 0x00 (both clocks on) and MTKAIF_CAL_CON (0x230c) at 0x00, so pulse
+	 * the datapath reset and settle on those shared values, then re-latch the
+	 * uplink SRC that the reset tore down (0x2388 UL/DL on, 0x238b UL latch).
+	 * The downlink SRC (0x2389) and the uplink SRC share this one sequence.
+	 */
+	regmap_write(r, 0x238f, 0x80);
+	regmap_write(r, 0x238f, 0x00);
 	regmap_write(r, 0x2388, 0x1);
 	regmap_write(r, 0x2389, 0x1);
+	regmap_write(r, MT6369_AFE_UL_SRC_CON3, 0x1);
 }
 
 static int mt6369_codec_dai_trigger(struct snd_pcm_substream *substream,
@@ -740,7 +788,18 @@ static int mt6369_codec_dai_trigger(struct snd_pcm_substream *substream,
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
-		mt6369_dl_enable(priv->regmap);
+		priv->dl_active = true;
+		mt6369_dl_enable(priv);
+		break;
+	case SNDRV_PCM_TRIGGER_STOP:
+	case SNDRV_PCM_TRIGGER_SUSPEND:
+	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+		/*
+		 * Clear the downlink marker so a later capture-only stream uses
+		 * the capture-only clock value again. A capture running now is
+		 * unaffected: the shared clock stays on.
+		 */
+		priv->dl_active = false;
 		break;
 	default:
 		break;
