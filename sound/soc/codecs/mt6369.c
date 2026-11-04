@@ -420,11 +420,26 @@ static int mt_mic_event(struct snd_soc_dapm_widget *w,
 		regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0xc0);
 		regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0x40);
 		regmap_write(regmap, MT6369_AFE_UL_SRC_CON0, 0x01);
-		/* mic preamp (PGA) and ADC, both channels */
+		/*
+		 * ADC analog bias/reference. The stock codec keeps these two
+		 * registers resident (they read 0x74/0x07 even when idle); the
+		 * mainline driver never programmed them, which left the ADC
+		 * sampling a disconnected node and the uplink delivering only
+		 * zero samples. Recovered from a stock-vs-mainline register diff
+		 * of a live recording.
+		 */
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON34, 0x74);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON36, 0x07);
+		/*
+		 * mic preamp (PGA) and ADC, both channels. The ADC registers
+		 * carry a static bit2 (0x04) in addition to the power-up bits:
+		 * stock reads 0x54, and clearing bit2 (plain 0x50) leaves the
+		 * converter muted.
+		 */
 		regmap_write(regmap, MT6369_AUDENC_ANA_CON16, 0x41);
 		regmap_write(regmap, MT6369_AUDENC_ANA_CON18, 0xc1);
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON17, 0x50);
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON19, 0x50);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON17, 0x54);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON19, 0x54);
 		/* MTKAIF TX link (protocol 2) */
 		mt6369_mtkaif_tx_enable(regmap);
 		/*

@@ -71,6 +71,8 @@
 #define MT6369_AUDENC_ANA_CON18		0x250a	/* PGA R (mic preamp) */
 #define MT6369_AUDENC_ANA_CON19		0x250b	/* ADC R */
 #define MT6369_AUDENC_ANA_CON27		0x2514
+#define MT6369_AUDENC_ANA_CON34		0x251b	/* ADC bias/reference (static) */
+#define MT6369_AUDENC_ANA_CON36		0x251d	/* ADC bias/reference (static) */
 #define MT6369_AUDENC_ANA_CON38		0x251f
 
 /*
