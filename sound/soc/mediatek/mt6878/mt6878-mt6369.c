@@ -155,7 +155,7 @@ static int mt6878_mt6369_mtkaif_calibration(struct snd_soc_pcm_runtime *rtd)
 	 * playback). Leaving them set keeps the RX interface in calibration
 	 * mode, so clear them here once calibration has finished.
 	 */
-	snd_soc_component_update_bits(cmpnt_codec, MT6369_MTKAIF_CAL_CON,
+	snd_soc_component_update_bits(cmpnt_codec, MT6369_AUD_TOP_CKPDN_CON0,
 				      0x66, 0x00);
 
 	mt6878_afe_gpio_request(afe, false, MT6878_DAI_ADDA, 1);

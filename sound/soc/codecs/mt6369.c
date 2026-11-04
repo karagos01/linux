@@ -283,7 +283,7 @@ static void mt6369_set_playback_gpio(struct mt6369_priv *priv)
 	struct regmap *regmap = priv->regmap;
 	unsigned int val = 0;
 
-	regmap_read(regmap, MT6369_GPIO_MODE0, &val);
+	regmap_read(regmap, MT6369_GPIO_MODE4, &val);
 	if ((val & 0x38) != 0x8) {
 		regmap_write(regmap, MT6369_GPIO_MODE0_CLR, 0x38);
 		regmap_write(regmap, MT6369_GPIO_MODE0_SET, 0x8);
@@ -307,7 +307,7 @@ static int mt_dl_gpio_event(struct snd_soc_dapm_widget *w,
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		regmap_write(priv->regmap, MT6369_GPIO_MODE1_CLR, 0x3f);
-		regmap_update_bits(priv->regmap, MT6369_GPIO_DIR0, 0xc, 0x0);
+		regmap_update_bits(priv->regmap, MT6369_GPIO_DIR1, 0xc, 0x0);
 		break;
 	}
 
@@ -381,10 +381,10 @@ static int mt_dcxo_event(struct snd_soc_dapm_widget *w,
  */
 static void mt6369_mtkaif_tx_enable(struct regmap *regmap)
 {
-	regmap_update_bits(regmap, MT6369_AFE_MTKAIF_CFG0, 0xff, 0x10);
-	regmap_update_bits(regmap, MT6369_AFE_MTKAIF_CFG1, 0xff, 0x02);
-	regmap_update_bits(regmap, MT6369_AFE_MTKAIF_RX, 0xff, 0x12);
-	regmap_update_bits(regmap, MT6369_AFE_MTKAIF_RX, 0xff, 0x13);
+	regmap_update_bits(regmap, MT6369_AFE_ADDA_MTKAIF_CFG0, 0xff, 0x10);
+	regmap_update_bits(regmap, MT6369_AFE_ADDA_MTKAIF_CFG1, 0xff, 0x02);
+	regmap_update_bits(regmap, MT6369_AFE_AUD_PAD_TOP, 0xff, 0x12);
+	regmap_update_bits(regmap, MT6369_AFE_AUD_PAD_TOP, 0xff, 0x13);
 }
 
 /*
@@ -408,7 +408,7 @@ static int mt_mic_event(struct snd_soc_dapm_widget *w,
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON24, 0x00);
 		regmap_write(regmap, MT6369_AUD_TOP_CKPDN, 0x3f);
 		regmap_write(regmap, MT6369_AUD_TOP_CKSEL, 0x09);
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON27, 0x01);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON12, 0x01);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON24, 0x20);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x01);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x05);
@@ -421,23 +421,22 @@ static int mt_mic_event(struct snd_soc_dapm_widget *w,
 		 * is already running and let the downlink value stand.
 		 */
 		if (!priv->dl_active) {
-			regmap_write(regmap, MT6369_MTKAIF_CAL_CON, 0x62);
-			regmap_write(regmap, MT6369_MTKAIF_CAL_CON, 0x60);
+			regmap_write(regmap, MT6369_AUD_TOP_CKPDN_CON0, 0x62);
+			regmap_write(regmap, MT6369_AUD_TOP_CKPDN_CON0, 0x60);
 		}
 		/* MIC bias */
-		regmap_write(regmap, MT6369_AUDENC_MICBIAS0, 0x20);
-		regmap_write(regmap, MT6369_AUDENC_MICBIAS0, 0x21);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON17, 0x20);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON17, 0x21);
 		/*
-		 * Audio-top clock gate (named AFE_UL_SRC_CON7 here, really
-		 * AUDIO_TOP_CON0). 0x40 gates the downlink clock and is correct
-		 * for capture-only; whenever a playback is co-active the downlink
-		 * clock must stay on, so full duplex uses 0x00 (both clocks on),
-		 * matching the stock full-duplex register state.
+		 * Audio-top clock gate. 0x40 gates the downlink clock and is
+		 * correct for capture-only; whenever a playback is co-active the
+		 * downlink clock must stay on, so full duplex uses 0x00 (both
+		 * clocks on), matching the stock full-duplex register state.
 		 */
-		regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0xc0);
-		regmap_write(regmap, MT6369_AFE_UL_SRC_CON7,
+		regmap_write(regmap, MT6369_AUDIO_TOP_CON0, 0xc0);
+		regmap_write(regmap, MT6369_AUDIO_TOP_CON0,
 			     priv->dl_active ? 0x00 : 0x40);
-		regmap_write(regmap, MT6369_AFE_UL_SRC_CON0, 0x01);
+		regmap_write(regmap, MT6369_AFE_UL_DL_CON0, 0x01);
 		/*
 		 * ADC analog bias/reference. The stock codec keeps these two
 		 * registers resident (they read 0x74/0x07 even when idle); the
@@ -446,18 +445,18 @@ static int mt_mic_event(struct snd_soc_dapm_widget *w,
 		 * zero samples. Recovered from a stock-vs-mainline register diff
 		 * of a live recording.
 		 */
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON34, 0x74);
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON36, 0x07);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON19, 0x74);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON21, 0x07);
 		/*
 		 * mic preamp (PGA) and ADC, both channels. The ADC registers
 		 * carry a static bit2 (0x04) in addition to the power-up bits:
 		 * stock reads 0x54, and clearing bit2 (plain 0x50) leaves the
 		 * converter muted.
 		 */
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON16, 0x41);
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON18, 0xc1);
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON17, 0x54);
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON19, 0x54);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON0, 0x41);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON2, 0xc1);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON1, 0x54);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON3, 0x54);
 		/* MTKAIF TX link (protocol 2) */
 		mt6369_mtkaif_tx_enable(regmap);
 		/*
@@ -468,17 +467,17 @@ static int mt_mic_event(struct snd_soc_dapm_widget *w,
 		 * reads 0x01). Clearing it back to 0 unlatches the SRC and the
 		 * uplink delivers only zero samples.
 		 */
-		regmap_write(regmap, MT6369_AFE_UL_SRC_CON3, 0x01);
+		regmap_write(regmap, MT6369_AFE_UL_SRC_CON1, 0x01);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		priv->ul_active = false;
 		/* MTKAIF TX off */
-		regmap_write(regmap, MT6369_AFE_MTKAIF_RX, 0x10);
+		regmap_write(regmap, MT6369_AFE_AUD_PAD_TOP, 0x10);
 		/* ADC + PGA off */
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON17, 0x40);
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON19, 0x40);
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON16, 0x40);
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON18, 0xc0);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON1, 0x40);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON3, 0x40);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON0, 0x40);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON2, 0xc0);
 		/*
 		 * UL SRC off + datapath reset. 0x2388 (AFE_UL_DL_CON0 top
 		 * enable) and 0x238f (AUDIO_TOP_CON0 clock gate) are shared with
@@ -486,20 +485,20 @@ static int mt_mic_event(struct snd_soc_dapm_widget *w,
 		 * co-active; otherwise leave them powered for the downlink.
 		 */
 		if (!priv->dl_active) {
-			regmap_write(regmap, MT6369_AFE_UL_SRC_CON0, 0x00);
-			regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0xc0);
-			regmap_write(regmap, MT6369_AFE_UL_SRC_CON7, 0xf5);
+			regmap_write(regmap, MT6369_AFE_UL_DL_CON0, 0x00);
+			regmap_write(regmap, MT6369_AUDIO_TOP_CON0, 0xc0);
+			regmap_write(regmap, MT6369_AUDIO_TOP_CON0, 0xf5);
 		}
 		/* MIC bias off */
-		regmap_write(regmap, MT6369_AUDENC_MICBIAS0, 0x20);
-		regmap_write(regmap, MT6369_AUDENC_MICBIAS0, 0x00);
-		regmap_write(regmap, MT6369_AUDENC_MICBIAS1, 0x00);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON17, 0x20);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON17, 0x00);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON18, 0x00);
 		/* ADC clock off */
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x21);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x01);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON26, 0x00);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON24, 0x00);
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON27, 0x00);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON12, 0x00);
 		regmap_write(regmap, MT6369_AUD_TOP_CKPDN, 0x3f);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON24, 0x10);
 		break;
@@ -524,11 +523,11 @@ void mt6369_mtkaif_calibration_enable(struct snd_soc_component *cmpnt)
 	mt6369_mtkaif_tx_enable(regmap);
 	mt6685_set_dcxo(true);
 	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON24, 0x10, 0x0);
-	regmap_update_bits(regmap, MT6369_AUDENC_ANA_CON27, 0x1, 0x1);
-	regmap_update_bits(regmap, MT6369_MTKAIF_CAL_CON, 0x66, 0x0);
-	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE1, 0x80, 0x80);
-	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE0, 0x80, 0x80);
-	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE1, 0x80, 0x80);
+	regmap_update_bits(regmap, MT6369_AUDENC_ANA_CON12, 0x1, 0x1);
+	regmap_update_bits(regmap, MT6369_AUD_TOP_CKPDN_CON0, 0x66, 0x0);
+	regmap_update_bits(regmap, MT6369_AUDIO_DIG_CFG1, 0x80, 0x80);
+	regmap_update_bits(regmap, MT6369_AUDIO_DIG_CFG0, 0x80, 0x80);
+	regmap_update_bits(regmap, MT6369_AUDIO_DIG_CFG1, 0x80, 0x80);
 }
 EXPORT_SYMBOL_GPL(mt6369_mtkaif_calibration_enable);
 
@@ -538,9 +537,9 @@ void mt6369_set_mtkaif_calibration_phase(struct snd_soc_component *cmpnt,
 	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
 	struct regmap *regmap = priv->regmap;
 
-	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE0, 0x7f, phase_1);
-	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE1, 0x7f, phase_2);
-	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE2, 0x7f, phase_3);
+	regmap_update_bits(regmap, MT6369_AUDIO_DIG_CFG0, 0x7f, phase_1);
+	regmap_update_bits(regmap, MT6369_AUDIO_DIG_CFG1, 0x7f, phase_2);
+	regmap_update_bits(regmap, MT6369_AUDIO_DIG_CFG2, 0x7f, phase_3);
 }
 EXPORT_SYMBOL_GPL(mt6369_set_mtkaif_calibration_phase);
 
@@ -549,18 +548,18 @@ void mt6369_mtkaif_calibration_disable(struct snd_soc_component *cmpnt)
 	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
 	struct regmap *regmap = priv->regmap;
 
-	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE1, 0x80, 0x0);
-	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE0, 0x80, 0x0);
-	regmap_update_bits(regmap, MT6369_MTKAIF_RXIF_PHASE2, 0x80, 0x0);
-	regmap_update_bits(regmap, MT6369_MTKAIF_CAL_CON, 0x66, 0x66);
-	regmap_update_bits(regmap, MT6369_AUDENC_ANA_CON27, 0x1, 0x0);
+	regmap_update_bits(regmap, MT6369_AUDIO_DIG_CFG1, 0x80, 0x0);
+	regmap_update_bits(regmap, MT6369_AUDIO_DIG_CFG0, 0x80, 0x0);
+	regmap_update_bits(regmap, MT6369_AUDIO_DIG_CFG2, 0x80, 0x0);
+	regmap_update_bits(regmap, MT6369_AUD_TOP_CKPDN_CON0, 0x66, 0x66);
+	regmap_update_bits(regmap, MT6369_AUDENC_ANA_CON12, 0x1, 0x0);
 	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON24, 0x10, 0x10);
 	mt6685_set_dcxo(false);
-	regmap_update_bits(regmap, MT6369_AFE_MTKAIF_RX, 0xff, 0x10);
+	regmap_update_bits(regmap, MT6369_AFE_AUD_PAD_TOP, 0xff, 0x10);
 	regmap_write(regmap, MT6369_GPIO_MODE1_CLR, 0x3f);
-	regmap_update_bits(regmap, MT6369_GPIO_DIR0, 0xc, 0x0);
+	regmap_update_bits(regmap, MT6369_GPIO_DIR1, 0xc, 0x0);
 	regmap_write(regmap, MT6369_GPIO_MODE3_CLR, 0x3f);
-	regmap_update_bits(regmap, MT6369_GPIO_DIR0, 0xc0, 0x0);
+	regmap_update_bits(regmap, MT6369_GPIO_DIR1, 0xc0, 0x0);
 }
 EXPORT_SYMBOL_GPL(mt6369_mtkaif_calibration_disable);
 
@@ -582,18 +581,18 @@ static void mt6369_codec_init_reg(struct mt6369_priv *priv)
 	 * mt6369 regulator driver and should be requested through the regulator
 	 * framework; poke it directly for now so the output stage has power.
 	 */
-	regmap_update_bits(regmap, MT6369_RG_LDO_VAUD28_EN, 0x1, 0x1);
+	regmap_update_bits(regmap, MT6369_LDO_VAUD28_CON0, 0x1, 0x1);
 
-	regmap_update_bits(regmap, MT6369_AUDENC_ANA_CON27, 0x2, 0x0);
+	regmap_update_bits(regmap, MT6369_AUDENC_ANA_CON12, 0x2, 0x0);
 	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON1, 0x10, 0x10);
 	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON1, 0x20, 0x20);
 	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON10, 0x10, 0x10);
 	regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON12, 0x10, 0x10);
-	regmap_update_bits(regmap, MT6369_AUDENC_ANA_CON38, 0xf0, 0x20);
+	regmap_update_bits(regmap, MT6369_AUDENC_ANA_CON23, 0xf0, 0x20);
 
 	/* Analog pad drive strength. */
-	regmap_update_bits(regmap, MT6369_SMT_CON1, 0xff, 0xfc);
-	regmap_update_bits(regmap, MT6369_DRV_CON1, 0xf, 0xf);
+	regmap_update_bits(regmap, MT6369_SMT_CON2, 0xff, 0xfc);
+	regmap_update_bits(regmap, MT6369_SMT_CON3, 0xf, 0xf);
 	regmap_update_bits(regmap, MT6369_DRV_CON3, 0xff, 0x88);
 	regmap_update_bits(regmap, MT6369_DRV_CON4, 0xff, 0x88);
 	regmap_update_bits(regmap, MT6369_DRV_CON5, 0xff, 0x88);
@@ -601,12 +600,12 @@ static void mt6369_codec_init_reg(struct mt6369_priv *priv)
 
 	/* Audio GPIO defaults. */
 	regmap_write(regmap, MT6369_GPIO_MODE1_CLR, 0x3f);
-	regmap_update_bits(regmap, MT6369_GPIO_DIR0, 0xc, 0x0);
+	regmap_update_bits(regmap, MT6369_GPIO_DIR1, 0xc, 0x0);
 	regmap_write(regmap, MT6369_GPIO_MODE3_CLR, 0x3f);
-	regmap_update_bits(regmap, MT6369_GPIO_DIR0, 0xc0, 0x0);
+	regmap_update_bits(regmap, MT6369_GPIO_DIR1, 0xc0, 0x0);
 
-	regmap_update_bits(regmap, MT6369_AUD_TOP_CKPDN_CON0, 0x4, 0x0);
-	regmap_update_bits(regmap, MT6369_AUD_TOP_CKPDN_CON0, 0x20, 0x0);
+	regmap_update_bits(regmap, MT6369_AFE_DL_NLE_CFG, 0x4, 0x0);
+	regmap_update_bits(regmap, MT6369_AFE_DL_NLE_CFG, 0x20, 0x0);
 
 	mt6369_zcd_enable(priv, false, 5);
 
@@ -618,12 +617,12 @@ static void mt6369_codec_init_reg(struct mt6369_priv *priv)
 	 */
 	regmap_write(regmap, 0x230f, 0x20);
 	regmap_write(regmap, 0x231d, 0x06);
-	regmap_write(regmap, 0x2388, 0x01);
-	regmap_write(regmap, 0x2389, 0x01);
-	regmap_write(regmap, 0x238f, 0x30);
+	regmap_write(regmap, MT6369_AFE_UL_DL_CON0, 0x01);
+	regmap_write(regmap, MT6369_AFE_DL_SRC2_CON0, 0x01);
+	regmap_write(regmap, MT6369_AUDIO_TOP_CON0, 0x30);
 	regmap_write(regmap, 0x23c8, 0x40);
-	regmap_write(regmap, 0x23d0, 0x03);
-	regmap_write(regmap, 0x23d1, 0x03);
+	regmap_write(regmap, MT6369_AUDIO_DIG_CFG0, 0x03);
+	regmap_write(regmap, MT6369_AUDIO_DIG_CFG1, 0x03);
 	regmap_write(regmap, 0x23da, 0x2c);
 	regmap_write(regmap, 0x2595, 0x01);
 
@@ -726,13 +725,13 @@ static const struct snd_soc_component_driver mt6369_soc_component_driver = {
  * Codec downlink-enable preamble. Stock emits this on every playback (via the
  * AFE's codec DL ops), and crucially only after the AFE back end is already
  * running: the AFE DL memif is enabled, AFE_ON is set and the MTKAIF RX link
- * is clocking data. It gates the codec audio clock on (0x2514 bit0), pulses
- * the MTKAIF calibration-control bit (0x230c) and resets the codec DL
- * datapath with a 0x238f b0->30 pulse, then re-asserts the DL enable bits.
- * The 0x238f reset only latches correctly against a live MTKAIF link, so this
- * must run at stream START (after the AFE back end is up), not from a codec
- * DAPM supply which powers earlier. Captured from a stock earpiece-playback
- * regmap trace.
+ * is clocking data. It gates the codec audio clock on (AUDENC_ANA_CON12
+ * bit0), pulses AUD_TOP_CKPDN_CON0 and resets the codec DL datapath with an
+ * AUDIO_TOP_CON0 b0->30 pulse, then re-asserts the DL enable bits. The
+ * AUDIO_TOP_CON0 reset only latches correctly against a live MTKAIF link, so
+ * this must run at stream START (after the AFE back end is up), not from a
+ * codec DAPM supply which powers earlier. Captured from a stock
+ * earpiece-playback regmap trace.
  */
 static void mt6369_dl_enable(struct mt6369_priv *priv)
 {
@@ -747,33 +746,36 @@ static void mt6369_dl_enable(struct mt6369_priv *priv)
 	 * receiver analog stage, which needs the delays, is brought up in process
 	 * context by mt_rcv_event.
 	 */
-	regmap_update_bits(r, MT6369_AUDENC_ANA_CON27, 0x1, 0x1);
-	regmap_write(r, MT6369_MTKAIF_CAL_CON, 0x2);
-	regmap_write(r, MT6369_MTKAIF_CAL_CON, 0x0);
+	regmap_update_bits(r, MT6369_AUDENC_ANA_CON12, 0x1, 0x1);
+	regmap_write(r, MT6369_AUD_TOP_CKPDN_CON0, 0x2);
+	regmap_write(r, MT6369_AUD_TOP_CKPDN_CON0, 0x0);
 
 	if (!priv->ul_active) {
-		/* Playback only: reset the datapath and leave 0x238f at 0x30. */
-		regmap_write(r, 0x238f, 0xb0);
-		regmap_write(r, 0x238f, 0x30);
-		regmap_write(r, 0x2388, 0x1);
-		regmap_write(r, 0x2389, 0x1);
+		/*
+		 * Playback only: reset the datapath and leave the audio-top
+		 * clock gate at 0x30.
+		 */
+		regmap_write(r, MT6369_AUDIO_TOP_CON0, 0xb0);
+		regmap_write(r, MT6369_AUDIO_TOP_CON0, 0x30);
+		regmap_write(r, MT6369_AFE_UL_DL_CON0, 0x1);
+		regmap_write(r, MT6369_AFE_DL_SRC2_CON0, 0x1);
 		return;
 	}
 
 	/*
-	 * Full duplex: a capture is already running. 0x238f (AUDIO_TOP_CON0) is
-	 * the shared audio-top clock gate; the capture left it at 0x40 (downlink
+	 * Full duplex: a capture is already running. AUDIO_TOP_CON0 is the
+	 * shared audio-top clock gate; the capture left it at 0x40 (downlink
 	 * clock gated), which silences playback. Stock runs full duplex with it
-	 * at 0x00 (both clocks on) and MTKAIF_CAL_CON (0x230c) at 0x00, so pulse
-	 * the datapath reset and settle on those shared values, then re-latch the
-	 * uplink SRC that the reset tore down (0x2388 UL/DL on, 0x238b UL latch).
-	 * The downlink SRC (0x2389) and the uplink SRC share this one sequence.
+	 * at 0x00 (both clocks on) and AUD_TOP_CKPDN_CON0 at 0x00, so pulse the
+	 * datapath reset and settle on those shared values, then re-latch the
+	 * uplink SRC that the reset tore down. The downlink SRC and the uplink
+	 * SRC share this one sequence.
 	 */
-	regmap_write(r, 0x238f, 0x80);
-	regmap_write(r, 0x238f, 0x00);
-	regmap_write(r, 0x2388, 0x1);
-	regmap_write(r, 0x2389, 0x1);
-	regmap_write(r, MT6369_AFE_UL_SRC_CON3, 0x1);
+	regmap_write(r, MT6369_AUDIO_TOP_CON0, 0x80);
+	regmap_write(r, MT6369_AUDIO_TOP_CON0, 0x00);
+	regmap_write(r, MT6369_AFE_UL_DL_CON0, 0x1);
+	regmap_write(r, MT6369_AFE_DL_SRC2_CON0, 0x1);
+	regmap_write(r, MT6369_AFE_UL_SRC_CON1, 0x1);
 }
 
 static int mt6369_codec_dai_trigger(struct snd_pcm_substream *substream,

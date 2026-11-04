@@ -21,28 +21,28 @@
 #define MT6369_HWCID0			0x0008
 
 /* GPIO / analog pad drive strength (set up once at init) */
-#define MT6369_SMT_CON1			0x0023
-#define MT6369_DRV_CON1			0x0024
+#define MT6369_SMT_CON2			0x0023
+#define MT6369_SMT_CON3			0x0024
 #define MT6369_DRV_CON3			0x002a
 #define MT6369_DRV_CON4			0x002b
 #define MT6369_DRV_CON5			0x002c
 #define MT6369_DRV_CON6			0x002d
-#define MT6369_GPIO_DIR0		0x008b
+#define MT6369_GPIO_DIR1		0x008b
 
 /*
  * GPIO pin mux. Each mode register has adjacent SET (+1) and CLR (+2)
  * aliases; the audio MTKAIF (MOSI clk/data) pins live in MODE0..MODE2.
  */
-#define MT6369_GPIO_MODE0		0x00c7
+#define MT6369_GPIO_MODE4		0x00c7
 #define MT6369_GPIO_MODE0_SET		0x00c8
 #define MT6369_GPIO_MODE0_CLR		0x00c9
-#define MT6369_GPIO_MODE1		0x00ca
+#define MT6369_GPIO_MODE5		0x00ca
 #define MT6369_GPIO_MODE1_SET		0x00cb
 #define MT6369_GPIO_MODE1_CLR		0x00cc
-#define MT6369_GPIO_MODE2		0x00cd
+#define MT6369_GPIO_MODE6		0x00cd
 #define MT6369_GPIO_MODE2_SET		0x00ce
 #define MT6369_GPIO_MODE2_CLR		0x00cf
-#define MT6369_GPIO_MODE3		0x00d0
+#define MT6369_GPIO_MODE7		0x00d0
 #define MT6369_GPIO_MODE3_SET		0x00d1
 #define MT6369_GPIO_MODE3_CLR		0x00d2
 
@@ -52,39 +52,40 @@
 #define MT6369_AFUNC_AUD_CON4		0x2396
 
 /* MTKAIF serial-link config (RE from mt6369_mtkaif_tx_enable()). */
-#define MT6369_AFE_MTKAIF_CFG0		0x23bc
-#define MT6369_AFE_MTKAIF_CFG1		0x23bd
-#define MT6369_AFE_MTKAIF_RX		0x23d3
+#define MT6369_AFE_ADDA_MTKAIF_CFG0		0x23bc
+#define MT6369_AFE_ADDA_MTKAIF_CFG1		0x23bd
+#define MT6369_AFE_AUD_PAD_TOP		0x23d3
 
 /* MTKAIF RX phase calibration: bit7 = cal enable, bits[6:0] = phase. */
-#define MT6369_MTKAIF_CAL_CON		0x230c
-#define MT6369_MTKAIF_RXIF_PHASE0	0x23d0
-#define MT6369_MTKAIF_RXIF_PHASE1	0x23d1
-#define MT6369_MTKAIF_RXIF_PHASE2	0x23d2
+#define MT6369_AUD_TOP_CKPDN_CON0		0x230c
+#define MT6369_AUDIO_DIG_CFG0		0x23d0
+#define MT6369_AUDIO_DIG_CFG1		0x23d1
+#define MT6369_AUDIO_DIG_CFG2		0x23d2
 
 /* Audio top clock gating (RE: bits 2 and 5 cleared at init) */
-#define MT6369_AUD_TOP_CKPDN_CON0	0x23d7
+#define MT6369_AFE_DL_NLE_CFG		0x23d7
 
 /* Audio microphone bias / encoder digital config (init only for now) */
-#define MT6369_AUDENC_ANA_CON16		0x2508	/* PGA L (mic preamp) */
-#define MT6369_AUDENC_ANA_CON17		0x2509	/* ADC L */
-#define MT6369_AUDENC_ANA_CON18		0x250a	/* PGA R (mic preamp) */
-#define MT6369_AUDENC_ANA_CON19		0x250b	/* ADC R */
-#define MT6369_AUDENC_ANA_CON27		0x2514
-#define MT6369_AUDENC_ANA_CON34		0x251b	/* ADC bias/reference (static) */
-#define MT6369_AUDENC_ANA_CON36		0x251d	/* ADC bias/reference (static) */
-#define MT6369_AUDENC_ANA_CON38		0x251f
+#define MT6369_AUDENC_ANA_CON0		0x2508	/* PGA L (mic preamp) */
+#define MT6369_AUDENC_ANA_CON1		0x2509	/* ADC L */
+#define MT6369_AUDENC_ANA_CON2		0x250a	/* PGA R (mic preamp) */
+#define MT6369_AUDENC_ANA_CON3		0x250b	/* ADC R */
+#define MT6369_AUDENC_ANA_CON12		0x2514
+#define MT6369_AUDENC_ANA_CON19		0x251b	/* ADC bias/reference (static) */
+#define MT6369_AUDENC_ANA_CON21		0x251d	/* ADC bias/reference (static) */
+#define MT6369_AUDENC_ANA_CON23		0x251f
 
 /*
  * Uplink (capture) path registers, RE from the stock capture ftrace:
  * the analog mic preamp + ADC above, the MIC bias, and the AFE uplink SRC
  * digital block that feeds the MTKAIF TX link back to the SoC AFE.
  */
-#define MT6369_AUDENC_MICBIAS0		0x2519	/* MIC bias 0 enable */
-#define MT6369_AUDENC_MICBIAS1		0x251a	/* MIC bias 1 enable */
-#define MT6369_AFE_UL_SRC_CON0		0x2388	/* UL SRC enable */
-#define MT6369_AFE_UL_SRC_CON3		0x238b	/* UL SRC latch pulse */
-#define MT6369_AFE_UL_SRC_CON7		0x238f	/* UL SRC datapath reset */
+#define MT6369_AUDENC_ANA_CON17		0x2519	/* MIC bias 0 */
+#define MT6369_AUDENC_ANA_CON18		0x251a	/* MIC bias 1 */
+#define MT6369_AFE_UL_DL_CON0		0x2388	/* UL + DL top enable */
+#define MT6369_AFE_DL_SRC2_CON0		0x2389	/* downlink SRC enable */
+#define MT6369_AFE_UL_SRC_CON1		0x238b	/* uplink SRC config */
+#define MT6369_AUDIO_TOP_CON0		0x238f	/* audio-top clock gate (UL/DL shared) */
 #define MT6369_AUD_TOP_CKSEL		0x00d1	/* audio top clock select */
 #define MT6369_AUD_TOP_CKPDN		0x00d2	/* audio top clock power-down */
 
@@ -141,7 +142,7 @@
 #define MT6369_RCV_GAIN			0x12	/* receiver playback gain (stock) */
 
 /* VAUD28 audio analog supply LDO (bit 0 = enable). */
-#define MT6369_RG_LDO_VAUD28_EN		0x1c31
+#define MT6369_LDO_VAUD28_CON0		0x1c31
 
 /* HP DC-offset trim calibration value lives in the PMIC efuse. */
 #define MT6369_HP_EFUSE_OFFSET		0x9e
