@@ -269,7 +269,7 @@ static int mt_spk_event(struct snd_soc_dapm_widget *w,
 	case SND_SOC_DAPM_PRE_PMU:
 		mt6369_spk_enable(priv->regmap);
 		break;
-	case SND_SOC_DAPM_PRE_PMD:
+	case SND_SOC_DAPM_POST_PMD:
 		mt6369_spk_disable(priv->regmap);
 		break;
 	}
@@ -647,6 +647,9 @@ static int mt6369_codec_probe(struct snd_soc_component *cmpnt)
 static const struct snd_kcontrol_new mt6369_spk_switch =
 	SOC_DAPM_SINGLE_VIRT("Switch", 1);
 
+static const struct snd_kcontrol_new mt6369_rcv_switch =
+	SOC_DAPM_SINGLE_VIRT("Switch", 1);
+
 static const struct snd_soc_dapm_widget mt6369_dapm_widgets[] = {
 	/* Digital downlink from the AFE over the MTKAIF serial link. */
 	SND_SOC_DAPM_AIF_IN("AIF_RX", "mt6369-snd-codec-aif1 Playback", 0,
@@ -673,15 +676,25 @@ static const struct snd_soc_dapm_widget mt6369_dapm_widgets[] = {
 
 	SND_SOC_DAPM_OUTPUT("Receiver"),
 
-	/* Analog loudspeaker output (HP/LO stage) feeding the external amp. */
+	/*
+	 * Analog LINEOUT (LOL) output stage feeding the external aw87565 amps.
+	 * On this board BOTH the loudspeaker and the earpiece are aw87565 amps
+	 * fed from LINEOUT (the codec's own RCV pins are not wired to the
+	 * earpiece transducer); the only difference is which amp is powered.
+	 * The LINEOUT analog driver is therefore a shared supply that powers
+	 * whenever either the "Speaker" or the "Receiver" output is active, and
+	 * two switches select the loudspeaker amp, the earpiece amp, or both.
+	 */
 	SND_SOC_DAPM_SWITCH("Speaker Switch", SND_SOC_NOPM, 0, 0,
 			    &mt6369_spk_switch),
+	SND_SOC_DAPM_SWITCH("Receiver Switch", SND_SOC_NOPM, 0, 0,
+			    &mt6369_rcv_switch),
 
-	SND_SOC_DAPM_OUT_DRV_E("HP Spk", SND_SOC_NOPM, 0, 0, NULL, 0,
-			       mt_spk_event,
-			       SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_PRE_PMD),
+	SND_SOC_DAPM_SUPPLY("Lineout Driver", SND_SOC_NOPM, 0, 0, mt_spk_event,
+			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 
 	SND_SOC_DAPM_OUTPUT("Speaker"),
+	SND_SOC_DAPM_OUTPUT("Receiver Amp"),
 
 	/* Digital uplink (microphone) to the AFE over the MTKAIF serial link. */
 	SND_SOC_DAPM_AIF_OUT("AIF_TX", "mt6369-snd-codec-aif1 Capture", 0,
@@ -703,8 +716,12 @@ static const struct snd_soc_dapm_route mt6369_dapm_routes[] = {
 	{"Receiver", NULL, "RCV"},
 
 	{"Speaker Switch", "Switch", "DACL"},
-	{"HP Spk", NULL, "Speaker Switch"},
-	{"Speaker", NULL, "HP Spk"},
+	{"Speaker", NULL, "Speaker Switch"},
+	{"Speaker", NULL, "Lineout Driver"},
+
+	{"Receiver Switch", "Switch", "DACL"},
+	{"Receiver Amp", NULL, "Receiver Switch"},
+	{"Receiver Amp", NULL, "Lineout Driver"},
 
 	/* capture: mic -> ADC -> MTKAIF TX -> AFE */
 	{"Mic ADC", NULL, "AIN0"},
