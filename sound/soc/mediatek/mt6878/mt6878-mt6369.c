@@ -219,14 +219,18 @@ static struct snd_soc_dai_link mt6878_mt6369_dai_links[] = {
 };
 
 /*
- * External analog boost amplifiers (aw87565) on the mt6369 loudspeaker output.
- * They carry no DAI, so they are attached as auxiliary components and wired to
- * the codec's "Speaker" output pin; each powers up with that output.
+ * External analog boost amplifiers (aw87565) on the mt6369 LINEOUT output.
+ * They carry no DAI, so they are attached as auxiliary components. On the
+ * Volla Plinius the two amps drive two different transducers: "Spk L" (@0x58)
+ * is the top earpiece/receiver, "Spk R" (@0x5b) is the bottom loudspeaker.
+ * They are wired to two separate codec output pins so the earpiece and the
+ * loudspeaker can be enabled independently ("Receiver Switch" / "Speaker
+ * Switch"); each amp powers up with its output.
  */
 static struct snd_soc_aux_dev mt6878_mt6369_spk_amps[2];
 
 static const struct snd_soc_dapm_route mt6878_mt6369_spk_routes[] = {
-	{ "Spk L IN", NULL, "Speaker" },
+	{ "Spk L IN", NULL, "Receiver Amp" },
 	{ "Spk R IN", NULL, "Speaker" },
 };
 
