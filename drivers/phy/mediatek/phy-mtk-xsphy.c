@@ -73,11 +73,20 @@
 #define P2D_RG_SUSPENDM		BIT(3)
 
 #define XSP_U2PHYDTM1		((SSUSB_SIFSLV_U2PHY_COM) + 0x06C)
+#define P2D_FORCE_VBUSVALID	BIT(13)
+#define P2D_FORCE_SESSEND	BIT(12)
+#define P2D_FORCE_BVALID	BIT(11)
+#define P2D_FORCE_AVALID	BIT(10)
 #define P2D_FORCE_IDDIG		BIT(9)
 #define P2D_RG_VBUSVALID	BIT(5)
 #define P2D_RG_SESSEND		BIT(4)
+#define P2D_RG_BVALID		BIT(3)
 #define P2D_RG_AVALID		BIT(2)
 #define P2D_RG_IDDIG		BIT(1)
+
+/* DTM1 device-session FORCE overrides (the value bits are set separately). */
+#define P2D_SESSION_FORCE	(P2D_FORCE_VBUSVALID | P2D_FORCE_SESSEND | \
+				 P2D_FORCE_BVALID | P2D_FORCE_AVALID)
 
 #define SSPXTP_PHYA_GLB_00		((SSPXTP_SIFSLV_PHYA_GLB) + 0x00)
 #define RG_XTP_GLB_BIAS_INTR_CTRL		GENMASK(21, 16)
@@ -270,13 +279,32 @@ static void u2_phy_instance_set_mode(struct mtk_xsphy *xsphy,
 	switch (mode) {
 	case PHY_MODE_USB_DEVICE:
 		tmp |= P2D_FORCE_IDDIG | P2D_RG_IDDIG;
+		/*
+		 * This board routes no VBUS sense to the U2 PHY (VBUS
+		 * detection lives in the MT6375 charger, not wired here), so
+		 * in device role the PHY must be told a valid B-device session
+		 * exists -- otherwise the UDC stays "not attached", D+ is
+		 * pulled up but the host never enumerates the gadget. Force
+		 * VBUSVALID + B/A-session valid and clear SESSEND.
+		 */
+		tmp |= P2D_SESSION_FORCE | P2D_RG_VBUSVALID | P2D_RG_BVALID |
+		       P2D_RG_AVALID;
+		tmp &= ~P2D_RG_SESSEND;
 		break;
 	case PHY_MODE_USB_HOST:
 		tmp |= P2D_FORCE_IDDIG;
 		tmp &= ~P2D_RG_IDDIG;
+		/*
+		 * Drop the device-session FORCE overrides (host senses connect
+		 * naturally; forcing the data lines regresses HS enum) and the
+		 * device-only RG_BVALID, but KEEP RG_VBUSVALID|RG_AVALID as
+		 * power-on left them -- the known-good host DTM1 is 0x224.
+		 */
+		tmp &= ~(P2D_SESSION_FORCE | P2D_RG_BVALID | P2D_RG_SESSEND);
 		break;
 	case PHY_MODE_USB_OTG:
 		tmp &= ~(P2D_FORCE_IDDIG | P2D_RG_IDDIG);
+		tmp &= ~(P2D_SESSION_FORCE | P2D_RG_BVALID | P2D_RG_SESSEND);
 		break;
 	default:
 		return;
