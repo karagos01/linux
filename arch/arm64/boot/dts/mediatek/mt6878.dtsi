@@ -860,6 +860,99 @@
 			};
 		};
 
+		mmsys: syscon@14000000 {
+			compatible = "mediatek,mt6878-mmsys0", "syscon";
+			reg = <0x14000000 0x1000>;
+			#clock-cells = <1>;
+		};
+
+		mutex0: disp-mutex@14001000 {
+			compatible = "mediatek,mt6878-disp-mutex";
+			reg = <0x14001000 0x1000>;
+			interrupts = <GIC_SPI 303 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_MUTEX0>;
+		};
+
+		ovl0_2l: ovl@14002000 {
+			compatible = "mediatek,mt6878-disp-ovl";
+			reg = <0x14002000 0x1000>;
+			interrupts = <GIC_SPI 302 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_OVL0_2L>;
+		};
+
+		color0: color@1400b000 {
+			compatible = "mediatek,mt6878-disp-color";
+			reg = <0x1400b000 0x1000>;
+			interrupts = <GIC_SPI 312 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_COLOR0>;
+		};
+
+		ccorr0: ccorr@1400c000 {
+			compatible = "mediatek,mt6878-disp-ccorr";
+			reg = <0x1400c000 0x1000>;
+			interrupts = <GIC_SPI 313 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_CCORR0>;
+		};
+
+		aal0: aal@1400e000 {
+			compatible = "mediatek,mt6878-disp-aal";
+			reg = <0x1400e000 0x1000>;
+			interrupts = <GIC_SPI 315 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_AAL0>;
+		};
+
+		gamma0: gamma@1400f000 {
+			compatible = "mediatek,mt6878-disp-gamma";
+			reg = <0x1400f000 0x1000>;
+			interrupts = <GIC_SPI 316 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_GAMMA0>;
+		};
+
+		postmask0: postmask@14010000 {
+			compatible = "mediatek,mt6878-disp-postmask";
+			reg = <0x14010000 0x1000>;
+			interrupts = <GIC_SPI 317 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_POSTMASK0>;
+		};
+
+		dither0: dither@14011000 {
+			compatible = "mediatek,mt6878-disp-dither";
+			reg = <0x14011000 0x1000>;
+			interrupts = <GIC_SPI 318 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_DITHER0>;
+		};
+
+		dsc0: dsc@14019000 {
+			compatible = "mediatek,mt6878-disp-dsc";
+			reg = <0x14019000 0x1000>;
+			interrupts = <GIC_SPI 326 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_DSC_WRAP0>;
+		};
+
+		dsi0: dsi@1401a000 {
+			compatible = "mediatek,mt6878-dsi";
+			reg = <0x1401a000 0x1000>;
+			interrupts = <GIC_SPI 328 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_DSI0>,
+				 <&mmsys CLK_MM_DSI0>,
+				 <&mipi_tx0>;
+			clock-names = "engine", "digital", "hs";
+			phys = <&mipi_tx0>;
+			phy-names = "dphy";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		mipi_tx0: dsi-phy@11e50000 {
+			compatible = "mediatek,mt6878-mipi-tx";
+			reg = <0x11e50000 0x1000>;
+			clocks = <&clk26m>;
+			clock-output-names = "mipi_tx0_pll";
+			#clock-cells = <0>;
+			#phy-cells = <0>;
+		};
+
 		scpsys: syscon@1c001000 {
 			compatible = "mediatek,mt6878-scpsys", "syscon", "simple-mfd";
 			reg = <0x1c001000 0x1000>;

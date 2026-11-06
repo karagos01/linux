@@ -21,6 +21,7 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_bridge_connector.h>
+#include <drm/display/drm_dsc.h>
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_of.h>
 #include <drm/drm_panel.h>
@@ -70,12 +71,13 @@
 #define HSTX_CKLP_EN			BIT(16)
 
 #define DSI_PSCTRL		0x1c
-#define DSI_PS_WC			GENMASK(13, 0)
-#define DSI_PS_SEL			GENMASK(17, 16)
+#define DSI_PS_WC			GENMASK(14, 0)
+#define DSI_PS_SEL			GENMASK(19, 16)
 #define PACKED_PS_16BIT_RGB565		0
 #define PACKED_PS_18BIT_RGB666		1
 #define LOOSELY_PS_24BIT_RGB666		2
 #define PACKED_PS_24BIT_RGB888		3
+#define PS_DSC_24BIT			5
 
 #define DSI_VSA_NL		0x20
 #define DSI_VBP_NL		0x24
@@ -216,6 +218,7 @@ struct mtk_dsi {
 	unsigned long mode_flags;
 	enum mipi_dsi_pixel_format format;
 	unsigned int lanes;
+	struct drm_dsc_config *dsc;
 	struct videomode vm;
 	struct mtk_phy_timing phy_timing;
 	int refcount;
@@ -402,6 +405,21 @@ static void mtk_dsi_ps_control(struct mtk_dsi *dsi, bool config_vact)
 	else
 		dsi_buf_bpp = 3;
 
+	if (dsi->dsc) {
+		/*
+		 * DSC-compressed stream: the word count is the compressed
+		 * line size (chunk bytes per slice x slice count), not the
+		 * uncompressed pixel count.
+		 */
+		u32 bpp = dsi->dsc->bits_per_pixel >> 4;
+		u32 chunk = DIV_ROUND_UP(dsi->dsc->slice_width * bpp, 8);
+		u32 slices = DIV_ROUND_UP(dsi->vm.hactive, dsi->dsc->slice_width);
+
+		ps_wc = FIELD_PREP(DSI_PS_WC, chunk * slices);
+		ps_val = ps_wc | FIELD_PREP(DSI_PS_SEL, PS_DSC_24BIT);
+		goto out;
+	}
+
 	/* Word count */
 	ps_wc = FIELD_PREP(DSI_PS_WC, dsi->vm.hactive * dsi_buf_bpp);
 	ps_val = ps_wc;
@@ -423,6 +441,8 @@ static void mtk_dsi_ps_control(struct mtk_dsi *dsi, bool config_vact)
 		ps_val |= FIELD_PREP(DSI_PS_SEL, PACKED_PS_16BIT_RGB565);
 		break;
 	}
+
+out:
 
 	if (config_vact) {
 		vact_nl = FIELD_PREP(VACT_NL, dsi->vm.vactive);
@@ -706,6 +726,12 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 		return ret;
 	}
 	bit_per_pixel = ret;
+
+	/* With DSC the stream is compressed, so scale the rate by the
+	 * compressed bits-per-pixel instead of the uncompressed format.
+	 */
+	if (dsi->dsc)
+		bit_per_pixel = dsi->dsc->bits_per_pixel >> 4;
 
 	dsi->data_rate = DIV_ROUND_UP_ULL(dsi->vm.pixelclock * bit_per_pixel,
 					  dsi->lanes);
@@ -995,6 +1021,7 @@ static int mtk_dsi_host_attach(struct mipi_dsi_host *host,
 	dsi->lanes = device->lanes;
 	dsi->format = device->format;
 	dsi->mode_flags = device->mode_flags;
+	dsi->dsc = device->dsc;
 	dsi->next_bridge = devm_drm_of_get_bridge(dev, dev->of_node, 1, 0);
 	if (IS_ERR(dsi->next_bridge)) {
 		ret = PTR_ERR(dsi->next_bridge);
@@ -1317,6 +1344,7 @@ static const struct of_device_id mtk_dsi_of_match[] = {
 	{ .compatible = "mediatek,mt8183-dsi", .data = &mt8183_dsi_driver_data },
 	{ .compatible = "mediatek,mt8186-dsi", .data = &mt8186_dsi_driver_data },
 	{ .compatible = "mediatek,mt8188-dsi", .data = &mt8188_dsi_driver_data },
+	{ .compatible = "mediatek,mt6878-dsi", .data = &mt8188_dsi_driver_data },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, mtk_dsi_of_match);

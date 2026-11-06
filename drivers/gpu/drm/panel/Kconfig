@@ -1308,6 +1308,18 @@ config DRM_PANEL_VISIONOX_RM69299
 	  Say Y here if you want to enable support for Visionox
 	  RM69299  DSI Video Mode panel.
 
+config DRM_PANEL_VISIONOX_HC5622
+	tristate "Visionox HC5622"
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	select DRM_DISPLAY_DSC_HELPER
+	select DRM_DISPLAY_HELPER
+	help
+	  Say Y here if you want to enable support for the Visionox HC5622
+	  1080x2400 DSC command-mode AMOLED panel, such as the one found in
+	  the Volla Phone Plinius (MediaTek MT6878).
+
 config DRM_PANEL_VISIONOX_RM692E5
 	tristate "Visionox RM692E5"
 	depends on OF

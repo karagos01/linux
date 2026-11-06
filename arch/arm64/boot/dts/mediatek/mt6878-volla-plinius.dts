@@ -1204,3 +1204,28 @@
 		touchscreen-size-y = <2400>;
 	};
 };
+
+&dsi0 {
+	status = "okay";
+
+	panel@0 {
+		compatible = "visionox,hc5622";
+		reg = <0>;
+		reset-gpios = <&pio 90 GPIO_ACTIVE_HIGH>;
+		bias-gpios = <&pio 44 GPIO_ACTIVE_HIGH>,
+			     <&pio 153 GPIO_ACTIVE_HIGH>;
+		vldo18-gpios = <&pio 10 GPIO_ACTIVE_HIGH>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&dsi0_out>;
+			};
+		};
+	};
+
+	port {
+		dsi0_out: endpoint {
+			remote-endpoint = <&panel_in>;
+		};
+	};
+};

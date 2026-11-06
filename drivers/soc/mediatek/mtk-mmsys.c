@@ -112,6 +112,11 @@ static const struct mtk_mmsys_driver_data mt8188_vppsys1_driver_data = {
 	.is_vppsys = true,
 };
 
+static const struct mtk_mmsys_driver_data mt6878_mmsys_driver_data = {
+	.clk_driver = "clk-mt6878-mm",
+	/* routes added together with the DRM CRTC path (first-light milestone) */
+};
+
 static const struct mtk_mmsys_driver_data mt8192_mmsys_driver_data = {
 	.clk_driver = "clk-mt8192-mm",
 	.routes = mmsys_mt8192_routing_table,
@@ -463,6 +468,7 @@ static const struct of_device_id of_match_mtk_mmsys[] = {
 	{ .compatible = "mediatek,mt6779-mmsys", .data = &mt6779_mmsys_driver_data },
 	{ .compatible = "mediatek,mt6795-mmsys", .data = &mt6795_mmsys_driver_data },
 	{ .compatible = "mediatek,mt6797-mmsys", .data = &mt6797_mmsys_driver_data },
+	{ .compatible = "mediatek,mt6878-mmsys0", .data = &mt6878_mmsys_driver_data },
 	{ .compatible = "mediatek,mt8167-mmsys", .data = &mt8167_mmsys_driver_data },
 	{ .compatible = "mediatek,mt8173-mmsys", .data = &mt8173_mmsys_driver_data },
 	{ .compatible = "mediatek,mt8183-mmsys", .data = &mt8183_mmsys_driver_data },

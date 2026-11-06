@@ -193,6 +193,15 @@ static void mtk_dsc_config(struct device *dev, unsigned int w,
 {
 	struct mtk_ddp_comp_dev *priv = dev_get_drvdata(dev);
 
+	/*
+	 * If the bootloader already brought up and enabled the DSC encoder
+	 * (in-cell DSC command-mode panels such as the Visionox HC5622 on
+	 * MT6878), keep its configuration and interconnect routing instead of
+	 * forcing bypass, which would break the compressed data path.
+	 */
+	if (readl(priv->regs + DISP_REG_DSC_CON) & DSC_EN)
+		return;
+
 	/* dsc bypass mode */
 	mtk_ddp_write_mask(cmdq_pkt, DSC_BYPASS, &priv->cmdq_reg, priv->regs,
 			   DISP_REG_DSC_CON, DSC_BYPASS);
