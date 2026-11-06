@@ -26,11 +26,13 @@
 #define MT6369_LDO_VMCH_EINT		0x1ca3
 #define MT6369_LDO_VMC_CON0		0x1ca4
 #define MT6369_LDO_VANT18_CON0		0x1cb2
+#define MT6369_LDO_VTP_CON0		0x1c15
 #define MT6369_VCN33_1_ANA_CON1		0x1db1
 #define MT6369_VCN33_2_ANA_CON1		0x1db5
 #define MT6369_VMCH_ANA_CON1		0x1da9
 #define MT6369_VMC_ANA_CON1		0x1dad
 #define MT6369_VANT18_ANA_CON1		0x1e09
+#define MT6369_VTP_ANA_CON1		0x1da5
 
 #define MT6369_LDO_EN			BIT(0)
 #define MT6369_LDO_VOSEL		GENMASK(3, 0)
@@ -43,6 +45,7 @@ enum mt6369_regulator_id {
 	MT6369_ID_VANT18,
 	MT6369_ID_VMCH,
 	MT6369_ID_VMC,
+	MT6369_ID_VTP,
 };
 
 /* Shared by VCN33_1, VCN33_2, VMCH and VMC */
@@ -151,6 +154,8 @@ static const struct regulator_desc mt6369_regulators[] = {
 	},
 	MT6369_LDO(MT6369_ID_VMC, "vmc", mt6369_vcn33_volts,
 		   MT6369_LDO_VMC_CON0, MT6369_VMC_ANA_CON1),
+	MT6369_LDO(MT6369_ID_VTP, "vtp", mt6369_vcn33_volts,
+		   MT6369_LDO_VTP_CON0, MT6369_VTP_ANA_CON1),
 };
 
 static int mt6369_regulator_probe(struct platform_device *pdev)

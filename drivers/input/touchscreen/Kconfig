@@ -805,6 +805,20 @@ config TOUCHSCREEN_EDT_FT5X06
 	  To compile this driver as a module, choose M here: the
 	  module will be called edt-ft5x06.
 
+config TOUCHSCREEN_FOCALTECH_FT3681
+	tristate "FocalTech FT3681 SPI touchscreen support"
+	depends on SPI
+	help
+	  Say Y here if you have a FocalTech FT3681 capacitive touch
+	  controller connected over SPI, for example on the Volla Phone
+	  Plinius. The controller runs panel-resident firmware; this
+	  driver only reads touch reports.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called focaltech_ft3681.
+
 config TOUCHSCREEN_RASPBERRYPI_FW
 	tristate "Raspberry Pi's firmware base touch screen support"
 	depends on RASPBERRYPI_FIRMWARE || (RASPBERRYPI_FIRMWARE=n && COMPILE_TEST)

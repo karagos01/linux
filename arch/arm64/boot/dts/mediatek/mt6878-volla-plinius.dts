@@ -542,6 +542,26 @@
 		};
 	};
 
+	/* SPI3 to the FocalTech FT3681 touch controller */
+	spi3_pins: spi3-pins {
+		pins-spi {
+			pinmux = <PINMUX_GPIO68__FUNC_SPI3_CLK>,
+				 <PINMUX_GPIO69__FUNC_SPI3_CSB>,
+				 <PINMUX_GPIO70__FUNC_SPI3_MO>,
+				 <PINMUX_GPIO71__FUNC_SPI3_MI>;
+			drive-strength = <6>;
+		};
+	};
+
+	/* FT3681 interrupt line (GPIO7) as a plain GPIO/EINT input */
+	touch_pins: touch-pins {
+		pins-irq {
+			pinmux = <PINMUX_GPIO7__FUNC_GPIO7>;
+			input-enable;
+			bias-pull-up;
+		};
+	};
+
 	/* External GPS L1/L5 eLNA enable, held high while GPS is bound */
 	gps_elna_pins: gps-elna-pins {
 		pins-elna {
@@ -803,6 +823,14 @@
 				regulator-name = "mt6369_vant18";
 				regulator-min-microvolt = <1800000>;
 				regulator-max-microvolt = <1800000>;
+			};
+
+			/* Touch panel (FocalTech FT3681) supply */
+			mt6369_vtp: vtp {
+				regulator-name = "mt6369_vtp";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-boot-on;
 			};
 		};
 	};
@@ -1154,5 +1182,25 @@
 				};
 			};
 		};
+	};
+};
+
+&spi3 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi3_pins>;
+
+	touchscreen@0 {
+		compatible = "focaltech,ft3681";
+		reg = <0>;
+		spi-max-frequency = <6000000>;
+		interrupt-parent = <&pio>;
+		interrupts = <7 IRQ_TYPE_EDGE_FALLING>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&touch_pins>;
+		reset-gpios = <&pio 6 GPIO_ACTIVE_LOW>;
+		vdd-supply = <&mt6369_vtp>;
+		touchscreen-size-x = <1080>;
+		touchscreen-size-y = <2400>;
 	};
 };

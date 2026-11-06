@@ -390,6 +390,19 @@
 			status = "disabled";
 		};
 
+		spi3: spi@11013000 {
+			compatible = "mediatek,mt6878-spi-ipm", "mediatek,spi-ipm";
+			reg = <0x11013000 0x1000>;
+			interrupts = <GIC_SPI 462 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&topckgen CLK_TOP_UNIVPLL_D6_D2>,
+				 <&topckgen CLK_TOP_SPI3_SEL>,
+				 <&pericfg_ao CLK_PERAOP_SPI3_B>;
+			clock-names = "parent-clk", "sel-clk", "spi-clk";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
 		pericfg_ao: syscon@11036000 {
 			compatible = "mediatek,mt6878-pericfg-ao", "syscon";
 			reg = <0x11036000 0x1000>;
