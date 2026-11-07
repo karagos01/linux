@@ -247,6 +247,15 @@ static int mtk_smi_larb_config_port_gen2_general(struct device *dev)
 	if (BIT(larb->larbid) & larb->larb_gen->larb_direct_to_common_mask)
 		return 0;
 
+	/*
+	 * No IOMMU bound this larb (e.g. MT6878 which has no upstream IOMMU
+	 * support yet): larb->mmu is NULL, all ports stay in their power-on
+	 * bypass/physical state. Nothing to configure, and dereferencing
+	 * larb->mmu below would oops.
+	 */
+	if (!larb->mmu)
+		return 0;
+
 	if (MTK_SMI_CAPS(flags_general, MTK_SMI_FLAG_THRT_UPDATE)) {
 		reg = readl_relaxed(larb->base + SMI_LARB_CMD_THRT_CON);
 		reg &= ~SMI_LARB_THRT_RD_NU_LMT_MSK;
@@ -545,12 +554,23 @@ static const struct mtk_smi_larb_gen mtk_smi_larb_mt8195 = {
 	.ostd		            = mtk_smi_larb_mt8195_ostd,
 };
 
+/*
+ * MT6878 has no upstream IOMMU support yet; the display larbs run with the
+ * ports left in their power-on (bypass/physical) state, so no ostd/flags are
+ * needed. config_port is a no-op when no IOMMU bound (see the !larb->mmu guard
+ * in mtk_smi_larb_config_port_gen2_general).
+ */
+static const struct mtk_smi_larb_gen mtk_smi_larb_mt6878 = {
+	.config_port                = mtk_smi_larb_config_port_gen2_general,
+};
+
 static const struct of_device_id mtk_smi_larb_of_ids[] = {
 	{.compatible = "mediatek,mt2701-smi-larb", .data = &mtk_smi_larb_mt2701},
 	{.compatible = "mediatek,mt2712-smi-larb", .data = &mtk_smi_larb_mt2712},
 	{.compatible = "mediatek,mt6779-smi-larb", .data = &mtk_smi_larb_mt6779},
 	{.compatible = "mediatek,mt6795-smi-larb", .data = &mtk_smi_larb_mt8173},
 	{.compatible = "mediatek,mt6893-smi-larb", .data = &mtk_smi_larb_mt6893},
+	{.compatible = "mediatek,mt6878-smi-larb", .data = &mtk_smi_larb_mt6878},
 	{.compatible = "mediatek,mt8167-smi-larb", .data = &mtk_smi_larb_mt8167},
 	{.compatible = "mediatek,mt8173-smi-larb", .data = &mtk_smi_larb_mt8173},
 	{.compatible = "mediatek,mt8183-smi-larb", .data = &mtk_smi_larb_mt8183},
@@ -808,6 +828,16 @@ static const struct mtk_smi_common_plat mtk_smi_common_mt8188_vpp = {
 	.init     = mtk_smi_common_mt8195_init,
 };
 
+/*
+ * MT6878 display SMI common. No gals clocks are modelled (the GALS bridges sit
+ * in the always-on mm_infra domain which LK leaves powered); only apb/smi are
+ * required, both the single CLK_MM_SMI_COMMON mmsys gate. bus_sel stays 0 as
+ * there is no IOMMU/MMU1 balancing.
+ */
+static const struct mtk_smi_common_plat mtk_smi_common_mt6878 = {
+	.type     = MTK_SMI_GEN2,
+};
+
 static const struct mtk_smi_common_plat mtk_smi_common_mt8192 = {
 	.type     = MTK_SMI_GEN2,
 	.has_gals = true,
@@ -846,6 +876,7 @@ static const struct of_device_id mtk_smi_common_of_ids[] = {
 	{.compatible = "mediatek,mt6779-smi-common", .data = &mtk_smi_common_mt6779},
 	{.compatible = "mediatek,mt6795-smi-common", .data = &mtk_smi_common_mt6795},
 	{.compatible = "mediatek,mt6893-smi-common", .data = &mtk_smi_common_mt6893},
+	{.compatible = "mediatek,mt6878-smi-common", .data = &mtk_smi_common_mt6878},
 	{.compatible = "mediatek,mt8167-smi-common", .data = &mtk_smi_common_gen2},
 	{.compatible = "mediatek,mt8173-smi-common", .data = &mtk_smi_common_gen2},
 	{.compatible = "mediatek,mt8183-smi-common", .data = &mtk_smi_common_mt8183},

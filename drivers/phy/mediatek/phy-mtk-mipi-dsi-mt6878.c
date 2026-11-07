@@ -54,7 +54,13 @@ static u32 mtk_mipi_tx_pll_get_pcw(u32 data_rate_mhz, unsigned int pcw_ratio)
 	       ((256 * (256 * (256 * pcw_floor % 26) % 26) / 26) & 0xff);
 }
 
-static int mtk_mipi_tx_pll_enable(struct clk_hw *hw)
+/*
+ * The PLL power-up sequence sleeps (usleep_range for BG settle / SDM power-on /
+ * PLL lock), so it must run as a clk .prepare op (prepare_lock mutex), NOT
+ * .enable (which the CCF calls under the enable_lock spinlock -> "scheduling
+ * while atomic"). clk_prepare_enable() from mtk_mipi_tx_power_on() invokes it.
+ */
+static int mtk_mipi_tx_pll_prepare(struct clk_hw *hw)
 {
 	struct mtk_mipi_tx *mipi_tx = mtk_mipi_tx_from_clk_hw(hw);
 	void __iomem *base = mipi_tx->regs;
@@ -62,7 +68,7 @@ static int mtk_mipi_tx_pll_enable(struct clk_hw *hw)
 	u32 rate = mipi_tx->data_rate / 1000000;
 	u32 pcw;
 
-	dev_dbg(mipi_tx->dev, "enable: %u MHz\n", rate);
+	dev_dbg(mipi_tx->dev, "prepare: %u MHz\n", rate);
 
 	if (rate >= 2000) {
 		txdiv = 1;
@@ -114,7 +120,7 @@ static int mtk_mipi_tx_pll_enable(struct clk_hw *hw)
 	return 0;
 }
 
-static void mtk_mipi_tx_pll_disable(struct clk_hw *hw)
+static void mtk_mipi_tx_pll_unprepare(struct clk_hw *hw)
 {
 	struct mtk_mipi_tx *mipi_tx = mtk_mipi_tx_from_clk_hw(hw);
 	void __iomem *base = mipi_tx->regs;
@@ -139,8 +145,8 @@ static int mtk_mipi_tx_pll_determine_rate(struct clk_hw *hw,
 }
 
 static const struct clk_ops mtk_mipi_tx_pll_ops = {
-	.enable = mtk_mipi_tx_pll_enable,
-	.disable = mtk_mipi_tx_pll_disable,
+	.prepare = mtk_mipi_tx_pll_prepare,
+	.unprepare = mtk_mipi_tx_pll_unprepare,
 	.determine_rate = mtk_mipi_tx_pll_determine_rate,
 	.set_rate = mtk_mipi_tx_pll_set_rate,
 	.recalc_rate = mtk_mipi_tx_pll_recalc_rate,

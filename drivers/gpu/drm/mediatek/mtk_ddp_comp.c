@@ -328,7 +328,11 @@ static const struct mtk_ddp_comp_funcs ddp_dsc = {
 static const struct mtk_ddp_comp_funcs ddp_dsi = {
 	.start = mtk_dsi_ddp_start,
 	.stop = mtk_dsi_ddp_stop,
+	.trigger = mtk_dsi_ddp_trigger,
 	.encoder_index = mtk_dsi_encoder_index,
+	.register_vblank_cb = mtk_dsi_register_vblank_cb,
+	.unregister_vblank_cb = mtk_dsi_unregister_vblank_cb,
+	.enable_vblank = mtk_dsi_enable_vblank,
 };
 
 static const struct mtk_ddp_comp_funcs ddp_gamma = {

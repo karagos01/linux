@@ -897,7 +897,24 @@ int mtk_mutex_prepare(struct mtk_mutex *mutex)
 {
 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
 						 mutex[mutex->id]);
-	return clk_prepare_enable(mtx->clk);
+	int ret = clk_prepare_enable(mtx->clk);
+
+	if (ret)
+		return ret;
+
+	/*
+	 * The bootloader leaves stale component bits in this mutex's MOD
+	 * registers (from its own display pipeline). A MediaTek display mutex
+	 * synchronises every component listed in MOD, so a phantom component
+	 * that is not clocked/running stalls the frame forever. Start from a
+	 * clean slate before the pipeline adds its own components.
+	 */
+	writel_relaxed(0, mtx->regs +
+		       DISP_REG_MUTEX_MOD(mtx, 0, mutex->id));
+	writel_relaxed(0, mtx->regs +
+		       mtx->data->mutex_mod1_reg + 0x20 * mutex->id);
+
+	return 0;
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_prepare);
 
@@ -908,6 +925,15 @@ void mtk_mutex_unprepare(struct mtk_mutex *mutex)
 	clk_disable_unprepare(mtx->clk);
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_unprepare);
+
+/*
+ * A command-mode panel does not free-run, so the display mutex is driven in
+ * SINGLE (SW/GCE-triggered) mode rather than DSI0-SOF synced; otherwise the
+ * SW shadow-path trigger never completes and no frame is pushed. Controls the
+ * DSI0 SOF source below.
+ */
+static bool mtk_mutex_single = true;
+module_param(mtk_mutex_single, bool, 0644);
 
 void mtk_mutex_add_comp(struct mtk_mutex *mutex,
 			enum mtk_ddp_comp_id id)
@@ -922,7 +948,7 @@ void mtk_mutex_add_comp(struct mtk_mutex *mutex,
 
 	switch (id) {
 	case DDP_COMPONENT_DSI0:
-		sof_id = MUTEX_SOF_DSI0;
+		sof_id = mtk_mutex_single ? MUTEX_SOF_SINGLE_MODE : MUTEX_SOF_DSI0;
 		break;
 	case DDP_COMPONENT_DSI1:
 		sof_id = MUTEX_SOF_DSI0;
@@ -1060,6 +1086,36 @@ void mtk_mutex_release(struct mtk_mutex *mutex)
 	writel(0, mtx->regs + DISP_REG_MUTEX(mutex->id));
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_release);
+
+/*
+ * BIT(5) of the SOF register is the "SOF wait" control: 1 = hold (wait),
+ * 0 = submit the SOF directly. Clearing it triggers one pipeline run, which
+ * is how a command-mode (frame-trigger) frame is pushed to the panel on the
+ * no-cmdq SW path. (Matches downstream mtk_disp_mutex_submit_sof: reg &= ~0x20.)
+ */
+#define MUTEX_SOF_WAIT	BIT(5)
+void mtk_mutex_submit_sof(struct mtk_mutex *mutex)
+{
+	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
+						 mutex[mutex->id]);
+	unsigned int offset = DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg,
+						 mutex->id);
+	u32 reg;
+
+	reg = readl_relaxed(mtx->regs + offset) & ~MUTEX_SOF_WAIT;
+	writel(reg, mtx->regs + offset);
+
+	/*
+	 * SINGLE (SW-triggered) command-mode frame: the SOF value is 0 so the
+	 * BIT5 ("SOF wait") clear above is a no-op; the actual single-shot
+	 * frame is kicked by writing the mutex commit register. Do NOT poll
+	 * INT_MUTEX here (that is mtk_mutex_acquire's blocking path, which
+	 * times out in command mode because the frame drains asynchronously);
+	 * just fire it and let the DSI frame-done / TE complete the vblank.
+	 */
+	writel(1, mtx->regs + DISP_REG_MUTEX(mutex->id));
+}
+EXPORT_SYMBOL_GPL(mtk_mutex_submit_sof);
 
 int mtk_mutex_write_mod(struct mtk_mutex *mutex,
 			enum mtk_mutex_mod_index idx, bool clear)

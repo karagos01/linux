@@ -324,6 +324,7 @@ static const struct mtk_mmsys_driver_data mt6878_mmsys_driver_data = {
 	.main_path = mt6878_mtk_ddp_main,
 	.main_len = ARRAY_SIZE(mt6878_mtk_ddp_main),
 	.mmsys_dev_num = 1,
+	.shadow_register = true,
 };
 
 static const struct mtk_mmsys_driver_data mt8195_vdosys0_driver_data = {
@@ -790,6 +791,8 @@ static const struct of_device_id mtk_ddp_comp_dt_ids[] = {
 	  .data = (void *)MTK_DISP_MUTEX },
 	{ .compatible = "mediatek,mt8365-disp-mutex",
 	  .data = (void *)MTK_DISP_MUTEX },
+	{ .compatible = "mediatek,mt6878-disp-mutex",
+	  .data = (void *)MTK_DISP_MUTEX },
 	{ .compatible = "mediatek,mt8173-disp-od",
 	  .data = (void *)MTK_DISP_OD },
 	{ .compatible = "mediatek,mt2701-disp-ovl",
@@ -861,6 +864,8 @@ static const struct of_device_id mtk_ddp_comp_dt_ids[] = {
 	{ .compatible = "mediatek,mt8186-dsi",
 	  .data = (void *)MTK_DSI },
 	{ .compatible = "mediatek,mt8188-dsi",
+	  .data = (void *)MTK_DSI },
+	{ .compatible = "mediatek,mt6878-dsi",
 	  .data = (void *)MTK_DSI },
 	{ }
 };

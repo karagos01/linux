@@ -595,10 +595,27 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 	if (pending_async_planes)
 		mtk_crtc->pending_async_planes = true;
 
-	if (priv->data->shadow_register) {
-		mtk_mutex_acquire(mtk_crtc->mutex);
+	if (priv->data->shadow_register
+#if IS_REACHABLE(CONFIG_MTK_CMDQ)
+	    && !mtk_crtc->cmdq_client.chan
+#endif
+	   ) {
+		/*
+		 * Command-mode frame push on the no-cmdq SW path (fallback when
+		 * the GCE/cmdq channel is unavailable; the cmdq path below is
+		 * preferred and handles command-mode properly via the GCE):
+		 *   1. write the pipeline registers (OVL framebuffer address etc.)
+		 *   2. arm the command-mode output (DSI_START) so it captures the
+		 *      next pipeline frame as DCS memory writes (no-op for video)
+		 *   3. trigger one pipeline run via the SINGLE-mode mutex
+		 * For video-mode outputs step 2 is a no-op and the mutex is
+		 * DSI0-SOF synced, so this reduces to a plain shadow update.
+		 */
 		mtk_crtc_ddp_config(crtc, NULL);
-		mtk_mutex_release(mtk_crtc->mutex);
+		for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
+			mtk_ddp_comp_trigger(mtk_crtc->ddp_comp[i]);
+		mtk_mutex_enable(mtk_crtc->mutex);
+		mtk_mutex_submit_sof(mtk_crtc->mutex);
 	}
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	if (mtk_crtc->cmdq_client.chan) {

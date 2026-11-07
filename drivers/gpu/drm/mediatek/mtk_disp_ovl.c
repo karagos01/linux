@@ -11,6 +11,7 @@
 #include <linux/component.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/soc/mediatek/mtk-cmdq.h>
@@ -611,6 +612,7 @@ static int mtk_disp_ovl_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct mtk_disp_ovl *priv;
+	struct device_node *larb_node;
 	int irq;
 	int ret;
 
@@ -639,6 +641,29 @@ static int mtk_disp_ovl_probe(struct platform_device *pdev)
 
 	priv->data = of_device_get_match_data(dev);
 	platform_set_drvdata(pdev, priv);
+
+	/*
+	 * MT6878 has no upstream IOMMU, so the SMI larb that feeds this OVL is
+	 * not powered via the usual iommu-created device link. Create the PM
+	 * link here from the optional "mediatek,larb" phandle so the larb (and
+	 * its SMI common) are resumed and clocked whenever the OVL is powered.
+	 * Harmless on SoCs whose larb is additionally linked via the IOMMU.
+	 */
+	larb_node = of_parse_phandle(dev->of_node, "mediatek,larb", 0);
+	if (larb_node) {
+		struct platform_device *larb_pdev = of_find_device_by_node(larb_node);
+
+		of_node_put(larb_node);
+		if (!larb_pdev || !platform_get_drvdata(larb_pdev)) {
+			if (larb_pdev)
+				put_device(&larb_pdev->dev);
+			return -EPROBE_DEFER;
+		}
+		if (!device_link_add(dev, &larb_pdev->dev,
+				     DL_FLAG_PM_RUNTIME | DL_FLAG_STATELESS))
+			dev_warn(dev, "Unable to link SMI larb\n");
+		put_device(&larb_pdev->dev);
+	}
 
 	ret = devm_request_irq(dev, irq, mtk_disp_ovl_irq_handler,
 			       IRQF_TRIGGER_NONE, dev_name(dev), priv);

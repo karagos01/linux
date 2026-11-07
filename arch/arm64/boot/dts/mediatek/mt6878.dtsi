@@ -860,10 +860,29 @@
 			};
 		};
 
+		/*
+		 * GCE (Global Command Engine) — the hardware command queue that
+		 * orchestrates command-mode display frame triggers (TE-wait ->
+		 * mutex SOF -> frame-done). Clock is left as LK programmed it
+		 * (real gce clock lives in the mm_infra HWV domain with no
+		 * upstream clk/genpd support); clk26m is a stand-in so the cmdq
+		 * driver's clk_prepare_enable is a harmless no-op. No iommus:
+		 * cmdq command buffer DMAs physically via dma-ranges (no IOMMU).
+		 */
+		gce: mailbox@1e980000 {
+			compatible = "mediatek,mt6878-gce";
+			reg = <0x1e980000 0x4000>;
+			interrupts = <GIC_SPI 290 IRQ_TYPE_LEVEL_HIGH 0>;
+			#mbox-cells = <2>;
+			clocks = <&clk26m>;
+			clock-names = "gce";
+		};
+
 		mmsys: syscon@14000000 {
 			compatible = "mediatek,mt6878-mmsys0", "syscon";
 			reg = <0x14000000 0x1000>;
 			#clock-cells = <1>;
+			mboxes = <&gce 0 1>;
 		};
 
 		mutex0: disp-mutex@14001000 {
@@ -871,6 +890,8 @@
 			reg = <0x14001000 0x1000>;
 			interrupts = <GIC_SPI 303 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&mmsys CLK_MM_DISP_MUTEX0>;
+			mediatek,gce-client-reg = <&gce 1 0x1000 0x1000>;
+			mediatek,gce-events = <0xaf>;	/* disp_mutex0_eof */
 		};
 
 		ovl0_2l: ovl@14002000 {
@@ -878,13 +899,17 @@
 			reg = <0x14002000 0x1000>;
 			interrupts = <GIC_SPI 302 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&mmsys CLK_MM_DISP_OVL0_2L>;
+			mediatek,gce-client-reg = <&gce 1 0x2000 0x1000>;
+			mediatek,larb = <&smi_larb0>;
 		};
 
 		color0: color@1400b000 {
-			compatible = "mediatek,mt6878-disp-color";
+			compatible = "mediatek,mt6878-disp-color",
+				     "mediatek,mt8173-disp-color";
 			reg = <0x1400b000 0x1000>;
 			interrupts = <GIC_SPI 312 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&mmsys CLK_MM_DISP_COLOR0>;
+			mediatek,gce-client-reg = <&gce 1 0xb000 0x1000>;
 		};
 
 		ccorr0: ccorr@1400c000 {
@@ -892,6 +917,7 @@
 			reg = <0x1400c000 0x1000>;
 			interrupts = <GIC_SPI 313 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&mmsys CLK_MM_DISP_CCORR0>;
+			mediatek,gce-client-reg = <&gce 1 0xc000 0x1000>;
 		};
 
 		aal0: aal@1400e000 {
@@ -899,6 +925,7 @@
 			reg = <0x1400e000 0x1000>;
 			interrupts = <GIC_SPI 315 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&mmsys CLK_MM_DISP_AAL0>;
+			mediatek,gce-client-reg = <&gce 1 0xe000 0x1000>;
 		};
 
 		gamma0: gamma@1400f000 {
@@ -906,6 +933,7 @@
 			reg = <0x1400f000 0x1000>;
 			interrupts = <GIC_SPI 316 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&mmsys CLK_MM_DISP_GAMMA0>;
+			mediatek,gce-client-reg = <&gce 1 0xf000 0x1000>;
 		};
 
 		postmask0: postmask@14010000 {
@@ -913,6 +941,7 @@
 			reg = <0x14010000 0x1000>;
 			interrupts = <GIC_SPI 317 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&mmsys CLK_MM_DISP_POSTMASK0>;
+			mediatek,gce-client-reg = <&gce 2 0x0 0x1000>;
 		};
 
 		dither0: dither@14011000 {
@@ -920,6 +949,7 @@
 			reg = <0x14011000 0x1000>;
 			interrupts = <GIC_SPI 318 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&mmsys CLK_MM_DISP_DITHER0>;
+			mediatek,gce-client-reg = <&gce 2 0x1000 0x1000>;
 		};
 
 		dsc0: dsc@14019000 {
@@ -927,12 +957,14 @@
 			reg = <0x14019000 0x1000>;
 			interrupts = <GIC_SPI 326 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&mmsys CLK_MM_DISP_DSC_WRAP0>;
+			mediatek,gce-client-reg = <&gce 2 0x9000 0x1000>;
 		};
 
 		dsi0: dsi@1401a000 {
 			compatible = "mediatek,mt6878-dsi";
 			reg = <0x1401a000 0x1000>;
 			interrupts = <GIC_SPI 328 IRQ_TYPE_LEVEL_HIGH 0>;
+			mediatek,gce-client-reg = <&gce 2 0xa000 0x1000>;
 			clocks = <&mmsys CLK_MM_DISP_DSI0>,
 				 <&mmsys CLK_MM_DSI0>,
 				 <&mipi_tx0>;
@@ -951,6 +983,42 @@
 			clock-output-names = "mipi_tx0_pll";
 			#clock-cells = <0>;
 			#phy-cells = <0>;
+		};
+
+		/*
+		 * Display SMI (local arbiters + common). No power-domains are
+		 * referenced: the disp/mm_infra domains are left powered by LK
+		 * (mm_infra is a hardware-voter domain with no upstream genpd
+		 * support) and kept on via clk_ignore_unused. The larbs/common
+		 * are clocked by the single CLK_MM_SMI_COMMON mmsys gate. OVL
+		 * fetches the framebuffer physically (no IOMMU) through larb0.
+		 */
+		smi_common_disp: smi@1e801000 {
+			compatible = "mediatek,mt6878-smi-common";
+			reg = <0x1e801000 0x1000>;
+			clocks = <&mmsys CLK_MM_SMI_COMMON>,
+				 <&mmsys CLK_MM_SMI_COMMON>;
+			clock-names = "apb", "smi";
+		};
+
+		smi_larb0: smi@1401e000 {
+			compatible = "mediatek,mt6878-smi-larb";
+			reg = <0x1401e000 0x1000>;
+			mediatek,smi = <&smi_common_disp>;
+			mediatek,larb-id = <0>;
+			clocks = <&mmsys CLK_MM_SMI_COMMON>,
+				 <&mmsys CLK_MM_SMI_COMMON>;
+			clock-names = "apb", "smi";
+		};
+
+		smi_larb1: smi@1401f000 {
+			compatible = "mediatek,mt6878-smi-larb";
+			reg = <0x1401f000 0x1000>;
+			mediatek,smi = <&smi_common_disp>;
+			mediatek,larb-id = <1>;
+			clocks = <&mmsys CLK_MM_SMI_COMMON>,
+				 <&mmsys CLK_MM_SMI_COMMON>;
+			clock-names = "apb", "smi";
 		};
 
 		scpsys: syscon@1c001000 {

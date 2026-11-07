@@ -42,7 +42,7 @@
 #define CMD_DONE_INT_FLAG		BIT(1)
 #define TE_RDY_INT_FLAG			BIT(2)
 #define VM_DONE_INT_FLAG		BIT(3)
-#define EXT_TE_RDY_INT_FLAG		BIT(4)
+#define FRAME_DONE_INT_FLAG		BIT(4)	/* command-mode frame drained to GRAM */
 #define DSI_BUSY			BIT(31)
 
 #define DSI_CON_CTRL		0x10
@@ -60,6 +60,26 @@
 #define MIX_MODE			BIT(17)
 
 #define DSI_TXRX_CTRL		0x18
+
+#define DSI_MEM_CONTI		0x90
+#define DSI_WMEM_CONTI			0x3c
+
+/* Command-mode DSI buffer / FIFO bandwidth-request thresholds (N4 family). */
+#define DSI_CON_CTRL		0x10
+#define DSI_CM_WAIT_DATA_EVERY_LINE_EN	BIT(24)
+#define DSI_RESERVED		0xf0
+#define DSI_VDE_BLOCK_ULTRA		BIT(29)
+#define DSI_DEBUG_SEL		0x170
+#define MM_RST_SEL			BIT(10)
+#define DSI_BUF_CON1		0x404
+#define DSI_BUF_SODI_HIGH	0x414
+#define DSI_BUF_SODI_LOW	0x418
+#define DSI_BUF_PREULTRA_HIGH	0x424
+#define DSI_BUF_PREULTRA_LOW	0x428
+#define DSI_BUF_ULTRA_HIGH	0x42c
+#define DSI_BUF_ULTRA_LOW	0x430
+#define DSI_BUF_URGENT_HIGH	0x434
+#define DSI_BUF_URGENT_LOW	0x438
 #define VC_NUM				BIT(1)
 #define LANE_NUM			GENMASK(5, 2)
 #define DIS_EOT				BIT(6)
@@ -227,6 +247,10 @@ struct mtk_dsi {
 	u32 irq_data;
 	wait_queue_head_t irq_wait_queue;
 	const struct mtk_dsi_driver_data *driver_data;
+
+	/* command-mode CRTC vblank completion (driven by TE_RDY/FRAME_DONE) */
+	void (*vblank_cb)(void *data);
+	void *vblank_cb_data;
 };
 
 static inline struct mtk_dsi *bridge_to_dsi(struct drm_bridge *b)
@@ -376,6 +400,52 @@ static void mtk_dsi_set_vm_cmd(struct mtk_dsi *dsi)
 	mtk_dsi_mask(dsi, dsi->driver_data->reg_vm_cmd_off, TS_VFP_EN, TS_VFP_EN);
 }
 
+/*
+ * Program the command-mode DSI output buffer bandwidth-request thresholds
+ * (SODI / pre-ultra / ultra / urgent) and the valid threshold. In command
+ * mode the DSI pulls the frame from the display pipeline into its line buffer
+ * and writes it to the panel GRAM; without sane thresholds the buffer under-
+ * runs and the frame never drains, so the mutex/vblank never complete and the
+ * panel stays black. Constants are the MT6878 ("N4") values from the vendor
+ * driver (buffer_unit/sram_unit=32, urgent 14/15 us, DSI0 buf_con=1554).
+ */
+static void mtk_dsi_cmdmode_buf_config(struct mtk_dsi *dsi)
+{
+	u32 data_rate_mhz = DIV_ROUND_UP(dsi->data_rate, HZ_PER_MHZ);
+	const u32 buffer_unit = 32, sram_unit = 32;
+	const u32 urgent_lo_us = 14, urgent_hi_us = 15;
+	const u32 buf_con = 1554;	/* MT6878 DSI0 */
+	const u32 dsi_buf_bpp = 3;
+	const u32 mmsys_clk = 208;	/* MHz, disp mmclk */
+	u32 base = data_rate_mhz * dsi->lanes / 8 / buffer_unit;
+	u32 fill_rate = mmsys_clk * dsi_buf_bpp / buffer_unit;
+	u32 tmp = buf_con * sram_unit / buffer_unit;
+	u32 sodi_hi, sodi_lo;
+
+	if (!base)
+		base = 1;
+
+	/* command mode, do not wait for data every line */
+	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_CM_WAIT_DATA_EVERY_LINE_EN, 0);
+	/* valid threshold */
+	mtk_dsi_mask(dsi, DSI_BUF_CON1, GENMASK(14, 0), 25 * base);
+	mtk_dsi_mask(dsi, DSI_DEBUG_SEL, MM_RST_SEL, MM_RST_SEL);
+	/* allow ultra request between SOF and VACT */
+	mtk_dsi_mask(dsi, DSI_RESERVED, DSI_VDE_BLOCK_ULTRA, 0);
+
+	sodi_hi = (fill_rate > base) ? tmp - (12 * (fill_rate - base) / 10) : tmp;
+	sodi_lo = 28 * base;
+
+	writel(sodi_hi & 0xfffff, dsi->regs + DSI_BUF_SODI_HIGH);
+	writel(sodi_lo & 0xfffff, dsi->regs + DSI_BUF_SODI_LOW);
+	writel((26 * base) & 0xfffff, dsi->regs + DSI_BUF_PREULTRA_HIGH);
+	writel((25 * base) & 0xfffff, dsi->regs + DSI_BUF_PREULTRA_LOW);
+	writel((25 * base) & 0xfffff, dsi->regs + DSI_BUF_ULTRA_HIGH);
+	writel((23 * base) & 0xfffff, dsi->regs + DSI_BUF_ULTRA_LOW);
+	writel((urgent_hi_us * base) & 0xfffff, dsi->regs + DSI_BUF_URGENT_HIGH);
+	writel((urgent_lo_us * base) & 0xfffff, dsi->regs + DSI_BUF_URGENT_LOW);
+}
+
 static void mtk_dsi_rxtx_control(struct mtk_dsi *dsi)
 {
 	u32 regval, tmp_reg = 0;
@@ -394,6 +464,16 @@ static void mtk_dsi_rxtx_control(struct mtk_dsi *dsi)
 		regval |= DIS_EOT;
 
 	writel(regval, dsi->regs + DSI_TXRX_CTRL);
+
+	/*
+	 * Command mode: enable the DSI "write memory continue" path so the
+	 * display engine's frame data is forwarded to the panel GRAM as DCS
+	 * memory writes. Without this the panel never receives pixels.
+	 */
+	if (!(dsi->mode_flags & MIPI_DSI_MODE_VIDEO)) {
+		writel(DSI_WMEM_CONTI, dsi->regs + DSI_MEM_CONTI);
+		mtk_dsi_cmdmode_buf_config(dsi);
+	}
 }
 
 static void mtk_dsi_ps_control(struct mtk_dsi *dsi, bool config_vact)
@@ -627,6 +707,15 @@ static void mtk_dsi_set_interrupt_enable(struct mtk_dsi *dsi)
 {
 	u32 inten = LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG;
 
+	/*
+	 * Command mode: the frame transfer to the panel GRAM is signalled by
+	 * FRAME_DONE, and the panel's TE (tearing-effect) vsync by TE_RDY.
+	 * These drive the CRTC vblank/page-flip completion (video mode uses
+	 * the OVL frame-complete instead).
+	 */
+	if (!(dsi->mode_flags & MIPI_DSI_MODE_VIDEO))
+		inten |= TE_RDY_INT_FLAG | FRAME_DONE_INT_FLAG;
+
 	writel(inten, dsi->regs + DSI_INTEN);
 }
 
@@ -665,6 +754,20 @@ static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 	struct mtk_dsi *dsi = dev_id;
 	u32 status, tmp;
 	u32 flag = LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG;
+	u32 cmd_status;
+
+	/*
+	 * Command-mode completion interrupts (frame drained / panel TE). These
+	 * are NOT part of the read-ack (RACK) handshake below, so ack them
+	 * separately. In command mode they drive the CRTC vblank completion.
+	 */
+	cmd_status = readl(dsi->regs + DSI_INTSTA) &
+		     (TE_RDY_INT_FLAG | FRAME_DONE_INT_FLAG);
+	if (cmd_status) {
+		mtk_dsi_mask(dsi, DSI_INTSTA, cmd_status, 0);
+		if (dsi->vblank_cb)
+			dsi->vblank_cb(dsi->vblank_cb_data);
+	}
 
 	status = readl(dsi->regs + DSI_INTSTA) & flag;
 
@@ -907,6 +1010,17 @@ mtk_dsi_bridge_mode_valid(struct drm_bridge *bridge,
 	if (bpp < 0)
 		return MODE_ERROR;
 
+	/*
+	 * With DSC the link carries the compressed stream, so the data rate
+	 * scales with the compressed bits-per-pixel, not the uncompressed
+	 * pixel format.  MediaTek command-mode panels keep a constant HS clock
+	 * and stretch the vertical front porch to pick the refresh rate, which
+	 * makes the nominal pixel clock high; judging it by the uncompressed
+	 * bpp would wrongly reject an otherwise valid compressed mode.
+	 */
+	if (dsi->dsc)
+		bpp = dsi->dsc->bits_per_pixel >> 4;
+
 	if (mode->clock * bpp / dsi->lanes > 1500000)
 		return MODE_CLOCK_HIGH;
 
@@ -938,6 +1052,50 @@ void mtk_dsi_ddp_stop(struct device *dev)
 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
 
 	mtk_dsi_poweroff(dsi);
+}
+
+/*
+ * Command-mode frame trigger: after the pipeline registers (OVL fb address
+ * etc.) have been updated, kick the DSI to pull one frame from the display
+ * pipeline and push it to the panel GRAM. Video mode free-runs, so nothing to
+ * do there. Called from the CRTC after each config on the no-cmdq SW path.
+ */
+void mtk_dsi_ddp_trigger(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+
+	if (dsi->mode_flags & MIPI_DSI_MODE_VIDEO)
+		return;
+
+	mtk_dsi_start(dsi);
+}
+
+/*
+ * Command-mode CRTC vblank completion: the crtc registers mtk_crtc_ddp_irq
+ * here (as it does on the OVL for video mode); the DSI IRQ handler calls it
+ * on TE_RDY / FRAME_DONE so the page flip completes.
+ */
+void mtk_dsi_register_vblank_cb(struct device *dev,
+				void (*vblank_cb)(void *),
+				void *vblank_cb_data)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+
+	dsi->vblank_cb = vblank_cb;
+	dsi->vblank_cb_data = vblank_cb_data;
+}
+
+void mtk_dsi_unregister_vblank_cb(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+
+	dsi->vblank_cb = NULL;
+	dsi->vblank_cb_data = NULL;
+}
+
+void mtk_dsi_enable_vblank(struct device *dev)
+{
+	/* command-mode TE_RDY/FRAME_DONE are enabled in mtk_dsi_set_interrupt_enable */
 }
 
 static int mtk_dsi_encoder_init(struct drm_device *drm, struct mtk_dsi *dsi)
