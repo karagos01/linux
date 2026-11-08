@@ -8,6 +8,7 @@
  * panel-visionox-hc5622-dphy-cmd-120hz driver.
  */
 
+#include <linux/backlight.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/mod_devicetable.h>
@@ -74,10 +75,7 @@ static int visionox_hc5622_on(struct visionox_hc5622 *ctx)
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_DISPLAY_ON);
 	mipi_dsi_msleep(&dsi_ctx, 50);
 
-	/* Force maximum brightness (12-bit via 0x51) so the panel is visible */
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_DISPLAY_BRIGHTNESS,
-				     0x0f, 0xff);
-
+	/* the brightness is (re)applied by the backlight on panel enable */
 	return dsi_ctx.accum_err;
 }
 
@@ -172,6 +170,44 @@ static int visionox_hc5622_get_modes(struct drm_panel *panel,
 						    &visionox_hc5622_mode);
 }
 
+/*
+ * 12-bit brightness through DCS 0x51. Levels above 3800 drive the panel in
+ * high-brightness mode; the vendor default is 3515 (0xdbb).
+ */
+#define HC5622_MAX_BRIGHTNESS		4095
+#define HC5622_DEFAULT_BRIGHTNESS	3515
+
+static int visionox_hc5622_bl_update_status(struct backlight_device *bl)
+{
+	struct mipi_dsi_device *dsi = bl_get_data(bl);
+	struct visionox_hc5622 *ctx = mipi_dsi_get_drvdata(dsi);
+	u16 brightness = backlight_get_brightness(bl);
+
+	/* nothing to talk to while the panel is powered off */
+	if (!ctx->panel.prepared)
+		return 0;
+
+	return mipi_dsi_dcs_set_display_brightness_large(dsi, brightness);
+}
+
+static const struct backlight_ops visionox_hc5622_bl_ops = {
+	.update_status = visionox_hc5622_bl_update_status,
+};
+
+static struct backlight_device *
+visionox_hc5622_create_backlight(struct mipi_dsi_device *dsi)
+{
+	const struct backlight_properties props = {
+		.type = BACKLIGHT_RAW,
+		.brightness = HC5622_DEFAULT_BRIGHTNESS,
+		.max_brightness = HC5622_MAX_BRIGHTNESS,
+	};
+
+	return devm_backlight_device_register(&dsi->dev, dev_name(&dsi->dev),
+					      &dsi->dev, dsi,
+					      &visionox_hc5622_bl_ops, &props);
+}
+
 static const struct drm_panel_funcs visionox_hc5622_panel_funcs = {
 	.prepare = visionox_hc5622_prepare,
 	.unprepare = visionox_hc5622_unprepare,
@@ -219,9 +255,10 @@ static int visionox_hc5622_probe(struct mipi_dsi_device *dsi)
 
 	ctx->panel.prepare_prev_first = true;
 
-	ret = drm_panel_of_backlight(&ctx->panel);
-	if (ret)
-		return dev_err_probe(dev, ret, "Failed to get backlight\n");
+	ctx->panel.backlight = visionox_hc5622_create_backlight(dsi);
+	if (IS_ERR(ctx->panel.backlight))
+		return dev_err_probe(dev, PTR_ERR(ctx->panel.backlight),
+				     "Failed to create backlight\n");
 
 	drm_panel_add(&ctx->panel);
 
