@@ -1110,6 +1110,13 @@ void mtk_dsi_ddp_stop(struct device *dev)
 	mtk_dsi_poweroff(dsi);
 }
 
+const struct drm_dsc_config *mtk_dsi_ddp_get_dsc(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+
+	return dsi->dsc;
+}
+
 /*
  * DSI command queue entry for the frame transfer: a DCS write_memory_start
  * long write whose payload is streamed from the display engine (CONFIG bit 0,

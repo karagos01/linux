@@ -48,6 +48,7 @@ enum mtk_ddp_comp_type {
 
 struct mtk_ddp_comp;
 struct cmdq_pkt;
+struct drm_dsc_config;
 struct mtk_ddp_comp_funcs {
 	int (*power_on)(struct device *dev);
 	void (*power_off)(struct device *dev);
@@ -60,6 +61,10 @@ struct mtk_ddp_comp_funcs {
 	void (*stop)(struct device *dev);
 	/* Push one frame to a command-mode output (no-op for video mode). */
 	void (*trigger)(struct device *dev, struct cmdq_pkt *cmdq_pkt);
+	/* DSC parameters of the sink of an output, NULL if uncompressed */
+	const struct drm_dsc_config *(*get_dsc)(struct device *dev);
+	/* Pass the sink's DSC parameters (or NULL) to a DSC encoder */
+	void (*set_dsc)(struct device *dev, const struct drm_dsc_config *dsc);
 	void (*register_vblank_cb)(struct device *dev,
 				   void (*vblank_cb)(void *),
 				   void *vblank_cb_data);
@@ -168,6 +173,21 @@ static inline void mtk_ddp_comp_trigger(struct mtk_ddp_comp *comp,
 {
 	if (comp->funcs && comp->funcs->trigger)
 		comp->funcs->trigger(comp->dev, cmdq_pkt);
+}
+
+static inline const struct drm_dsc_config *
+mtk_ddp_comp_get_dsc(struct mtk_ddp_comp *comp)
+{
+	if (comp->funcs && comp->funcs->get_dsc)
+		return comp->funcs->get_dsc(comp->dev);
+	return NULL;
+}
+
+static inline void mtk_ddp_comp_set_dsc(struct mtk_ddp_comp *comp,
+					const struct drm_dsc_config *dsc)
+{
+	if (comp->funcs && comp->funcs->set_dsc)
+		comp->funcs->set_dsc(comp->dev, dsc);
 }
 
 static inline void mtk_ddp_comp_register_vblank_cb(struct mtk_ddp_comp *comp,

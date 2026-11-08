@@ -353,6 +353,7 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 	struct drm_encoder *encoder;
 	struct drm_connector_list_iter conn_iter;
 	struct drm_device *dev = mtk_crtc->base.dev;
+	const struct drm_dsc_config *dsc;
 	unsigned int width, height, vrefresh, bpc = MTK_MAX_BPC;
 	int ret;
 	int i;
@@ -414,11 +415,14 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 	/* let display events (TE, frame done, ...) reach the GCE */
 	mtk_mmsys_gce_event_enable(mtk_crtc->mmsys_dev);
 
+	dsc = mtk_ddp_comp_get_dsc(mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1]);
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
 
 		if (i == 1)
 			mtk_ddp_comp_bgclr_in_on(comp);
+
+		mtk_ddp_comp_set_dsc(comp, dsc);
 
 		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);
 		mtk_ddp_comp_start(comp);

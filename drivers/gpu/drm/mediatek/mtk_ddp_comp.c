@@ -12,6 +12,7 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/soc/mediatek/mtk-cmdq.h>
+#include <drm/display/drm_dsc.h>
 #include <drm/drm_print.h>
 
 #include "mtk_crtc.h"
@@ -45,6 +46,27 @@
 #define DSC_DUAL_INOUT				BIT(2)
 #define DSC_BYPASS				BIT(4)
 #define DSC_UFOE_SEL				BIT(16)
+#define DSC_CON_DEFAULT				0x80
+#define DISP_REG_DSC_PIC_W			0x0018
+#define DISP_REG_DSC_PIC_H			0x001c
+#define DISP_REG_DSC_SLICE_W			0x0020
+#define DISP_REG_DSC_SLICE_H			0x0024
+#define DISP_REG_DSC_CHUNK_SIZE			0x0028
+#define DISP_REG_DSC_BUF_SIZE			0x002c
+#define DISP_REG_DSC_MODE			0x0030
+#define DSC_SLICE_MODE				BIT(0)
+#define DISP_REG_DSC_CFG			0x0034
+#define DISP_REG_DSC_PAD			0x0038
+#define DISP_REG_DSC_ENC_WIDTH			0x003c
+#define DISP_REG_DSC_DBG_CON			0x0060
+#define DSC_CKSM_CAL_EN				BIT(9)
+#define DISP_REG_DSC_OBUF			0x0070
+#define DISP_REG_DSC_PPS(n)			(0x0080 + 4 * (n))
+#define DISP_REG_DSC_SHADOW			0x0200
+#define DSC_SHADOW_VER_MASK			GENMASK(6, 5)
+#define DSC_SHADOW_VER_1_1			BIT(5)
+#define DSC_FORCE_COMMIT			BIT(0)
+#define DSC_BYPASS_SHADOW			BIT(1)
 
 #define DISP_REG_OD_EN				0x0000
 #define DISP_REG_OD_CFG				0x0020
@@ -64,8 +86,25 @@ struct mtk_ddp_comp_dev {
 	struct clk *clk;
 	void __iomem *regs;
 	struct cmdq_client_reg cmdq_reg;
-	/* DSC: control word of a bootloader-configured encoder, 0 if none */
-	u32 dsc_boot_con;
+	/* DSC: compression parameters of the sink, NULL for bypass */
+	const struct drm_dsc_config *dsc;
+	/* DSC: SoC specific data, NULL if the encoder is only bypassed */
+	const struct mtk_disp_dsc_data *dsc_data;
+};
+
+/**
+ * struct mtk_disp_dsc_data - SoC specific DSC encoder data
+ * @shadow_ctrl: offset of the shadow register control
+ * @obuf: output buffer setting for pictures narrower than 1440 pixels, or 0
+ */
+struct mtk_disp_dsc_data {
+	u32 shadow_ctrl;
+	u32 obuf;
+};
+
+static const struct mtk_disp_dsc_data mt6878_dsc_data = {
+	.shadow_ctrl = 0x228,
+	.obuf = 0x800002d9,
 };
 
 void mtk_ddp_write(struct cmdq_pkt *cmdq_pkt, unsigned int value,
@@ -189,30 +228,98 @@ static void mtk_dither_set(struct device *dev, unsigned int bpc,
 			      DISP_DITHERING, cmdq_pkt);
 }
 
+static void mtk_dsc_encoder_config(struct mtk_ddp_comp_dev *priv,
+				   unsigned int h, struct cmdq_pkt *cmdq_pkt)
+{
+	const struct drm_dsc_config *dsc = priv->dsc;
+	u32 slices = dsc->slice_count;
+	u32 slice_w = dsc->slice_width;
+	u32 slice_h = dsc->slice_height;
+	u32 pic_w = slice_w * slices;
+	u32 group_w = DIV_ROUND_UP(slice_w, 3);
+	u32 slices_per_col = DIV_ROUND_UP(h, slice_h);
+	u32 chunk = dsc->slice_chunk_size;
+	u32 out_w = DIV_ROUND_UP(chunk * slices, 3);
+	u32 val;
+	int i;
+
+#define DSC_W(off, v) mtk_ddp_write_relaxed(cmdq_pkt, v, &priv->cmdq_reg, \
+					     priv->regs, off)
+
+	if (priv->dsc_data->obuf && pic_w < 1440)
+		DSC_W(DISP_REG_DSC_OBUF, priv->dsc_data->obuf);
+	DSC_W(DISP_REG_DSC_ENC_WIDTH, pic_w << 16 | slice_w);
+	/* leave DSC_EN to start/stop */
+	mtk_ddp_write_mask(cmdq_pkt, DSC_CON_DEFAULT | DSC_UFOE_SEL,
+			   &priv->cmdq_reg, priv->regs, DISP_REG_DSC_CON,
+			   GENMASK(31, 1));
+	DSC_W(DISP_REG_DSC_PIC_W, (group_w * slices - 1) << 16 | pic_w);
+	DSC_W(DISP_REG_DSC_PIC_H, (slices_per_col * slice_h - 1) << 16 | (h - 1));
+	DSC_W(DISP_REG_DSC_SLICE_W, (group_w - 1) << 16 | slice_w);
+	DSC_W(DISP_REG_DSC_SLICE_H, (slice_w % 3) << 30 |
+	      (slices_per_col - 1) << 16 | (slice_h - 1));
+	DSC_W(DISP_REG_DSC_CHUNK_SIZE, out_w << 16 | chunk);
+	DSC_W(DISP_REG_DSC_PAD, out_w * 3 - chunk * slices);
+	DSC_W(DISP_REG_DSC_BUF_SIZE, chunk * slice_h);
+	/* the DSI buffers the compressed stream: no initial delay lines */
+	val = slices > 1 ? DSC_SLICE_MODE : 0;
+	mtk_ddp_write_mask(cmdq_pkt, val, &priv->cmdq_reg, priv->regs,
+			   DISP_REG_DSC_MODE, GENMASK(15, 0));
+	/* vendor values, bits [3:0] are the flatness threshold 2 << (bpc - 8) */
+	DSC_W(DISP_REG_DSC_CFG, dsc->bits_per_component == 8 ? 0x22 : 0x828);
+	mtk_ddp_write_mask(cmdq_pkt, DSC_CKSM_CAL_EN, &priv->cmdq_reg, priv->regs,
+			   DISP_REG_DSC_DBG_CON, DSC_CKSM_CAL_EN);
+	mtk_ddp_write_mask(cmdq_pkt, DSC_SHADOW_VER_1_1, &priv->cmdq_reg,
+			   priv->regs, DISP_REG_DSC_SHADOW, DSC_SHADOW_VER_MASK);
+
+	DSC_W(DISP_REG_DSC_PPS(0), dsc->line_buf_depth |
+	      dsc->bits_per_component << 4 | dsc->bits_per_pixel << 8 |
+	      dsc->convert_rgb << 18 | dsc->block_pred_enable << 19);
+	DSC_W(DISP_REG_DSC_PPS(1), dsc->initial_xmit_delay |
+	      dsc->initial_dec_delay << 16);
+	DSC_W(DISP_REG_DSC_PPS(2), dsc->initial_scale_value |
+	      dsc->scale_increment_interval << 16);
+	DSC_W(DISP_REG_DSC_PPS(3), dsc->scale_decrement_interval |
+	      dsc->first_line_bpg_offset << 16);
+	DSC_W(DISP_REG_DSC_PPS(4), dsc->nfl_bpg_offset |
+	      dsc->slice_bpg_offset << 16);
+	DSC_W(DISP_REG_DSC_PPS(5), dsc->initial_offset |
+	      dsc->final_offset << 16);
+	DSC_W(DISP_REG_DSC_PPS(6), dsc->flatness_min_qp |
+	      dsc->flatness_max_qp << 8 | dsc->rc_model_size << 16);
+	DSC_W(DISP_REG_DSC_PPS(7), dsc->rc_edge_factor |
+	      dsc->rc_quant_incr_limit0 << 8 | dsc->rc_quant_incr_limit1 << 16 |
+	      dsc->rc_tgt_offset_high << 24 | dsc->rc_tgt_offset_low << 28);
+	/* RC buffer thresholds, already in units of 64 bits */
+	for (i = 0; i < DSC_NUM_BUF_RANGES - 1; i += 4) {
+		val = 0;
+		for (int j = 0; j < 4 && i + j < DSC_NUM_BUF_RANGES - 1; j++)
+			val |= dsc->rc_buf_thresh[i + j] << (8 * j);
+		DSC_W(DISP_REG_DSC_PPS(8 + i / 4), val);
+	}
+	/* RC ranges, two per register */
+	for (i = 0; i < DSC_NUM_BUF_RANGES; i += 2) {
+		val = 0;
+		for (int j = 0; j < 2 && i + j < DSC_NUM_BUF_RANGES; j++) {
+			const struct drm_dsc_rc_range_parameters *rp =
+				&dsc->rc_range_params[i + j];
+
+			val |= (rp->range_min_qp | rp->range_max_qp << 5 |
+				(rp->range_bpg_offset & 0x3f) << 10) << (16 * j);
+		}
+		DSC_W(DISP_REG_DSC_PPS(12 + i / 2), val);
+	}
+#undef DSC_W
+}
+
 static void mtk_dsc_config(struct device *dev, unsigned int w,
 			   unsigned int h, unsigned int vrefresh,
 			   unsigned int bpc, struct cmdq_pkt *cmdq_pkt)
 {
 	struct mtk_ddp_comp_dev *priv = dev_get_drvdata(dev);
 
-	/*
-	 * If the bootloader already brought up and enabled the DSC encoder
-	 * (in-cell DSC command-mode panels such as the Visionox HC5622 on
-	 * MT6878), keep its configuration instead of forcing bypass, which
-	 * would break the compressed data path. There is no DSC encoder
-	 * programming here yet, so remember its control word and restore it
-	 * on every later config: mtk_dsc_stop() clears it.
-	 */
-	if (!priv->dsc_boot_con) {
-		u32 con = readl(priv->regs + DISP_REG_DSC_CON);
-
-		if (con & DSC_EN)
-			priv->dsc_boot_con = con;
-	}
-	if (priv->dsc_boot_con) {
-		/* leave DSC_EN to start/stop */
-		mtk_ddp_write_mask(cmdq_pkt, priv->dsc_boot_con, &priv->cmdq_reg,
-				   priv->regs, DISP_REG_DSC_CON, GENMASK(31, 1));
+	if (priv->dsc && priv->dsc_data) {
+		mtk_dsc_encoder_config(priv, h, cmdq_pkt);
 		return;
 	}
 
@@ -225,10 +332,22 @@ static void mtk_dsc_config(struct device *dev, unsigned int w,
 			   DISP_REG_DSC_CON, DSC_DUAL_INOUT);
 }
 
+static void mtk_dsc_set_dsc(struct device *dev, const struct drm_dsc_config *dsc)
+{
+	struct mtk_ddp_comp_dev *priv = dev_get_drvdata(dev);
+
+	priv->dsc = dsc;
+}
+
 static void mtk_dsc_start(struct device *dev)
 {
 	struct mtk_ddp_comp_dev *priv = dev_get_drvdata(dev);
 
+	if (priv->dsc_data)
+		mtk_ddp_write_mask(NULL, DSC_FORCE_COMMIT | DSC_BYPASS_SHADOW,
+				   &priv->cmdq_reg, priv->regs,
+				   priv->dsc_data->shadow_ctrl,
+				   DSC_FORCE_COMMIT | DSC_BYPASS_SHADOW);
 	/* write with mask to reserve the value set in mtk_dsc_config */
 	mtk_ddp_write_mask(NULL, DSC_EN, &priv->cmdq_reg, priv->regs, DISP_REG_DSC_CON, DSC_EN);
 }
@@ -237,7 +356,11 @@ static void mtk_dsc_stop(struct device *dev)
 {
 	struct mtk_ddp_comp_dev *priv = dev_get_drvdata(dev);
 
-	writel_relaxed(0x0, priv->regs + DISP_REG_DSC_CON);
+	if (priv->dsc_data)
+		mtk_ddp_write_mask(NULL, 0, &priv->cmdq_reg, priv->regs,
+				   DISP_REG_DSC_CON, DSC_EN);
+	else
+		writel_relaxed(0x0, priv->regs + DISP_REG_DSC_CON);
 }
 
 static void mtk_od_config(struct device *dev, unsigned int w,
@@ -337,12 +460,14 @@ static const struct mtk_ddp_comp_funcs ddp_dsc = {
 	.config = mtk_dsc_config,
 	.start = mtk_dsc_start,
 	.stop = mtk_dsc_stop,
+	.set_dsc = mtk_dsc_set_dsc,
 };
 
 static const struct mtk_ddp_comp_funcs ddp_dsi = {
 	.start = mtk_dsi_ddp_start,
 	.stop = mtk_dsi_ddp_stop,
 	.trigger = mtk_dsi_ddp_trigger,
+	.get_dsc = mtk_dsi_ddp_get_dsc,
 	.encoder_index = mtk_dsi_encoder_index,
 	.register_vblank_cb = mtk_dsi_register_vblank_cb,
 	.unregister_vblank_cb = mtk_dsi_unregister_vblank_cb,
@@ -716,6 +841,9 @@ int mtk_ddp_comp_init(struct device *dev, struct device_node *node, struct mtk_d
 	priv->regs = devm_of_iomap(dev, node, 0, NULL);
 	if (IS_ERR(priv->regs))
 		return PTR_ERR(priv->regs);
+
+	if (of_device_is_compatible(node, "mediatek,mt6878-disp-dsc"))
+		priv->dsc_data = &mt6878_dsc_data;
 
 	priv->clk = of_clk_get(node, 0);
 	if (IS_ERR(priv->clk))
