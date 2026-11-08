@@ -111,19 +111,18 @@ static void mtk_crtc_finish_page_flip(struct mtk_crtc *mtk_crtc)
 
 static void mtk_drm_finish_page_flip(struct mtk_crtc *mtk_crtc)
 {
-	struct mtk_drm_private *priv __maybe_unused = mtk_crtc->base.dev->dev_private;
 	unsigned long flags;
 
 	drm_crtc_handle_vblank(&mtk_crtc->base);
 
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	/*
-	 * Video-mode cmdq devices complete the page flip from the cmdq
-	 * callback (the GCE packet waits for frame-done). Command-mode
-	 * devices complete it from this DSI TE/FRAME_DONE vblank callback:
-	 * their GCE packet only kicks the frame and returns.
+	 * With the GCE the page flip completes from the cmdq callback, once
+	 * the packet has applied the config (and, in command mode, pushed the
+	 * frame). Completing it here on a command-mode TE would signal frames
+	 * that have not been sent yet.
 	 */
-	if (mtk_crtc->cmdq_client.chan && !priv->data->cmd_mode)
+	if (mtk_crtc->cmdq_client.chan)
 		return;
 #endif
 
@@ -1131,8 +1130,13 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 				has_ctm = true;
 		}
 
-		mtk_ddp_comp_register_vblank_cb(comp, mtk_crtc_ddp_irq,
-						&mtk_crtc->base);
+		/*
+		 * In command mode the vblank is the output's TE: an OVL frame
+		 * done would count each pushed frame as an extra vblank.
+		 */
+		if (!priv->data->cmd_mode || i == mtk_crtc->ddp_comp_nr - 1)
+			mtk_ddp_comp_register_vblank_cb(comp, mtk_crtc_ddp_irq,
+							&mtk_crtc->base);
 	}
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
