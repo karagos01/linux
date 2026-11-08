@@ -688,6 +688,20 @@ static int cmdq_probe(struct platform_device *pdev)
 	struct cmdq *cmdq;
 	int err, i;
 
+	/*
+	 * The GCE fetches its command buffers through the display IOMMU (it has
+	 * an "iommus" phandle). On this SoC the whole MM cluster — including that
+	 * IOMMU — only binds in the deferred-probe-timeout wave, and at that
+	 * timeout fw_devlink relaxes the GCE->IOMMU link and lets us probe before
+	 * the IOMMU has attached us, leaving the GCE on dma-direct (its buffers
+	 * land above 4 GB and the GCE then faults on the first instruction fetch).
+	 * Defer until the IOMMU has actually mapped us; once the timeout has
+	 * fired the deferral is honoured indefinitely, so we re-probe (and
+	 * re-run dma_configure, attaching to the IOMMU) as soon as it binds.
+	 */
+	if (of_property_present(dev->of_node, "iommus") && !device_iommu_mapped(dev))
+		return -EPROBE_DEFER;
+
 	cmdq = devm_kzalloc(dev, sizeof(*cmdq), GFP_KERNEL);
 	if (!cmdq)
 		return -ENOMEM;
@@ -850,7 +864,17 @@ static const struct gce_plat gce_plat_mt8196 = {
 static const struct gce_plat gce_plat_mt6878 = {
 	.thread_nr = 24,
 	.shift = 3,
+	/*
+	 * The GCE subtracts a fixed 1 GB (the DRAM base) from the address it
+	 * stores in THR_CURR_ADDR when it drives the bus, so when it fetches
+	 * through the display IOMMU it emits (IOVA - 0x4000_0000) and the
+	 * translation misses one GB below the mapped IOVA. Compensate by adding
+	 * it back in cmdq_convert_gce_addr (mminfra_offset), so the emitted bus
+	 * address equals the IOVA that dma_map handed us.
+	 */
+	.mminfra_offset = SZ_1G,
 	.control_by_sw = true,
+	.sw_ddr_en = true,
 	.gce_num = 1
 };
 
