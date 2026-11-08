@@ -65,6 +65,8 @@
 		      <0x0 0x1401a000 0x0 0x1000>;
 		reg-names = "mutex", "dsi";
 		mediatek,mutex-id = <0>;
+		/* superseded by the native DRM driver, which owns mutex + DSI */
+		status = "disabled";
 	};
 
 	sound {

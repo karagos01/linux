@@ -866,8 +866,13 @@
 		 * mutex SOF -> frame-done). Clock is left as LK programmed it
 		 * (real gce clock lives in the mm_infra HWV domain with no
 		 * upstream clk/genpd support); clk26m is a stand-in so the cmdq
-		 * driver's clk_prepare_enable is a harmless no-op. No iommus:
-		 * cmdq command buffer DMAs physically via dma-ranges (no IOMMU).
+		 * driver's clk_prepare_enable is a harmless no-op.
+		 *
+		 * The GCE sits BEHIND the display IOMMU (M4U): its command buffer
+		 * is dma-direct placed above 4 GB, which the GCE cannot fetch
+		 * untranslated (the thread faults on the first instruction fetch,
+		 * thread IRQ status bit4, PC stuck at pa_base). The iommus phandle
+		 * below routes it through disp_iommu so the fetch is translated.
 		 */
 		gce: mailbox@1e980000 {
 			compatible = "mediatek,mt6878-gce";
@@ -876,6 +881,14 @@
 			#mbox-cells = <2>;
 			clocks = <&clk26m>;
 			clock-names = "gce";
+			/*
+			 * Route the GCE's command-buffer DMA through the display
+			 * M4U so it can fetch buffers placed above 4 GB. The id is
+			 * MTK_M4U_ID(21, 0) = (21 << 5) | 0 = 0x2A0 (fake GCE larb
+			 * 21, port 0); the vendor uses pseudo-larb 41 (0x520), but
+			 * mainline's larb field is 5-bit so a fake id < 32 is used.
+			 */
+			iommus = <&disp_iommu 0x2a0>;
 		};
 
 		mmsys: syscon@14000000 {
@@ -965,6 +978,8 @@
 			reg = <0x1401a000 0x1000>;
 			interrupts = <GIC_SPI 328 IRQ_TYPE_LEVEL_HIGH 0>;
 			mediatek,gce-client-reg = <&gce 2 0xa000 0x1000>;
+			/* GCE event disp_wait_dsi0_te: syncs command-mode frames */
+			mediatek,gce-events = <0xdf>;
 			clocks = <&mmsys CLK_MM_DISP_DSI0>,
 				 <&mmsys CLK_MM_DSI0>,
 				 <&mipi_tx0>;
@@ -1008,6 +1023,68 @@
 			mediatek,larb-id = <0>;
 			clocks = <&mmsys CLK_MM_SMI_COMMON>,
 				 <&mmsys CLK_MM_SMI_COMMON>;
+			clock-names = "apb", "smi";
+		};
+
+		/*
+		 * Display M4U (IOMMU). Added ONLY so the GCE/CMDQ can fetch its
+		 * command buffer through a translating domain (the buffer is
+		 * dma-direct placed above 4 GB, which the GCE cannot reach
+		 * untranslated). OVL/larb0 is intentionally NOT listed in
+		 * mediatek,larbs, so the display keeps its working physical path;
+		 * only the fake GCE larb below is attached. Interrupt 0x116 = 278.
+		 */
+		disp_iommu: iommu@1e802000 {
+			compatible = "mediatek,mt6878-disp-iommu";
+			reg = <0x1e802000 0x1000>;
+			interrupts = <GIC_SPI 278 IRQ_TYPE_LEVEL_HIGH 0>;
+			/*
+			 * clk26m stand-in (independent of mmsys, so no probe
+			 * cycle); the M4U core itself is clocked by LK. The M4U
+			 * is owned by the hypervisor, which traps the page-table
+			 * base write and mirrors our table (see mtk_iommu.c).
+			 */
+			clocks = <&clk26m>;
+			clock-names = "bclk";
+			mediatek,larbs = <&smi_larb_gce>;
+			#iommu-cells = <1>;
+		};
+
+		/*
+		 * Fake SMI larb standing in for the GCE/CMDQ master (the vendor
+		 * routes the GCE through the display M4U as pseudo-larb 41; here
+		 * it is larb-id 21). It has no real larb registers — the reg below
+		 * is an unused placeholder window that is mapped but never touched
+		 * (mtk-smi larb_direct_to_common_mask BIT(21) skips the port write).
+		 * Its only job is to exist so the GCE can attach to disp_iommu.
+		 */
+		/*
+		 * Fake SMI common for the GCE IOMMU path. The real display common
+		 * (smi_common_disp) is clocked by the mmsys MM clock, and the mmsys
+		 * in turn holds a GCE mbox handle; linking the GCE's IOMMU to
+		 * smi_common_disp would therefore close a probe cycle (mmsys -> gce
+		 * -> iommu -> smi_common_disp -> mmsys) that strands the whole MM
+		 * cluster at the deferred-probe timeout. This standalone common is
+		 * clk26m-clocked (independent of mmsys), carries no real traffic
+		 * (the GCE's translation is done by the M4U HW), and exists only so
+		 * the fake GCE larb / disp_iommu have a common to bind to.
+		 */
+		smi_common_gce: smi@1e809000 {
+			compatible = "mediatek,mt6878-smi-common";
+			reg = <0x1e809000 0x1000>;
+			clocks = <&clk26m>, <&clk26m>;
+			clock-names = "apb", "smi";
+		};
+
+		smi_larb_gce: smi@1e808000 {
+			compatible = "mediatek,mt6878-smi-larb";
+			reg = <0x1e808000 0x1000>;
+			mediatek,smi = <&smi_common_gce>;
+			mediatek,larb-id = <21>;
+			/* clk26m stand-in — see disp_iommu. This fake larb never
+			 * touches its registers (direct_to_common), so the clock is
+			 * only for probe; keep it off the slow mm clock chain. */
+			clocks = <&clk26m>, <&clk26m>;
 			clock-names = "apb", "smi";
 		};
 
