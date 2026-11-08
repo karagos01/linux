@@ -80,7 +80,6 @@ void mtk_mutex_remove_comp(struct mtk_mutex *mutex,
 void mtk_mutex_unprepare(struct mtk_mutex *mutex);
 void mtk_mutex_put(struct mtk_mutex *mutex);
 void mtk_mutex_acquire(struct mtk_mutex *mutex);
-void mtk_mutex_submit_sof(struct mtk_mutex *mutex);
 void mtk_mutex_release(struct mtk_mutex *mutex);
 int mtk_mutex_write_mod(struct mtk_mutex *mutex,
 			enum mtk_mutex_mod_index idx,

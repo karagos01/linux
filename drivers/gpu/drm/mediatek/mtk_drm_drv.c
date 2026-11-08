@@ -325,6 +325,7 @@ static const struct mtk_mmsys_driver_data mt6878_mmsys_driver_data = {
 	.main_len = ARRAY_SIZE(mt6878_mtk_ddp_main),
 	.mmsys_dev_num = 1,
 	.shadow_register = true,
+	.cmd_mode = true,
 };
 
 static const struct mtk_mmsys_driver_data mt8195_vdosys0_driver_data = {

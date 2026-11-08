@@ -49,7 +49,7 @@ unsigned int mtk_dpi_encoder_index(struct device *dev);
 
 void mtk_dsi_ddp_start(struct device *dev);
 void mtk_dsi_ddp_stop(struct device *dev);
-void mtk_dsi_ddp_trigger(struct device *dev);
+void mtk_dsi_ddp_trigger(struct device *dev, struct cmdq_pkt *cmdq_pkt);
 unsigned int mtk_dsi_encoder_index(struct device *dev);
 void mtk_dsi_register_vblank_cb(struct device *dev,
 				void (*vblank_cb)(void *),

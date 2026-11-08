@@ -59,7 +59,7 @@ struct mtk_ddp_comp_funcs {
 	void (*start)(struct device *dev);
 	void (*stop)(struct device *dev);
 	/* Push one frame to a command-mode output (no-op for video mode). */
-	void (*trigger)(struct device *dev);
+	void (*trigger)(struct device *dev, struct cmdq_pkt *cmdq_pkt);
 	void (*register_vblank_cb)(struct device *dev,
 				   void (*vblank_cb)(void *),
 				   void *vblank_cb_data);
@@ -163,10 +163,11 @@ static inline void mtk_ddp_comp_stop(struct mtk_ddp_comp *comp)
 		comp->funcs->stop(comp->dev);
 }
 
-static inline void mtk_ddp_comp_trigger(struct mtk_ddp_comp *comp)
+static inline void mtk_ddp_comp_trigger(struct mtk_ddp_comp *comp,
+					struct cmdq_pkt *cmdq_pkt)
 {
 	if (comp->funcs && comp->funcs->trigger)
-		comp->funcs->trigger(comp->dev);
+		comp->funcs->trigger(comp->dev, cmdq_pkt);
 }
 
 static inline void mtk_ddp_comp_register_vblank_cb(struct mtk_ddp_comp *comp,

@@ -44,6 +44,11 @@ struct mtk_mmsys_driver_data {
 	unsigned int num_conn_routes;
 
 	bool shadow_register;
+	/*
+	 * The output is a command-mode DSI panel: frames are pushed explicitly
+	 * (mutex one-shot + DSI trigger) instead of free-running.
+	 */
+	bool cmd_mode;
 	unsigned int mmsys_id;
 	unsigned int mmsys_dev_num;
 

@@ -42,6 +42,12 @@
 #define OVL_CONST_BLEND					BIT(28)
 #define DISP_REG_OVL_RDMA_CTRL(n)		(0x00c0 + 0x20 * (n))
 #define DISP_REG_OVL_RDMA_GMC(n)		(0x00c8 + 0x20 * (n))
+#define DISP_REG_OVL_RDMA_FIFO_CTRL(n)		(0x00d0 + 0x20 * (n))
+#define DISP_REG_OVL_RDMA_MEM_GMC_S2(n)		(0x01e0 + 0x04 * (n))
+#define DISP_REG_OVL_RDMA_GREQ_NUM		0x01f0
+#define DISP_REG_OVL_RDMA_GREQ_URG_NUM		0x01f4
+#define DISP_REG_OVL_RDMA_ULTRA_SRC		0x01f8
+#define DISP_REG_OVL_RDMA_BUF_LOW		0x01fc
 #define DISP_REG_OVL_ADDR_MT2701		0x0040
 #define DISP_REG_OVL_CLRFMT_EXT			0x02d0
 #define OVL_CON_CLRFMT_BIT_DEPTH_MASK(n)		(GENMASK(1, 0) << (4 * (n)))
@@ -140,6 +146,23 @@ static const u32 mt8195_formats[] = {
 	DRM_FORMAT_YUYV,
 };
 
+/*
+ * Per-SoC OVL RDMA read-DMA control and memory QoS (FIFO depth, ultra and
+ * pre-ultra thresholds, request issue thresholds). Without them the read
+ * FIFO of a command-mode pipeline underflows as soon as the DSI pulls the
+ * frame (OVL INTSTA FME_UND) and the frame never completes.
+ */
+struct mtk_ovl_rdma_qos {
+	u32 rdma_ctrl;
+	u32 mem_gmc;
+	u32 fifo_ctrl;
+	u32 mem_gmc_s2;
+	u32 greq_num;
+	u32 greq_urg_num;
+	u32 ultra_src;
+	u32 buf_low;
+};
+
 struct mtk_disp_ovl_data {
 	unsigned int addr;
 	unsigned int gmc_bits;
@@ -151,6 +174,7 @@ struct mtk_disp_ovl_data {
 	const u32 *formats;
 	size_t num_formats;
 	bool supports_clrfmt_ext;
+	const struct mtk_ovl_rdma_qos *rdma_qos;
 };
 
 /*
@@ -366,6 +390,29 @@ int mtk_ovl_layer_check(struct device *dev, unsigned int idx,
 	return 0;
 }
 
+static void mtk_ovl_rdma_qos_config(struct mtk_disp_ovl *ovl, unsigned int idx,
+				    struct cmdq_pkt *cmdq_pkt)
+{
+	const struct mtk_ovl_rdma_qos *qos = ovl->data->rdma_qos;
+
+	mtk_ddp_write(cmdq_pkt, qos->rdma_ctrl, &ovl->cmdq_reg, ovl->regs,
+		      DISP_REG_OVL_RDMA_CTRL(idx));
+	mtk_ddp_write(cmdq_pkt, qos->mem_gmc, &ovl->cmdq_reg, ovl->regs,
+		      DISP_REG_OVL_RDMA_GMC(idx));
+	mtk_ddp_write(cmdq_pkt, qos->fifo_ctrl, &ovl->cmdq_reg, ovl->regs,
+		      DISP_REG_OVL_RDMA_FIFO_CTRL(idx));
+	mtk_ddp_write(cmdq_pkt, qos->mem_gmc_s2, &ovl->cmdq_reg, ovl->regs,
+		      DISP_REG_OVL_RDMA_MEM_GMC_S2(idx));
+	mtk_ddp_write(cmdq_pkt, qos->greq_num, &ovl->cmdq_reg, ovl->regs,
+		      DISP_REG_OVL_RDMA_GREQ_NUM);
+	mtk_ddp_write(cmdq_pkt, qos->greq_urg_num, &ovl->cmdq_reg, ovl->regs,
+		      DISP_REG_OVL_RDMA_GREQ_URG_NUM);
+	mtk_ddp_write(cmdq_pkt, qos->ultra_src, &ovl->cmdq_reg, ovl->regs,
+		      DISP_REG_OVL_RDMA_ULTRA_SRC);
+	mtk_ddp_write(cmdq_pkt, qos->buf_low, &ovl->cmdq_reg, ovl->regs,
+		      DISP_REG_OVL_RDMA_BUF_LOW);
+}
+
 void mtk_ovl_layer_on(struct device *dev, unsigned int idx,
 		      struct cmdq_pkt *cmdq_pkt)
 {
@@ -374,19 +421,23 @@ void mtk_ovl_layer_on(struct device *dev, unsigned int idx,
 	unsigned int gmc_value;
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
 
-	mtk_ddp_write(cmdq_pkt, 0x1, &ovl->cmdq_reg, ovl->regs,
-		      DISP_REG_OVL_RDMA_CTRL(idx));
-	gmc_thrshd_l = GMC_THRESHOLD_LOW >>
-		      (GMC_THRESHOLD_BITS - ovl->data->gmc_bits);
-	gmc_thrshd_h = GMC_THRESHOLD_HIGH >>
-		      (GMC_THRESHOLD_BITS - ovl->data->gmc_bits);
-	if (ovl->data->gmc_bits == 10)
-		gmc_value = gmc_thrshd_h | gmc_thrshd_h << 16;
-	else
-		gmc_value = gmc_thrshd_l | gmc_thrshd_l << 8 |
-			    gmc_thrshd_h << 16 | gmc_thrshd_h << 24;
-	mtk_ddp_write(cmdq_pkt, gmc_value,
-		      &ovl->cmdq_reg, ovl->regs, DISP_REG_OVL_RDMA_GMC(idx));
+	if (ovl->data->rdma_qos) {
+		mtk_ovl_rdma_qos_config(ovl, idx, cmdq_pkt);
+	} else {
+		mtk_ddp_write(cmdq_pkt, 0x1, &ovl->cmdq_reg, ovl->regs,
+			      DISP_REG_OVL_RDMA_CTRL(idx));
+		gmc_thrshd_l = GMC_THRESHOLD_LOW >>
+			      (GMC_THRESHOLD_BITS - ovl->data->gmc_bits);
+		gmc_thrshd_h = GMC_THRESHOLD_HIGH >>
+			      (GMC_THRESHOLD_BITS - ovl->data->gmc_bits);
+		if (ovl->data->gmc_bits == 10)
+			gmc_value = gmc_thrshd_h | gmc_thrshd_h << 16;
+		else
+			gmc_value = gmc_thrshd_l | gmc_thrshd_l << 8 |
+				    gmc_thrshd_h << 16 | gmc_thrshd_h << 24;
+		mtk_ddp_write(cmdq_pkt, gmc_value,
+			      &ovl->cmdq_reg, ovl->regs, DISP_REG_OVL_RDMA_GMC(idx));
+	}
 	mtk_ddp_write_mask(cmdq_pkt, BIT(idx), &ovl->cmdq_reg, ovl->regs,
 			   DISP_REG_OVL_SRC_CON, BIT(idx));
 }
@@ -746,6 +797,32 @@ static const struct mtk_disp_ovl_data mt8192_ovl_driver_data = {
 	.num_formats = ARRAY_SIZE(mt8173_formats),
 };
 
+/* LK's working values on MT6878 with the Visionox HC5622 command-mode panel */
+static const struct mtk_ovl_rdma_qos mt6878_ovl_rdma_qos = {
+	.rdma_ctrl = 0x00640001,	/* RDMA_EN, request threshold */
+	.mem_gmc = 0x03ff03ff,		/* ultra / pre-ultra threshold */
+	.fifo_ctrl = 288 << 16,		/* FIFO depth */
+	.mem_gmc_s2 = 0x205f00bf,	/* issue-request thresholds 191/95 */
+	.greq_num = 0x07775533,
+	.greq_urg_num = 0x16666442,
+	.ultra_src = 0xf1ff0055,
+	.buf_low = 0x00000055,
+};
+
+static const struct mtk_disp_ovl_data mt6878_ovl_2l_driver_data = {
+	.addr = DISP_REG_OVL_ADDR_MT8173,
+	.gmc_bits = 10,
+	.layer_nr = 2,
+	.fmt_rgb565_is_0 = true,
+	.smi_id_en = true,
+	.blend_modes = BIT(DRM_MODE_BLEND_PREMULTI) |
+		       BIT(DRM_MODE_BLEND_COVERAGE) |
+		       BIT(DRM_MODE_BLEND_PIXEL_NONE),
+	.formats = mt8173_formats,
+	.num_formats = ARRAY_SIZE(mt8173_formats),
+	.rdma_qos = &mt6878_ovl_rdma_qos,
+};
+
 static const struct mtk_disp_ovl_data mt8192_ovl_2l_driver_data = {
 	.addr = DISP_REG_OVL_ADDR_MT8173,
 	.gmc_bits = 10,
@@ -782,7 +859,7 @@ static const struct of_device_id mtk_disp_ovl_driver_dt_match[] = {
 	{ .compatible = "mediatek,mt8173-disp-ovl",
 	  .data = &mt8173_ovl_driver_data},
 	{ .compatible = "mediatek,mt6878-disp-ovl",
-	  .data = &mt8192_ovl_2l_driver_data},
+	  .data = &mt6878_ovl_2l_driver_data},
 	{ .compatible = "mediatek,mt8183-disp-ovl",
 	  .data = &mt8183_ovl_driver_data},
 	{ .compatible = "mediatek,mt8183-disp-ovl-2l",

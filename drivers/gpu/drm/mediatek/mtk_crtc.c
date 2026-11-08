@@ -54,6 +54,8 @@ struct mtk_crtc {
 	struct cmdq_client		cmdq_client;
 	struct cmdq_pkt			cmdq_handle;
 	u32				cmdq_event;
+	/* GCE event of the command-mode panel TE, -1 if none */
+	int				cmdq_te_event;
 	u32				cmdq_vblank_cnt;
 	wait_queue_head_t		cb_blocking_queue;
 #endif
@@ -109,12 +111,19 @@ static void mtk_crtc_finish_page_flip(struct mtk_crtc *mtk_crtc)
 
 static void mtk_drm_finish_page_flip(struct mtk_crtc *mtk_crtc)
 {
+	struct mtk_drm_private *priv __maybe_unused = mtk_crtc->base.dev->dev_private;
 	unsigned long flags;
 
 	drm_crtc_handle_vblank(&mtk_crtc->base);
 
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
-	if (mtk_crtc->cmdq_client.chan)
+	/*
+	 * Video-mode cmdq devices complete the page flip from the cmdq
+	 * callback (the GCE packet waits for frame-done). Command-mode
+	 * devices complete it from this DSI TE/FRAME_DONE vblank callback:
+	 * their GCE packet only kicks the frame and returns.
+	 */
+	if (mtk_crtc->cmdq_client.chan && !priv->data->cmd_mode)
 		return;
 #endif
 
@@ -403,6 +412,9 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 		mtk_mutex_add_comp(mtk_crtc->mutex, mtk_crtc->ddp_comp[i]->id);
 	mtk_mutex_enable(mtk_crtc->mutex);
 
+	/* let display events (TE, frame done, ...) reach the GCE */
+	mtk_mmsys_gce_event_enable(mtk_crtc->mmsys_dev);
+
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
 
@@ -595,35 +607,53 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 	if (pending_async_planes)
 		mtk_crtc->pending_async_planes = true;
 
-	if (priv->data->shadow_register
+	if (priv->data->shadow_register && !priv->data->cmd_mode) {
+		mtk_mutex_acquire(mtk_crtc->mutex);
+		mtk_crtc_ddp_config(crtc, NULL);
+		mtk_mutex_release(mtk_crtc->mutex);
+	}
+	if (priv->data->cmd_mode
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	    && !mtk_crtc->cmdq_client.chan
 #endif
 	   ) {
 		/*
-		 * Command-mode frame push on the no-cmdq SW path (fallback when
-		 * the GCE/cmdq channel is unavailable; the cmdq path below is
-		 * preferred and handles command-mode properly via the GCE):
-		 *   1. write the pipeline registers (OVL framebuffer address etc.)
-		 *   2. arm the command-mode output (DSI_START) so it captures the
-		 *      next pipeline frame as DCS memory writes (no-op for video)
-		 *   3. trigger one pipeline run via the SINGLE-mode mutex
-		 * For video-mode outputs step 2 is a no-op and the mutex is
-		 * DSI0-SOF synced, so this reduces to a plain shadow update.
+		 * Command mode without the GCE: write the pipeline config, then
+		 * push one frame. The SINGLE-mode mutex runs once per EN 0->1
+		 * edge, so re-arm it before triggering the DSI transfer.
 		 */
 		mtk_crtc_ddp_config(crtc, NULL);
-		for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
-			mtk_ddp_comp_trigger(mtk_crtc->ddp_comp[i]);
+		mtk_mutex_disable(mtk_crtc->mutex);
 		mtk_mutex_enable(mtk_crtc->mutex);
-		mtk_mutex_submit_sof(mtk_crtc->mutex);
+		for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
+			mtk_ddp_comp_trigger(mtk_crtc->ddp_comp[i], NULL);
 	}
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	if (mtk_crtc->cmdq_client.chan) {
 		mbox_flush(mtk_crtc->cmdq_client.chan, 2000);
 		cmdq_handle->cmd_buf_size = 0;
 		cmdq_pkt_clear_event(cmdq_handle, mtk_crtc->cmdq_event);
-		cmdq_pkt_wfe(cmdq_handle, mtk_crtc->cmdq_event, false);
-		mtk_crtc_ddp_config(crtc, cmdq_handle);
+		if (priv->data->cmd_mode) {
+			/*
+			 * Command mode: nothing free-runs, so apply the config
+			 * right away, wait for the panel TE (to avoid tearing),
+			 * then run the SINGLE-mode mutex once and start the DSI
+			 * transfer. The SINGLE-mode mutex has no EOF source, so
+			 * the packet does not wait for frame done; the page flip
+			 * completes from the DSI TE/FRAME_DONE vblank callback.
+			 */
+			mtk_crtc_ddp_config(crtc, cmdq_handle);
+			if (mtk_crtc->cmdq_te_event >= 0) {
+				cmdq_pkt_clear_event(cmdq_handle, mtk_crtc->cmdq_te_event);
+				cmdq_pkt_wfe(cmdq_handle, mtk_crtc->cmdq_te_event, true);
+			}
+			mtk_mutex_enable_by_cmdq(mtk_crtc->mutex, cmdq_handle);
+			for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
+				mtk_ddp_comp_trigger(mtk_crtc->ddp_comp[i], cmdq_handle);
+		} else {
+			cmdq_pkt_wfe(cmdq_handle, mtk_crtc->cmdq_event, false);
+			mtk_crtc_ddp_config(crtc, cmdq_handle);
+		}
 		cmdq_pkt_eoc(cmdq_handle);
 		dma_sync_single_for_device(mtk_crtc->cmdq_client.chan->mbox->dev,
 					   cmdq_handle->pa_base,
@@ -1174,6 +1204,18 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 
 		/* for sending blocking cmd in crtc disable */
 		init_waitqueue_head(&mtk_crtc->cb_blocking_queue);
+	}
+
+	/* command mode: the output's TE GCE event syncs the frame push */
+	mtk_crtc->cmdq_te_event = -1;
+	if (priv->data->cmd_mode && mtk_crtc->cmdq_client.chan) {
+		struct mtk_ddp_comp *out = mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1];
+		u32 te_event;
+
+		if (out->dev &&
+		    !of_property_read_u32(out->dev->of_node, "mediatek,gce-events",
+					  &te_event))
+			mtk_crtc->cmdq_te_event = te_event;
 	}
 #endif
 

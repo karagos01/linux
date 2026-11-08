@@ -13,6 +13,7 @@
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
 #include <linux/reset.h>
+#include <linux/soc/mediatek/mtk-cmdq.h>
 #include <linux/units.h>
 
 #include <video/mipi_display.h>
@@ -71,7 +72,9 @@
 #define DSI_VDE_BLOCK_ULTRA		BIT(29)
 #define DSI_DEBUG_SEL		0x170
 #define MM_RST_SEL			BIT(10)
+#define DSI_BUF_CON0		0x400
 #define DSI_BUF_CON1		0x404
+#define DSI_TX_BUF_RW_TIMES	0x410
 #define DSI_BUF_SODI_HIGH	0x414
 #define DSI_BUF_SODI_LOW	0x418
 #define DSI_BUF_PREULTRA_HIGH	0x424
@@ -247,6 +250,7 @@ struct mtk_dsi {
 	u32 irq_data;
 	wait_queue_head_t irq_wait_queue;
 	const struct mtk_dsi_driver_data *driver_data;
+	struct cmdq_client_reg cmdq_reg;
 
 	/* command-mode CRTC vblank completion (driven by TE_RDY/FRAME_DONE) */
 	void (*vblank_cb)(void *data);
@@ -400,6 +404,21 @@ static void mtk_dsi_set_vm_cmd(struct mtk_dsi *dsi)
 	mtk_dsi_mask(dsi, dsi->driver_data->reg_vm_cmd_off, TS_VFP_EN, TS_VFP_EN);
 }
 
+/* Bytes per line of the DSC-compressed stream, or 0 without DSC. */
+static u32 mtk_dsi_dsc_line_bytes(struct mtk_dsi *dsi)
+{
+	u32 chunk, slices;
+
+	if (!dsi->dsc)
+		return 0;
+
+	chunk = DIV_ROUND_UP(dsi->dsc->slice_width *
+			     (dsi->dsc->bits_per_pixel >> 4), 8);
+	slices = DIV_ROUND_UP(dsi->vm.hactive, dsi->dsc->slice_width);
+
+	return chunk * slices;
+}
+
 /*
  * Program the command-mode DSI output buffer bandwidth-request thresholds
  * (SODI / pre-ultra / ultra / urgent) and the valid threshold. In command
@@ -420,13 +439,15 @@ static void mtk_dsi_cmdmode_buf_config(struct mtk_dsi *dsi)
 	u32 base = data_rate_mhz * dsi->lanes / 8 / buffer_unit;
 	u32 fill_rate = mmsys_clk * dsi_buf_bpp / buffer_unit;
 	u32 tmp = buf_con * sram_unit / buffer_unit;
-	u32 sodi_hi, sodi_lo;
+	const u32 in_width = 16;
+	u32 sodi_hi, sodi_lo, ps_wc;
 
 	if (!base)
 		base = 1;
 
-	/* command mode, do not wait for data every line */
-	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_CM_WAIT_DATA_EVERY_LINE_EN, 0);
+	/* command mode: per-line flow control (LK's working config) */
+	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_CM_WAIT_DATA_EVERY_LINE_EN,
+		     DSI_CM_WAIT_DATA_EVERY_LINE_EN);
 	/* valid threshold */
 	mtk_dsi_mask(dsi, DSI_BUF_CON1, GENMASK(14, 0), 25 * base);
 	mtk_dsi_mask(dsi, DSI_DEBUG_SEL, MM_RST_SEL, MM_RST_SEL);
@@ -444,6 +465,20 @@ static void mtk_dsi_cmdmode_buf_config(struct mtk_dsi *dsi)
 	writel((23 * base) & 0xfffff, dsi->regs + DSI_BUF_ULTRA_LOW);
 	writel((urgent_hi_us * base) & 0xfffff, dsi->regs + DSI_BUF_URGENT_HIGH);
 	writel((urgent_lo_us * base) & 0xfffff, dsi->regs + DSI_BUF_URGENT_LOW);
+
+	/*
+	 * Command-mode TX buffer: the number of IPM input-width (16 word) reads
+	 * per frame, rounded per line as WAIT_DATA_EVERY_LINE is set, and the
+	 * buffer enable plus its urgent/block flow-control bits (DSI_BUF_CON0
+	 * = 0xf, as LK programs it). Without these the DSI never pulls the frame
+	 * from the display engine.
+	 */
+	ps_wc = mtk_dsi_dsc_line_bytes(dsi);
+	if (!ps_wc)
+		ps_wc = dsi->vm.hactive * dsi_buf_bpp;
+	writel(DIV_ROUND_UP(ps_wc, in_width) * dsi->vm.vactive,
+	       dsi->regs + DSI_TX_BUF_RW_TIMES);
+	mtk_dsi_mask(dsi, DSI_BUF_CON0, 0xf, 0xf);
 }
 
 static void mtk_dsi_rxtx_control(struct mtk_dsi *dsi)
@@ -462,6 +497,11 @@ static void mtk_dsi_rxtx_control(struct mtk_dsi *dsi)
 
 	if (dsi->mode_flags & MIPI_DSI_MODE_NO_EOT_PACKET)
 		regval |= DIS_EOT;
+
+	/* Command mode: enable the hardware external-TE input so the DSI
+	 * engages the panel (as LK's working config does). */
+	if (!(dsi->mode_flags & MIPI_DSI_MODE_VIDEO))
+		regval |= EXT_TE_EN;
 
 	writel(regval, dsi->regs + DSI_TXRX_CTRL);
 
@@ -674,10 +714,19 @@ static void mtk_dsi_config_vdo_timing(struct mtk_dsi *dsi)
 	writel(vm->vfront_porch, dsi->regs + DSI_VFP_NL);
 	writel(vm->vactive, dsi->regs + DSI_VACT_NL);
 
-	if (dsi->driver_data->has_size_ctl)
+	if (dsi->driver_data->has_size_ctl) {
+		/*
+		 * With DSC the DSI input is the compressed stream, packed as
+		 * 24-bit words: the width is the compressed line size in 3-byte
+		 * units, not the pixel width.
+		 */
+		u32 width = mtk_dsi_dsc_line_bytes(dsi);
+
+		width = width ? DIV_ROUND_UP(width, 3) : vm->hactive;
 		writel(FIELD_PREP(DSI_HEIGHT, vm->vactive) |
-			FIELD_PREP(DSI_WIDTH, vm->hactive),
-			dsi->regs + DSI_SIZE_CON);
+		       FIELD_PREP(DSI_WIDTH, width),
+		       dsi->regs + DSI_SIZE_CON);
+	}
 
 	if (dsi->driver_data->support_per_frame_lp)
 		mtk_dsi_config_vdo_timing_per_frame_lp(dsi);
@@ -859,11 +908,16 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 		goto err_disable_engine_clk;
 	}
 
-	mtk_dsi_enable(dsi);
-
+	/*
+	 * Bypass the DSI shadow register before enabling the engine. The vendor
+	 * mt6878_dsi_driver_data has need_bypass_shadow=TRUE, so DSI config
+	 * writes go live immediately rather than waiting for a frame SOF commit.
+	 */
 	if (dsi->driver_data->has_shadow_ctl)
 		writel(FORCE_COMMIT | BYPASS_SHADOW,
 		       dsi->regs + dsi->driver_data->reg_shadow_dbg_off);
+
+	mtk_dsi_enable(dsi);
 
 	mtk_dsi_reset_engine(dsi);
 	mtk_dsi_phy_timconfig(dsi);
@@ -1055,19 +1109,58 @@ void mtk_dsi_ddp_stop(struct device *dev)
 }
 
 /*
- * Command-mode frame trigger: after the pipeline registers (OVL fb address
- * etc.) have been updated, kick the DSI to pull one frame from the display
- * pipeline and push it to the panel GRAM. Video mode free-runs, so nothing to
- * do there. Called from the CRTC after each config on the no-cmdq SW path.
+ * DSI command queue entry for the frame transfer: a DCS write_memory_start
+ * long write whose payload is streamed from the display engine (CONFIG bit 0,
+ * as the vendor driver programs it) and sent in HS.
  */
-void mtk_dsi_ddp_trigger(struct device *dev)
+#define DSI_CMDQ_WRITE_MEMORY_START \
+	((MIPI_DCS_WRITE_MEMORY_START << 16) | (MIPI_DSI_DCS_LONG_WRITE << 8) | \
+	 HSTX | BIT(0))
+
+/*
+ * Command-mode frame trigger: once the pipeline is configured and its mutex
+ * enabled, load write_memory_start into the DSI command queue and pulse
+ * DSI_START so the DSI pulls one frame from the pipeline into the panel GRAM.
+ * With a cmdq packet the sequence is appended for the GCE (preceded by a wait
+ * for the DSI to go idle), otherwise it is written directly. Video mode
+ * free-runs, so there is nothing to do.
+ *
+ * The vendor driver also enables HS blanking in the HFP
+ * (CMD_HS_HFP_BLANKING_HS_EN) for panels that do not return to LP on every
+ * line; that is not modelled here and must stay off for per-line-LP panels,
+ * where it underruns the DSI.
+ */
+void mtk_dsi_ddp_trigger(struct device *dev, struct cmdq_pkt *cmdq_pkt)
 {
 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	u32 val;
 
 	if (dsi->mode_flags & MIPI_DSI_MODE_VIDEO)
 		return;
 
-	mtk_dsi_start(dsi);
+#if IS_REACHABLE(CONFIG_MTK_CMDQ)
+	if (cmdq_pkt) {
+		if (!dsi->cmdq_reg.size) {
+			dev_warn_once(dev, "no mediatek,gce-client-reg, cannot trigger via GCE\n");
+			return;
+		}
+		cmdq_pkt_poll_mask(cmdq_pkt, dsi->cmdq_reg.subsys,
+				   dsi->cmdq_reg.offset + DSI_INTSTA, 0, DSI_BUSY);
+	} else
+#endif
+	if (readl_poll_timeout_atomic(dsi->regs + DSI_INTSTA, val,
+				      !(val & DSI_BUSY), 1, 50000)) {
+		dev_warn(dev, "DSI busy, dropping frame trigger\n");
+		return;
+	}
+
+	mtk_ddp_write(cmdq_pkt, DSI_CMDQ_WRITE_MEMORY_START, &dsi->cmdq_reg,
+		      dsi->regs, dsi->driver_data->reg_cmdq_off);
+	mtk_ddp_write(cmdq_pkt, CMDQ_SIZE_SEL | 1, &dsi->cmdq_reg, dsi->regs,
+		      DSI_CMDQ_SIZE);
+	mtk_ddp_write(cmdq_pkt, 0, &dsi->cmdq_reg, dsi->regs, DSI_START);
+	mtk_ddp_write(cmdq_pkt, 1, &dsi->cmdq_reg, dsi->regs, DSI_START);
+	mtk_ddp_write(cmdq_pkt, 0, &dsi->cmdq_reg, dsi->regs, DSI_START);
 }
 
 /*
@@ -1416,6 +1509,12 @@ static int mtk_dsi_probe(struct platform_device *pdev)
 	dsi->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(dsi->regs))
 		return dev_err_probe(dev, PTR_ERR(dsi->regs), "Failed to ioremap memory\n");
+
+#if IS_REACHABLE(CONFIG_MTK_CMDQ)
+	/* optional: lets the GCE trigger command-mode frames */
+	if (cmdq_dev_get_client_reg(dev, &dsi->cmdq_reg, 0))
+		dsi->cmdq_reg.size = 0;
+#endif
 
 	dsi->phy = devm_phy_get(dev, "dphy");
 	if (IS_ERR(dsi->phy))

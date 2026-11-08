@@ -1158,36 +1158,6 @@ void mtk_mutex_release(struct mtk_mutex *mutex)
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_release);
 
-/*
- * BIT(5) of the SOF register is the "SOF wait" control: 1 = hold (wait),
- * 0 = submit the SOF directly. Clearing it triggers one pipeline run, which
- * is how a command-mode (frame-trigger) frame is pushed to the panel on the
- * no-cmdq SW path. (Matches downstream mtk_disp_mutex_submit_sof: reg &= ~0x20.)
- */
-#define MUTEX_SOF_WAIT	BIT(5)
-void mtk_mutex_submit_sof(struct mtk_mutex *mutex)
-{
-	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
-						 mutex[mutex->id]);
-	unsigned int offset = DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg,
-						 mutex->id);
-	u32 reg;
-
-	reg = readl_relaxed(mtx->regs + offset) & ~MUTEX_SOF_WAIT;
-	writel(reg, mtx->regs + offset);
-
-	/*
-	 * SINGLE (SW-triggered) command-mode frame: the SOF value is 0 so the
-	 * BIT5 ("SOF wait") clear above is a no-op; the actual single-shot
-	 * frame is kicked by writing the mutex commit register. Do NOT poll
-	 * INT_MUTEX here (that is mtk_mutex_acquire's blocking path, which
-	 * times out in command mode because the frame drains asynchronously);
-	 * just fire it and let the DSI frame-done / TE complete the vblank.
-	 */
-	writel(1, mtx->regs + DISP_REG_MUTEX(mutex->id));
-}
-EXPORT_SYMBOL_GPL(mtk_mutex_submit_sof);
-
 int mtk_mutex_write_mod(struct mtk_mutex *mutex,
 			enum mtk_mutex_mod_index idx, bool clear)
 {
