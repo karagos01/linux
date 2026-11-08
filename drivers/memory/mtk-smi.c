@@ -562,6 +562,13 @@ static const struct mtk_smi_larb_gen mtk_smi_larb_mt8195 = {
  */
 static const struct mtk_smi_larb_gen mtk_smi_larb_mt6878 = {
 	.config_port                = mtk_smi_larb_config_port_gen2_general,
+	/*
+	 * larb 21 is a fake larb that stands in for the GCE/CMDQ master so it
+	 * can attach to the display IOMMU; it has no real SMI-larb registers,
+	 * so skip the F_MMU_EN port write for it (the GCE's M4U translation is
+	 * governed at the M4U, not a larb port). Real larbs (0..) are unaffected.
+	 */
+	.larb_direct_to_common_mask = BIT(21),
 };
 
 static const struct of_device_id mtk_smi_larb_of_ids[] = {
