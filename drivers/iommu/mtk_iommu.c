@@ -149,6 +149,16 @@
 #define INT_ID_PORT_WIDTH_6		BIT(19)
 #define CFG_IFA_MASTER_IN_ATF		BIT(20)
 #define DL_WITH_MULTI_LARB		BIT(21)
+/*
+ * The M4U is owned by the MTEE (GenieZone) hypervisor ("hyp-mmu type2"):
+ * the hardware walks a hypervisor-owned table. The hypervisor traps the
+ * PT_BASE write and mirrors ranges of the kernel table into the hardware
+ * table on request, so every map/unmap must be followed by a sync call.
+ */
+#define HYP_MMU_TYPE2			BIT(22)
+
+#define MTK_SIP_HYPMMU_TYPE2_ENABLED	0xbb00ffa4
+#define MTK_SIP_HYPMMU_TYPE2_INV	0xbb00ffa7
 
 #define MTK_IOMMU_HAS_FLAG_MASK(pdata, _x, mask)	\
 				((((pdata)->flags) & (mask)) == (_x))
@@ -172,6 +182,7 @@ enum mtk_iommu_plat {
 	M4U_MT8167,
 	M4U_MT8173,
 	M4U_MT8183,
+	M4U_MT6878,
 	M4U_MT8186,
 	M4U_MT8188,
 	M4U_MT8189,
@@ -260,6 +271,7 @@ struct mtk_iommu_data {
 	struct mtk_iommu_suspend_reg	reg;
 	struct iommu_group		*m4u_group[MTK_IOMMU_GROUP_MAX];
 	bool                            enable_4GB;
+	bool				hyp_mmu; /* HYP_MMU_TYPE2 active */
 
 	struct iommu_device		iommu;
 	const struct mtk_iommu_plat_data *plat_data;
@@ -683,6 +695,18 @@ static int mtk_iommu_domain_finalise(struct mtk_iommu_domain *dom,
 	else
 		dom->cfg.oas = 35;
 
+	if (MTK_IOMMU_HAS_FLAG(data->plat_data, HYP_MMU_TYPE2)) {
+		struct arm_smccc_res res;
+
+		arm_smccc_smc(MTK_SIP_HYPMMU_TYPE2_ENABLED, 0, 0, 0, 0, 0, 0, 0, &res);
+		if (res.a0 == 1) {
+			dev_info_once(data->dev, "page table is mirrored by the hypervisor\n");
+			/* The hypervisor walks our table with the CPU. */
+			data->hyp_mmu = true;
+			dom->cfg.coherent_walk = true;
+		}
+	}
+
 	dom->iop = alloc_io_pgtable_ops(ARM_V7S, &dom->cfg, data);
 	if (!dom->iop) {
 		dev_err(data->dev, "Failed to alloc io pgtable\n");
@@ -840,12 +864,36 @@ static void mtk_iommu_flush_iotlb_all(struct iommu_domain *domain)
 		mtk_iommu_tlb_flush_all(dom->bank->parent_data);
 }
 
+/*
+ * Ask the hypervisor to mirror [start, end] of our table into the HW table.
+ * Addresses are passed as (addr[31:12] << 12) | addr[34:32].
+ */
+static void mtk_iommu_hyp_sync(struct mtk_iommu_data *data,
+			       unsigned long start, unsigned long end)
+{
+	struct arm_smccc_res res;
+	u64 s = start, e = end;
+
+	if (!data->hyp_mmu)
+		return;
+
+	arm_smccc_smc(MTK_SIP_HYPMMU_TYPE2_INV,
+		      lower_32_bits(s & ~0xfffULL) | upper_32_bits(s),
+		      lower_32_bits(e & ~0xfffULL) | upper_32_bits(e),
+		      0 /* tab_id */, 0, 0, 0, 0, &res);
+	if (res.a0)
+		dev_err(data->dev, "hyp-mmu sync failed %lu, iova 0x%llx-0x%llx\n",
+			res.a0, s, e);
+}
+
 static void mtk_iommu_iotlb_sync(struct iommu_domain *domain,
 				 struct iommu_iotlb_gather *gather)
 {
 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
 	size_t length = gather->end - gather->start + 1;
 
+	if (gather->end >= gather->start)
+		mtk_iommu_hyp_sync(dom->bank->parent_data, gather->start, gather->end);
 	mtk_iommu_tlb_flush_range_sync(gather->start, length, dom->bank);
 }
 
@@ -854,6 +902,7 @@ static int mtk_iommu_sync_map(struct iommu_domain *domain, unsigned long iova,
 {
 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
 
+	mtk_iommu_hyp_sync(dom->bank->parent_data, iova, iova + size - 1);
 	mtk_iommu_tlb_flush_range_sync(iova, size, dom->bank);
 	return 0;
 }
@@ -1674,6 +1723,31 @@ static const unsigned int mt8186_larb_region_msk[MT8192_MULTI_REGION_NR_MAX][MTK
 	[5] = {[14] = ~0},			/* larb14 */
 };
 
+/*
+ * MT6878 display M4U. Minimal single-bank config whose only purpose in this
+ * port is to give the GCE/CMDQ a translating default domain so it can fetch
+ * its command buffer (which dma-direct places above 4 GB, out of the GCE's
+ * reach). The M4U is owned by the hypervisor (HYP_MMU_TYPE2): the PT_BASE
+ * write is trapped and our table is mirrored on every map/unmap. The display
+ * (OVL via larb0) is deliberately left OUT of mediatek,larbs so it keeps its
+ * working physical (bypass) path; only a fake GCE larb (id 21, standing in
+ * for the vendor's pseudo-larb 41) is attached. larbid_remap is only used by
+ * the fault handler print, so a placeholder is fine. single_domain = one
+ * 0..4 GB aperture, one page table.
+ */
+static const struct mtk_iommu_plat_data mt6878_data = {
+	.m4u_plat       = M4U_MT6878,
+	.flags          = HAS_BCLK | HAS_SUB_COMM_3BITS | OUT_ORDER_WR_EN |
+			  WR_THROT_EN | IOVA_34_EN | MTK_IOMMU_TYPE_MM |
+			  PGTABLE_PA_35_EN | HYP_MMU_TYPE2,
+	.inv_sel_reg    = REG_MMU_INV_SEL_GEN2,
+	.banks_num      = 1,
+	.banks_enable   = {true},
+	.iova_region    = single_domain,
+	.iova_region_nr = ARRAY_SIZE(single_domain),
+	.larbid_remap   = {{0}, {1}, {21}, {0}, {0}, {0}, {0}, {0}},
+};
+
 static const struct mtk_iommu_plat_data mt8186_data_mm = {
 	.m4u_plat       = M4U_MT8186,
 	.flags          = HAS_BCLK | HAS_SUB_COMM_2BITS | OUT_ORDER_WR_EN |
@@ -1907,6 +1981,7 @@ static const struct of_device_id mtk_iommu_of_ids[] = {
 	{ .compatible = "mediatek,mt8167-m4u", .data = &mt8167_data},
 	{ .compatible = "mediatek,mt8173-m4u", .data = &mt8173_data},
 	{ .compatible = "mediatek,mt8183-m4u", .data = &mt8183_data},
+	{ .compatible = "mediatek,mt6878-disp-iommu",  .data = &mt6878_data},
 	{ .compatible = "mediatek,mt8186-iommu-mm",    .data = &mt8186_data_mm}, /* mm: m4u */
 	{ .compatible = "mediatek,mt8188-iommu-infra", .data = &mt8188_data_infra},
 	{ .compatible = "mediatek,mt8188-iommu-vdo",   .data = &mt8188_data_vdo},
