@@ -66,6 +66,18 @@ void mtk_ccorr_config(struct device *dev, unsigned int w,
 		      DISP_CCORR_CFG);
 }
 
+void mtk_ccorr_relay_config(struct device *dev, unsigned int w,
+			    unsigned int h, unsigned int vrefresh,
+			    unsigned int bpc, struct cmdq_pkt *cmdq_pkt)
+{
+	struct mtk_disp_ccorr *ccorr = dev_get_drvdata(dev);
+
+	mtk_ddp_write(cmdq_pkt, w << 16 | h, &ccorr->cmdq_reg, ccorr->regs,
+		      DISP_CCORR_SIZE);
+	mtk_ddp_write(cmdq_pkt, CCORR_RELAY_MODE, &ccorr->cmdq_reg, ccorr->regs,
+		      DISP_CCORR_CFG);
+}
+
 void mtk_ccorr_start(struct device *dev)
 {
 	struct mtk_disp_ccorr *ccorr = dev_get_drvdata(dev);
