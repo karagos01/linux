@@ -23,6 +23,7 @@
 #define MT8183_MUTEX0_MOD1			0x34
 #define MT8183_MUTEX0_SOF0			0x2c
 
+#define DISP_REG_MUTEX_CFG			0x08
 #define DISP_REG_MUTEX_EN(n)			(0x20 + 0x20 * (n))
 #define DISP_REG_MUTEX(n)			(0x24 + 0x20 * (n))
 #define DISP_REG_MUTEX_RST(n)			(0x28 + 0x20 * (n))
@@ -348,8 +349,26 @@ enum mtk_mutex_sof_id {
 	DDP_MUTEX_SOF_MAX,
 };
 
+/*
+ * A mutex MOD bit that must be set together with a pipeline component: an
+ * engine that is not modelled as a DDP component but sits on that
+ * component's data path (fed by the mmsys routing) and runs as pass-through.
+ */
+struct mtk_mutex_extra_mod {
+	enum mtk_ddp_comp_id comp;
+	u8 mod;
+};
+
 struct mtk_mutex_data {
 	const u8 *mutex_mod;
+	const struct mtk_mutex_extra_mod *extra_mods;
+	const unsigned int num_extra_mods;
+	/*
+	 * DSI0 drives a command-mode panel: run the mutex in SINGLE
+	 * (SW/GCE-triggered) mode instead of DSI0-SOF synced, and make DSI0 a
+	 * MOD member so each one-shot run drives it with the pipeline.
+	 */
+	const bool dsi0_cmd_mode;
 	const u8 *mutex_table_mod;
 	const u16 *mutex_sof;
 	const u16 mutex_mod_reg;
@@ -834,8 +853,27 @@ static const struct mtk_mutex_data mt8192_mutex_driver_data = {
 	.mutex_sof_reg = MT8183_MUTEX0_SOF0,
 };
 
+/*
+ * MT6878: the mmsys routing feeds COLOR0 through RSZ0 -> TDSHP0 and CCORR0
+ * is hard-wired to CCORR1. Those engines run as pass-through (left in
+ * bypass/relay), but they must still be mutex members or they never get a
+ * SOF and the OVL underflows.
+ */
+#define MT6878_MUTEX_MOD_DISP_RSZ0	6
+#define MT6878_MUTEX_MOD_DISP_TDSHP0	7
+#define MT6878_MUTEX_MOD_DISP_CCORR1	11
+
+static const struct mtk_mutex_extra_mod mt6878_mutex_extra_mods[] = {
+	{ DDP_COMPONENT_COLOR0, MT6878_MUTEX_MOD_DISP_RSZ0 },
+	{ DDP_COMPONENT_COLOR0, MT6878_MUTEX_MOD_DISP_TDSHP0 },
+	{ DDP_COMPONENT_CCORR, MT6878_MUTEX_MOD_DISP_CCORR1 },
+};
+
 static const struct mtk_mutex_data mt6878_mutex_driver_data = {
 	.mutex_mod = mt6878_mutex_mod,
+	.extra_mods = mt6878_mutex_extra_mods,
+	.num_extra_mods = ARRAY_SIZE(mt6878_mutex_extra_mods),
+	.dsi0_cmd_mode = true,
 	.mutex_sof = mt8183_mutex_sof,
 	.mutex_mod_reg = MT8183_MUTEX0_MOD0,
 	.mutex_mod1_reg = MT8183_MUTEX0_MOD1,
@@ -926,14 +964,30 @@ void mtk_mutex_unprepare(struct mtk_mutex *mutex)
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_unprepare);
 
-/*
- * A command-mode panel does not free-run, so the display mutex is driven in
- * SINGLE (SW/GCE-triggered) mode rather than DSI0-SOF synced; otherwise the
- * SW shadow-path trigger never completes and no frame is pushed. Controls the
- * DSI0 SOF source below.
- */
-static bool mtk_mutex_single = true;
-module_param(mtk_mutex_single, bool, 0644);
+static void mtk_mutex_update_mod(struct mtk_mutex_ctx *mtx,
+				 struct mtk_mutex *mutex, u8 mod, bool set)
+{
+	unsigned int offset = DISP_REG_MUTEX_MOD(mtx, mod, mutex->id);
+	unsigned int reg = readl_relaxed(mtx->regs + offset);
+
+	if (set)
+		reg |= BIT(mod % 32);
+	else
+		reg &= ~BIT(mod % 32);
+	writel_relaxed(reg, mtx->regs + offset);
+}
+
+static void mtk_mutex_update_extra_mods(struct mtk_mutex_ctx *mtx,
+					struct mtk_mutex *mutex,
+					enum mtk_ddp_comp_id id, bool set)
+{
+	unsigned int i;
+
+	for (i = 0; i < mtx->data->num_extra_mods; i++)
+		if (mtx->data->extra_mods[i].comp == id)
+			mtk_mutex_update_mod(mtx, mutex,
+					     mtx->data->extra_mods[i].mod, set);
+}
 
 void mtk_mutex_add_comp(struct mtk_mutex *mutex,
 			enum mtk_ddp_comp_id id)
@@ -948,7 +1002,12 @@ void mtk_mutex_add_comp(struct mtk_mutex *mutex,
 
 	switch (id) {
 	case DDP_COMPONENT_DSI0:
-		sof_id = mtk_mutex_single ? MUTEX_SOF_SINGLE_MODE : MUTEX_SOF_DSI0;
+		if (mtx->data->dsi0_cmd_mode) {
+			sof_id = MUTEX_SOF_SINGLE_MODE;
+			mtk_mutex_update_mod(mtx, mutex, mtx->data->mutex_mod[id], true);
+		} else {
+			sof_id = MUTEX_SOF_DSI0;
+		}
 		break;
 	case DDP_COMPONENT_DSI1:
 		sof_id = MUTEX_SOF_DSI0;
@@ -977,6 +1036,7 @@ void mtk_mutex_add_comp(struct mtk_mutex *mutex,
 		reg = readl_relaxed(mtx->regs + offset);
 		reg |= BIT(mod_id);
 		writel_relaxed(reg, mtx->regs + offset);
+		mtk_mutex_update_extra_mods(mtx, mutex, id, true);
 		return;
 	}
 
@@ -999,6 +1059,9 @@ void mtk_mutex_remove_comp(struct mtk_mutex *mutex,
 
 	switch (id) {
 	case DDP_COMPONENT_DSI0:
+		if (mtx->data->dsi0_cmd_mode)
+			mtk_mutex_update_mod(mtx, mutex, mtx->data->mutex_mod[id], false);
+		fallthrough;
 	case DDP_COMPONENT_DSI1:
 	case DDP_COMPONENT_DSI2:
 	case DDP_COMPONENT_DSI3:
@@ -1017,6 +1080,7 @@ void mtk_mutex_remove_comp(struct mtk_mutex *mutex,
 		reg = readl_relaxed(mtx->regs + offset);
 		reg &= ~BIT(mod_id);
 		writel_relaxed(reg, mtx->regs + offset);
+		mtk_mutex_update_extra_mods(mtx, mutex, id, false);
 		break;
 	}
 }
@@ -1029,6 +1093,13 @@ void mtk_mutex_enable(struct mtk_mutex *mutex)
 
 	WARN_ON(&mtx->mutex[mutex->id] != mutex);
 
+	/*
+	 * On a command-mode SINGLE-mode mutex the EN 0->1 edge is the per-frame
+	 * one-shot trigger; clear a stale (bootloader) MUTEX_CFG first, as the
+	 * vendor driver does, or it can keep the mutex from driving the pipeline.
+	 */
+	if (mtx->data->dsi0_cmd_mode)
+		writel(0, mtx->regs + DISP_REG_MUTEX_CFG);
 	writel(1, mtx->regs + DISP_REG_MUTEX_EN(mutex->id));
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_enable);

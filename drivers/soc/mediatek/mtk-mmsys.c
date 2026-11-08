@@ -14,6 +14,7 @@
 #include <linux/soc/mediatek/mtk-mmsys.h>
 
 #include "mtk-mmsys.h"
+#include "mt6878-mmsys.h"
 #include "mt8167-mmsys.h"
 #include "mt8173-mmsys.h"
 #include "mt8183-mmsys.h"
@@ -114,7 +115,9 @@ static const struct mtk_mmsys_driver_data mt8188_vppsys1_driver_data = {
 
 static const struct mtk_mmsys_driver_data mt6878_mmsys_driver_data = {
 	.clk_driver = "clk-mt6878-mm",
-	/* routes added together with the DRM CRTC path (first-light milestone) */
+	.routes = mt6878_mmsys_routing_table,
+	.num_routes = ARRAY_SIZE(mt6878_mmsys_routing_table),
+	.gce_event_sel = true,
 };
 
 static const struct mtk_mmsys_driver_data mt8192_mmsys_driver_data = {
@@ -219,6 +222,31 @@ void mtk_mmsys_ddp_disconnect(struct device *dev,
 			mtk_mmsys_update_bits(mmsys, routes[i].addr, routes[i].mask, 0, NULL);
 }
 EXPORT_SYMBOL_GPL(mtk_mmsys_ddp_disconnect);
+
+/*
+ * Deliver the display hardware events (frame done, DSI EOF, TE, ...) to the
+ * GCE, so that a GCE packet waiting on them (wfe) does not hang. On MT6878 the
+ * vendor driver programs this in its path setup:
+ *   GCE_EVENT_SEL (0x308) = EVENT_GCED_EN | EVENT_GCEM_EN
+ *   BYPASS_MUX_SHADOW (0xc00) = 1
+ *   CROSSBAR_CON (0xc0c) = 0x00ff0000
+ */
+#define MT6878_MMSYS_GCE_EVENT_SEL	0x308
+#define MT6878_MMSYS_BYPASS_MUX_SHADOW	0xc00
+#define MT6878_MMSYS_CROSSBAR_CON	0xc0c
+
+void mtk_mmsys_gce_event_enable(struct device *dev)
+{
+	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
+
+	if (!mmsys->data->gce_event_sel)
+		return;
+
+	writel_relaxed(0x3, mmsys->regs + MT6878_MMSYS_GCE_EVENT_SEL);
+	writel_relaxed(0x1, mmsys->regs + MT6878_MMSYS_BYPASS_MUX_SHADOW);
+	writel_relaxed(0x00ff0000, mmsys->regs + MT6878_MMSYS_CROSSBAR_CON);
+}
+EXPORT_SYMBOL_GPL(mtk_mmsys_gce_event_enable);
 
 void mtk_mmsys_merge_async_config(struct device *dev, int idx, int width, int height,
 				  struct cmdq_pkt *cmdq_pkt)

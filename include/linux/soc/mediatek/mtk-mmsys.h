@@ -94,6 +94,8 @@ void mtk_mmsys_ddp_disconnect(struct device *dev,
 
 void mtk_mmsys_ddp_dpi_fmt_config(struct device *dev, u32 val);
 
+void mtk_mmsys_gce_event_enable(struct device *dev);
+
 void mtk_mmsys_merge_async_config(struct device *dev, int idx, int width,
 				  int height, struct cmdq_pkt *cmdq_pkt);
 

@@ -138,6 +138,7 @@ struct mtk_mmsys_driver_data {
 	const u8 *rst_tb;
 	const u32 num_resets;
 	const bool is_vppsys;
+	const bool gce_event_sel;
 	const u8 vsync_len;
 };
 
