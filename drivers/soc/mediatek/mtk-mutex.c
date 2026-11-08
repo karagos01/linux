@@ -349,20 +349,8 @@ enum mtk_mutex_sof_id {
 	DDP_MUTEX_SOF_MAX,
 };
 
-/*
- * A mutex MOD bit that must be set together with a pipeline component: an
- * engine that is not modelled as a DDP component but sits on that
- * component's data path (fed by the mmsys routing) and runs as pass-through.
- */
-struct mtk_mutex_extra_mod {
-	enum mtk_ddp_comp_id comp;
-	u8 mod;
-};
-
 struct mtk_mutex_data {
 	const u8 *mutex_mod;
-	const struct mtk_mutex_extra_mod *extra_mods;
-	const unsigned int num_extra_mods;
 	/*
 	 * DSI0 drives a command-mode panel: run the mutex in SINGLE
 	 * (SW/GCE-triggered) mode instead of DSI0-SOF synced, and make DSI0 a
@@ -591,8 +579,11 @@ static const u8 mt6878_mutex_mod[DDP_COMPONENT_ID_MAX] = {
 	[DDP_COMPONENT_OVL_2L0] = 0,
 	[DDP_COMPONENT_OVL_2L1] = 1,
 	[DDP_COMPONENT_OVL_2L2] = 2,
+	[DDP_COMPONENT_RSZ0] = 6,
+	[DDP_COMPONENT_TDSHP0] = 7,
 	[DDP_COMPONENT_COLOR0] = 9,
 	[DDP_COMPONENT_CCORR] = 10,
+	[DDP_COMPONENT_CCORR1] = 11,
 	[DDP_COMPONENT_AAL0] = 12,
 	[DDP_COMPONENT_GAMMA] = 13,
 	[DDP_COMPONENT_POSTMASK0] = 14,
@@ -853,26 +844,8 @@ static const struct mtk_mutex_data mt8192_mutex_driver_data = {
 	.mutex_sof_reg = MT8183_MUTEX0_SOF0,
 };
 
-/*
- * MT6878: the mmsys routing feeds COLOR0 through RSZ0 -> TDSHP0 and CCORR0
- * is hard-wired to CCORR1. Those engines run as pass-through (left in
- * bypass/relay), but they must still be mutex members or they never get a
- * SOF and the OVL underflows.
- */
-#define MT6878_MUTEX_MOD_DISP_RSZ0	6
-#define MT6878_MUTEX_MOD_DISP_TDSHP0	7
-#define MT6878_MUTEX_MOD_DISP_CCORR1	11
-
-static const struct mtk_mutex_extra_mod mt6878_mutex_extra_mods[] = {
-	{ DDP_COMPONENT_COLOR0, MT6878_MUTEX_MOD_DISP_RSZ0 },
-	{ DDP_COMPONENT_COLOR0, MT6878_MUTEX_MOD_DISP_TDSHP0 },
-	{ DDP_COMPONENT_CCORR, MT6878_MUTEX_MOD_DISP_CCORR1 },
-};
-
 static const struct mtk_mutex_data mt6878_mutex_driver_data = {
 	.mutex_mod = mt6878_mutex_mod,
-	.extra_mods = mt6878_mutex_extra_mods,
-	.num_extra_mods = ARRAY_SIZE(mt6878_mutex_extra_mods),
 	.dsi0_cmd_mode = true,
 	.mutex_sof = mt8183_mutex_sof,
 	.mutex_mod_reg = MT8183_MUTEX0_MOD0,
@@ -977,18 +950,6 @@ static void mtk_mutex_update_mod(struct mtk_mutex_ctx *mtx,
 	writel_relaxed(reg, mtx->regs + offset);
 }
 
-static void mtk_mutex_update_extra_mods(struct mtk_mutex_ctx *mtx,
-					struct mtk_mutex *mutex,
-					enum mtk_ddp_comp_id id, bool set)
-{
-	unsigned int i;
-
-	for (i = 0; i < mtx->data->num_extra_mods; i++)
-		if (mtx->data->extra_mods[i].comp == id)
-			mtk_mutex_update_mod(mtx, mutex,
-					     mtx->data->extra_mods[i].mod, set);
-}
-
 void mtk_mutex_add_comp(struct mtk_mutex *mutex,
 			enum mtk_ddp_comp_id id)
 {
@@ -1036,7 +997,6 @@ void mtk_mutex_add_comp(struct mtk_mutex *mutex,
 		reg = readl_relaxed(mtx->regs + offset);
 		reg |= BIT(mod_id);
 		writel_relaxed(reg, mtx->regs + offset);
-		mtk_mutex_update_extra_mods(mtx, mutex, id, true);
 		return;
 	}
 
@@ -1080,7 +1040,6 @@ void mtk_mutex_remove_comp(struct mtk_mutex *mutex,
 		reg = readl_relaxed(mtx->regs + offset);
 		reg &= ~BIT(mod_id);
 		writel_relaxed(reg, mtx->regs + offset);
-		mtk_mutex_update_extra_mods(mtx, mutex, id, false);
 		break;
 	}
 }
