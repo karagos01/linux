@@ -854,11 +854,26 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
 	struct drm_device *dev = mtk_crtc->base.dev;
+	struct mtk_drm_private *priv = dev->dev_private;
 	int i;
 
 	drm_dbg_driver(dev, "%s %d\n", __func__, crtc->base.id);
 	if (!mtk_crtc->enabled)
 		return;
+
+	if (priv->data->cmd_mode) {
+		/*
+		 * Command mode: the panel keeps its last frame and the output
+		 * is already off, so there is no TE to wait for. Pushing a
+		 * "planes off" frame would leave a GCE packet waiting for a TE
+		 * that never comes; drop any such packet instead.
+		 */
+#if IS_REACHABLE(CONFIG_MTK_CMDQ)
+		if (mtk_crtc->cmdq_client.chan)
+			mbox_flush(mtk_crtc->cmdq_client.chan, 2000);
+#endif
+		goto disable;
+	}
 
 	/* Set all pending plane state to disabled */
 	for (i = 0; i < mtk_crtc->layer_nr; i++) {
@@ -882,6 +897,7 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 	/* Wait for planes to be disabled */
 	drm_crtc_wait_one_vblank(crtc);
 
+disable:
 	drm_crtc_vblank_off(crtc);
 	mtk_crtc_ddp_hw_fini(mtk_crtc);
 	mtk_ddp_comp_power_off(comp);

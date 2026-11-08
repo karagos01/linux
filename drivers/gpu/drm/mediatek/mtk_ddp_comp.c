@@ -64,6 +64,8 @@ struct mtk_ddp_comp_dev {
 	struct clk *clk;
 	void __iomem *regs;
 	struct cmdq_client_reg cmdq_reg;
+	/* DSC: control word of a bootloader-configured encoder, 0 if none */
+	u32 dsc_boot_con;
 };
 
 void mtk_ddp_write(struct cmdq_pkt *cmdq_pkt, unsigned int value,
@@ -196,11 +198,23 @@ static void mtk_dsc_config(struct device *dev, unsigned int w,
 	/*
 	 * If the bootloader already brought up and enabled the DSC encoder
 	 * (in-cell DSC command-mode panels such as the Visionox HC5622 on
-	 * MT6878), keep its configuration and interconnect routing instead of
-	 * forcing bypass, which would break the compressed data path.
+	 * MT6878), keep its configuration instead of forcing bypass, which
+	 * would break the compressed data path. There is no DSC encoder
+	 * programming here yet, so remember its control word and restore it
+	 * on every later config: mtk_dsc_stop() clears it.
 	 */
-	if (readl(priv->regs + DISP_REG_DSC_CON) & DSC_EN)
+	if (!priv->dsc_boot_con) {
+		u32 con = readl(priv->regs + DISP_REG_DSC_CON);
+
+		if (con & DSC_EN)
+			priv->dsc_boot_con = con;
+	}
+	if (priv->dsc_boot_con) {
+		/* leave DSC_EN to start/stop */
+		mtk_ddp_write_mask(cmdq_pkt, priv->dsc_boot_con, &priv->cmdq_reg,
+				   priv->regs, DISP_REG_DSC_CON, GENMASK(31, 1));
 		return;
+	}
 
 	/* dsc bypass mode */
 	mtk_ddp_write_mask(cmdq_pkt, DSC_BYPASS, &priv->cmdq_reg, priv->regs,
