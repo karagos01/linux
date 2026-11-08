@@ -47,8 +47,17 @@ mtk_drm_mode_fb_create(struct drm_device *dev,
 		       const struct drm_format_info *info,
 		       const struct drm_mode_fb_cmd2 *cmd)
 {
+	struct mtk_drm_private *priv = dev->dev_private;
+
 	if (info->num_planes != 1)
 		return ERR_PTR(-EINVAL);
+
+	/*
+	 * A command-mode panel only shows what is explicitly pushed to it, so
+	 * front-buffer rendering (fbdev, DIRTYFB) must generate a commit.
+	 */
+	if (priv->data->cmd_mode)
+		return drm_gem_fb_create_with_dirty(dev, file, info, cmd);
 
 	return drm_gem_fb_create(dev, file, info, cmd);
 }
