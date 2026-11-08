@@ -20,6 +20,11 @@
 
 	interrupt-parent = <&gic>;
 
+	aliases {
+		ccorr0 = &ccorr0;
+		ccorr1 = &ccorr1;
+	};
+
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -916,6 +921,22 @@
 			mediatek,larb = <&smi_larb0>;
 		};
 
+		rsz0: rsz@14008000 {
+			compatible = "mediatek,mt6878-disp-rsz";
+			reg = <0x14008000 0x1000>;
+			interrupts = <GIC_SPI 309 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_RSZ0>;
+			mediatek,gce-client-reg = <&gce 1 0x8000 0x1000>;
+		};
+
+		tdshp0: tdshp@14009000 {
+			compatible = "mediatek,mt6878-disp-tdshp";
+			reg = <0x14009000 0x1000>;
+			interrupts = <GIC_SPI 310 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_TDSHP0>;
+			mediatek,gce-client-reg = <&gce 1 0x9000 0x1000>;
+		};
+
 		color0: color@1400b000 {
 			compatible = "mediatek,mt6878-disp-color",
 				     "mediatek,mt8173-disp-color";
@@ -931,6 +952,14 @@
 			interrupts = <GIC_SPI 313 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&mmsys CLK_MM_DISP_CCORR0>;
 			mediatek,gce-client-reg = <&gce 1 0xc000 0x1000>;
+		};
+
+		ccorr1: ccorr@1400d000 {
+			compatible = "mediatek,mt6878-disp-ccorr";
+			reg = <0x1400d000 0x1000>;
+			interrupts = <GIC_SPI 314 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_CCORR1>;
+			mediatek,gce-client-reg = <&gce 1 0xd000 0x1000>;
 		};
 
 		aal0: aal@1400e000 {
