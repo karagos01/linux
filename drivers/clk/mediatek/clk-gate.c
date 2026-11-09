@@ -168,6 +168,17 @@ const struct clk_ops mtk_clk_gate_ops_setclr = {
 };
 EXPORT_SYMBOL_GPL(mtk_clk_gate_ops_setclr);
 
+/*
+ * For gates whose status register must not be read by the kernel (reading
+ * it resets the SoC): without .is_enabled the core tracks the state by the
+ * enable count, and leaves gates nobody enabled alone.
+ */
+const struct clk_ops mtk_clk_gate_ops_setclr_wo = {
+	.enable		= mtk_cg_enable,
+	.disable	= mtk_cg_disable,
+};
+EXPORT_SYMBOL_GPL(mtk_clk_gate_ops_setclr_wo);
+
 const struct clk_ops mtk_clk_gate_ops_setclr_inv = {
 	.is_enabled	= mtk_cg_bit_is_set,
 	.enable		= mtk_cg_enable_inv,
