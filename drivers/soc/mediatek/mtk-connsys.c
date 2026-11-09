@@ -341,6 +341,9 @@ struct mtk_connsys {
 	unsigned long radios;
 	bool wbg_calibrated;
 
+	/* Serializes the subsystem bring-up of the radios */
+	struct mutex bringup_lock;
+
 	/* Serializes RF SPI accesses, taken with the RF SPI HW semaphore held */
 	spinlock_t spi_lock;
 	u32 adie_id;
@@ -1092,6 +1095,33 @@ void mtk_connsys_power_off(struct mtk_connsys *cs, enum mtk_connsys_radio radio)
 EXPORT_SYMBOL_GPL(mtk_connsys_power_off);
 
 /**
+ * mtk_connsys_bringup_begin - start bringing a radio subsystem up
+ * @cs: connsys handle
+ *
+ * The radio subsystems share the conn_infra and the A-die. Powering the
+ * Bluetooth subsystem up while the WiFi subsystem is powered up and its
+ * firmware calibrates the RF leaves the WiFi receiver deaf until the next
+ * power cycle. The radio drivers bracket each step that powers their
+ * subsystem up or starts its firmware with mtk_connsys_bringup_begin() and
+ * mtk_connsys_bringup_end(), so that these steps never overlap.
+ */
+void mtk_connsys_bringup_begin(struct mtk_connsys *cs)
+{
+	mutex_lock(&cs->bringup_lock);
+}
+EXPORT_SYMBOL_GPL(mtk_connsys_bringup_begin);
+
+/**
+ * mtk_connsys_bringup_end - a radio subsystem bring-up step is done
+ * @cs: connsys handle
+ */
+void mtk_connsys_bringup_end(struct mtk_connsys *cs)
+{
+	mutex_unlock(&cs->bringup_lock);
+}
+EXPORT_SYMBOL_GPL(mtk_connsys_bringup_end);
+
+/**
  * mtk_connsys_emi_base - physical address of the connsys memory
  * @cs: connsys handle
  *
@@ -1158,6 +1188,7 @@ static int mtk_connsys_probe(struct platform_device *pdev)
 
 	cs->dev = dev;
 	mutex_init(&cs->lock);
+	mutex_init(&cs->bringup_lock);
 	spin_lock_init(&cs->spi_lock);
 	cs->xtal_52m = of_property_read_bool(dev->of_node, "mediatek,xtal-52mhz");
 

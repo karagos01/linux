@@ -23,6 +23,8 @@ struct mtk_connsys *devm_mtk_connsys_get(struct device *dev);
 int mtk_connsys_power_on(struct mtk_connsys *cs, enum mtk_connsys_radio radio);
 void mtk_connsys_power_off(struct mtk_connsys *cs, enum mtk_connsys_radio radio);
 phys_addr_t mtk_connsys_emi_base(struct mtk_connsys *cs);
+void mtk_connsys_bringup_begin(struct mtk_connsys *cs);
+void mtk_connsys_bringup_end(struct mtk_connsys *cs);
 #else
 static inline struct mtk_connsys *devm_mtk_connsys_get(struct device *dev)
 {
@@ -43,6 +45,14 @@ static inline void mtk_connsys_power_off(struct mtk_connsys *cs,
 static inline phys_addr_t mtk_connsys_emi_base(struct mtk_connsys *cs)
 {
 	return 0;
+}
+
+static inline void mtk_connsys_bringup_begin(struct mtk_connsys *cs)
+{
+}
+
+static inline void mtk_connsys_bringup_end(struct mtk_connsys *cs)
+{
 }
 #endif
 
