@@ -1046,6 +1046,23 @@ int ssusb_gadget_suspend(struct ssusb_mtk *ssusb, pm_message_t msg)
 	return 0;
 }
 
+/*
+ * Re-program the device MAC after the SSUSB IP lost its context in system
+ * sleep: everything mtu3_hw_init() does except the one-time memory setup.
+ */
+void ssusb_gadget_restore(struct ssusb_mtk *ssusb)
+{
+	struct mtu3 *mtu = ssusb->u3d;
+
+	mtu3_device_reset(mtu);
+	if (mtu3_device_enable(mtu))
+		dev_err(mtu->dev, "device enable failed on restore\n");
+	mtu3_regs_init(mtu);
+
+	if (mtu->is_active)
+		mtu3_start(mtu);
+}
+
 int ssusb_gadget_resume(struct ssusb_mtk *ssusb, pm_message_t msg)
 {
 	struct mtu3 *mtu = ssusb->u3d;

@@ -210,6 +210,27 @@ static void switch_port_to_device(struct ssusb_mtk *ssusb)
 	ssusb_hwrscs_req(ssusb, false);
 }
 
+/*
+ * MT6878: with the port in device mode the host hardware resources are
+ * released, and the SSUSB IP may then be powered off in system sleep. It
+ * comes back in its reset state (IP_SW_RST set, ports disabled, device MAC
+ * cleared), so re-do the boot-time IP setup and the device-role routing.
+ * A host-role port keeps its resources and is left to the xHCI resume.
+ */
+void ssusb_otg_restore(struct ssusb_mtk *ssusb)
+{
+	if (ssusb->is_host) {
+		dev_warn(ssusb->dev, "IP context lost in host mode\n");
+		return;
+	}
+
+	ssusb_ip_sw_reset(ssusb);
+	ssusb_host_enable(ssusb);
+	ssusb_set_force_mode(ssusb, MTU3_DR_FORCE_DEVICE);
+	switch_port_to_device(ssusb);
+	ssusb_gadget_restore(ssusb);
+}
+
 int ssusb_set_vbus(struct otg_switch_mtk *otg_sx, int is_on)
 {
 	struct ssusb_mtk *ssusb = otg_sx_to_ssusb(otg_sx);

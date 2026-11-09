@@ -59,6 +59,7 @@ int ssusb_gadget_init(struct ssusb_mtk *ssusb);
 void ssusb_gadget_exit(struct ssusb_mtk *ssusb);
 int ssusb_gadget_suspend(struct ssusb_mtk *ssusb, pm_message_t msg);
 int ssusb_gadget_resume(struct ssusb_mtk *ssusb, pm_message_t msg);
+void ssusb_gadget_restore(struct ssusb_mtk *ssusb);
 bool ssusb_gadget_ip_sleep_check(struct ssusb_mtk *ssusb);
 
 #else
@@ -87,6 +88,9 @@ static inline bool ssusb_gadget_ip_sleep_check(struct ssusb_mtk *ssusb)
 	return true;
 }
 
+static inline void ssusb_gadget_restore(struct ssusb_mtk *ssusb)
+{}
+
 #endif
 
 
@@ -97,6 +101,7 @@ void ssusb_mode_switch(struct ssusb_mtk *ssusb, int to_host);
 int ssusb_set_vbus(struct otg_switch_mtk *otg_sx, int is_on);
 void ssusb_set_force_mode(struct ssusb_mtk *ssusb,
 			  enum mtu3_dr_force_mode mode);
+void ssusb_otg_restore(struct ssusb_mtk *ssusb);
 
 #else
 
@@ -118,6 +123,9 @@ static inline int ssusb_set_vbus(struct otg_switch_mtk *otg_sx, int is_on)
 
 static inline void
 ssusb_set_force_mode(struct ssusb_mtk *ssusb, enum mtu3_dr_force_mode mode)
+{}
+
+static inline void ssusb_otg_restore(struct ssusb_mtk *ssusb)
 {}
 
 #endif

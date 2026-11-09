@@ -494,6 +494,23 @@ static void mtu3_remove(struct platform_device *pdev)
 	pm_runtime_set_suspended(&pdev->dev);
 }
 
+static void ssusb_ip_restore(struct ssusb_mtk *ssusb)
+{
+	dev_info(ssusb->dev, "IP lost its context in sleep, re-initialising\n");
+
+	switch (ssusb->dr_mode) {
+	case USB_DR_MODE_PERIPHERAL:
+		ssusb_ip_sw_reset(ssusb);
+		ssusb_gadget_restore(ssusb);
+		break;
+	case USB_DR_MODE_OTG:
+		ssusb_otg_restore(ssusb);
+		break;
+	default:
+		break;
+	}
+}
+
 static int resume_ip_and_ports(struct ssusb_mtk *ssusb, pm_message_t msg)
 {
 	switch (ssusb->dr_mode) {
@@ -575,6 +592,10 @@ static int mtu3_resume_common(struct device *dev, pm_message_t msg)
 	ret = ssusb_phy_power_on(ssusb);
 	if (ret)
 		goto phy_err;
+
+	/* SW_RST is cleared at probe; seeing it set means the IP was reset */
+	if (mtu3_readl(ssusb->ippc_base, U3D_SSUSB_IP_PW_CTRL0) & SSUSB_IP_SW_RST)
+		ssusb_ip_restore(ssusb);
 
 	return resume_ip_and_ports(ssusb, msg);
 
