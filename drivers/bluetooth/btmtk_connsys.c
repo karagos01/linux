@@ -1042,16 +1042,21 @@ static int btmtk_connsys_probe(struct platform_device *pdev)
 	if (!bt->beif)
 		return -ENOMEM;
 
+	/* Powering BGF up must not overlap with the WiFi bring-up */
+	mtk_connsys_bringup_begin(bt->cs);
+
 	ret = mtk_connsys_power_on(bt->cs, MTK_CONNSYS_BT);
-	if (ret)
+	if (ret) {
+		mtk_connsys_bringup_end(bt->cs);
 		return dev_err_probe(dev, ret, "connsys power on failed\n");
+	}
 
 	ret = bgf_conninfra_wakeup(bt);
-	if (ret)
-		goto err_power_off;
-
-	ret = bgf_power_on(bt);
+	if (!ret)
+		ret = bgf_power_on(bt);
 	bgf_conninfra_release(bt);
+
+	mtk_connsys_bringup_end(bt->cs);
 	if (ret)
 		goto err_power_off;
 
