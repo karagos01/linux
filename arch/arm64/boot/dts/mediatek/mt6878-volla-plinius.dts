@@ -1074,8 +1074,17 @@
 		constant-charge-current-max-microamp = <2000000>;
 		constant-charge-voltage-max-microvolt = <4350000>;
 		charge-term-current-microamp = <150000>;
-		/* Charge only between 0 and 50 degC, as the stock firmware does */
-		alert-celsius = <0 50>;
+		/*
+		 * Temperature zones as in the stock firmware: no charging below
+		 * 0 or above 55 degC, reduced charging below 10 and above 45 degC
+		 * (at the 300 mA charger minimum; stock asks for 120 mA).
+		 */
+		operating-range-celsius = <0 55>;
+		alert-celsius = <10 45>;
+		alert-low-temp-charge-current-microamp = <300000>;
+		alert-low-temp-charge-voltage-microvolt = <4350000>;
+		alert-high-temp-charge-current-microamp = <300000>;
+		alert-high-temp-charge-voltage-microvolt = <4100000>;
 		factory-internal-resistance-micro-ohms = <120000>;
 		ocv-capacity-celsius = <25>;
 		ocv-capacity-table-0 = <4322000 100>, <4259456 95>,
@@ -1197,7 +1206,7 @@
 
 			trips {
 				trip-hot {
-					temperature = <50000>;
+					temperature = <55000>;
 					hysteresis = <3000>;
 					type = "hot";
 				};
