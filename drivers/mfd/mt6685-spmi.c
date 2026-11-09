@@ -12,6 +12,7 @@
  * tree, mirroring drivers/mfd/mtk-spmi-pmic.c for the mt6363/mt6373.
  */
 
+#include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqdomain.h>
@@ -76,11 +77,19 @@ static void mt6685_irq_unmask(struct irq_data *d)
 			   BIT(irqd_to_hwirq(d)), BIT(irqd_to_hwirq(d)));
 }
 
+/* A wakeup source here has to arm the chained SPMI interrupt it comes from. */
+static int mt6685_irq_set_wake(struct irq_data *d, unsigned int on)
+{
+	struct mt6685 *mt = irq_data_get_irq_chip_data(d);
+
+	return irq_set_irq_wake(mt->irq, on);
+}
+
 static struct irq_chip mt6685_irq_chip = {
 	.name		= "mt6685",
 	.irq_mask	= mt6685_irq_mask,
 	.irq_unmask	= mt6685_irq_unmask,
-	.flags		= IRQCHIP_SKIP_SET_WAKE,
+	.irq_set_wake	= mt6685_irq_set_wake,
 };
 
 static int mt6685_irq_map(struct irq_domain *d, unsigned int virq,
