@@ -28,6 +28,7 @@
 #define MT6375_REG_CHG_AICR	0x122
 #define MT6375_REG_CHG_VCHG	0x125
 #define MT6375_REG_CHG_ICHG	0x126
+#define MT6375_REG_CHG_EOC	0x128
 #define MT6375_REG_CHG_BOOST4	0x129
 #define MT6375_REG_CHG_OTGV	0x131
 #define MT6375_REG_CHG_OTGC	0x132
@@ -82,6 +83,8 @@ enum mt6375_chg_field {
 	F_AICR,
 	F_CV,
 	F_ICHG,
+	F_TE,
+	F_IEOC,
 	F_IC_STAT,
 	F_BC12_EN,
 	F_PORT_STAT,
@@ -94,6 +97,8 @@ static const struct reg_field mt6375_chg_fields[F_MAX] = {
 	[F_AICR]	= REG_FIELD(MT6375_REG_CHG_AICR, 0, 6),
 	[F_CV]		= REG_FIELD(MT6375_REG_CHG_VCHG, 0, 6),
 	[F_ICHG]	= REG_FIELD(MT6375_REG_CHG_ICHG, 0, 5),
+	[F_TE]		= REG_FIELD(MT6375_REG_CHG_EOC, 1, 1),
+	[F_IEOC]	= REG_FIELD(MT6375_REG_CHG_EOC, 4, 7),
 	[F_IC_STAT]	= REG_FIELD(MT6375_REG_CHG_STAT, 0, 3),
 	[F_BC12_EN]	= REG_FIELD(MT6375_REG_BC12_FUNC, 7, 7),
 	[F_PORT_STAT]	= REG_FIELD(MT6375_REG_BC12_STAT, 0, 3),
@@ -114,6 +119,11 @@ static const struct reg_field mt6375_chg_fields[F_MAX] = {
 #define MT6375_CV_MIN_UV	3900000
 #define MT6375_CV_STEP_UV	10000
 #define MT6375_CV_MAX_UV	4710000
+
+#define MT6375_IEOC_MIN_UA	100000
+#define MT6375_IEOC_STEP_UA	50000
+#define MT6375_IEOC_OFFSET	1
+#define MT6375_IEOC_MAX_UA	800000
 
 /* Input current to fall back to when there is no Type-C/PD contract (USB2 SDP) */
 #define MT6375_AICR_DEFAULT_UA	500000
@@ -286,6 +296,10 @@ static int mt6375_chg_get_value(struct mt6375_chg_data *ddata,
 	case F_CV:
 		*uval = MT6375_CV_MIN_UV + MT6375_CV_STEP_UV * reg;
 		break;
+	case F_IEOC:
+		*uval = MT6375_IEOC_MIN_UA +
+			MT6375_IEOC_STEP_UA * (reg - MT6375_IEOC_OFFSET);
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -311,6 +325,11 @@ static int mt6375_chg_set_value(struct mt6375_chg_data *ddata,
 	case F_CV:
 		uval = clamp(uval, MT6375_CV_MIN_UV, MT6375_CV_MAX_UV);
 		reg = (uval - MT6375_CV_MIN_UV) / MT6375_CV_STEP_UV;
+		break;
+	case F_IEOC:
+		uval = clamp(uval, MT6375_IEOC_MIN_UA, MT6375_IEOC_MAX_UA);
+		reg = (uval - MT6375_IEOC_MIN_UA) / MT6375_IEOC_STEP_UA +
+		      MT6375_IEOC_OFFSET;
 		break;
 	default:
 		return -EINVAL;
@@ -347,6 +366,9 @@ static int mt6375_chg_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
 		ret = mt6375_chg_get_value(ddata, F_CV, &val->intval);
 		break;
+	case POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT:
+		ret = mt6375_chg_get_value(ddata, F_IEOC, &val->intval);
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -366,6 +388,8 @@ static int mt6375_chg_set_property(struct power_supply *psy,
 		return mt6375_chg_set_value(ddata, F_ICHG, val->intval);
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
 		return mt6375_chg_set_value(ddata, F_CV, val->intval);
+	case POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT:
+		return mt6375_chg_set_value(ddata, F_IEOC, val->intval);
 	default:
 		return -EINVAL;
 	}
@@ -378,6 +402,7 @@ static int mt6375_chg_prop_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
+	case POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT:
 		return 1;
 	default:
 		return 0;
@@ -392,7 +417,11 @@ static enum power_supply_property mt6375_chg_properties[] = {
 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
+	POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT,
 };
+
+/* The battery gauge follows the charger state */
+static char *mt6375_chg_supplied_to[] = { "mt6375-gauge" };
 
 static const struct power_supply_desc mt6375_chg_psy_desc = {
 	.name			= "mt6375-charger",
@@ -594,6 +623,52 @@ static int mt6375_chg_init_otg_regulator(struct mt6375_chg_data *ddata)
 	return 0;
 }
 
+/*
+ * Program the charge current, the charge voltage and the termination current
+ * from the monitored battery, and let the charger terminate at end of charge.
+ * Limits the battery does not describe keep their current (bootloader) value.
+ */
+static int mt6375_chg_apply_battery_info(struct mt6375_chg_data *ddata)
+{
+	struct power_supply_battery_info *info;
+	int ret;
+
+	ret = power_supply_get_battery_info(ddata->psy, &info);
+	if (ret == -ENODEV || ret == -ENOENT)
+		return 0;
+	if (ret)
+		return dev_err_probe(ddata->dev, ret,
+				     "Failed to get battery info\n");
+
+	if (info->constant_charge_current_max_ua > 0) {
+		ret = mt6375_chg_set_value(ddata, F_ICHG,
+					   info->constant_charge_current_max_ua);
+		if (ret)
+			goto out;
+	}
+
+	if (info->constant_charge_voltage_max_uv > 0) {
+		ret = mt6375_chg_set_value(ddata, F_CV,
+					   info->constant_charge_voltage_max_uv);
+		if (ret)
+			goto out;
+	}
+
+	if (info->charge_term_current_ua > 0) {
+		ret = mt6375_chg_set_value(ddata, F_IEOC,
+					   info->charge_term_current_ua);
+		if (ret)
+			goto out;
+		ret = mt6375_chg_field_set(ddata, F_TE, 1);
+	}
+
+out:
+	power_supply_put_battery_info(ddata->psy, info);
+	if (ret)
+		dev_err(ddata->dev, "Failed to apply battery limits: %d\n", ret);
+	return ret;
+}
+
 static irqreturn_t mt6375_chg_irq_handler(int irq, void *data)
 {
 	struct mt6375_chg_data *ddata = data;
@@ -652,11 +727,17 @@ static int mt6375_chg_probe(struct platform_device *pdev)
 
 	cfg.drv_data = ddata;
 	cfg.fwnode = dev_fwnode(dev);
+	cfg.supplied_to = mt6375_chg_supplied_to;
+	cfg.num_supplicants = ARRAY_SIZE(mt6375_chg_supplied_to);
 
 	ddata->psy = devm_power_supply_register(dev, &mt6375_chg_psy_desc, &cfg);
 	if (IS_ERR(ddata->psy))
 		return dev_err_probe(dev, PTR_ERR(ddata->psy),
 				     "Failed to register power supply\n");
+
+	ret = mt6375_chg_apply_battery_info(ddata);
+	if (ret)
+		return ret;
 
 	platform_set_drvdata(pdev, ddata);
 
