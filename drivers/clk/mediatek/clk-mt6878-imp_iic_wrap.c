@@ -14,6 +14,10 @@
 #include "clk-gate.h"
 #include "clk-mtk.h"
 
+/*
+ * The CG status registers of the IMP I2C wrappers are not readable from
+ * the normal world: any read resets the SoC. Use write-only gate ops.
+ */
 static const struct mtk_gate_regs im_c_s_cg_regs = {
 	.set_ofs = 0xE08,
 	.clr_ofs = 0xE04,
@@ -26,7 +30,7 @@ static const struct mtk_gate_regs im_c_s_cg_regs = {
 		.parent_name = _parent,			\
 		.regs = &im_c_s_cg_regs,			\
 		.shift = _shift,			\
-		.ops = &mtk_clk_gate_ops_setclr,	\
+		.ops = &mtk_clk_gate_ops_setclr_wo,	\
 	}
 
 static const struct mtk_gate imp_cs_clks[] = {
@@ -53,7 +57,7 @@ static const struct mtk_gate_regs imp_es_cg_regs = {
 		.parent_name = _parent,			\
 		.regs = &imp_es_cg_regs,		\
 		.shift = _shift,			\
-		.ops = &mtk_clk_gate_ops_setclr,	\
+		.ops = &mtk_clk_gate_ops_setclr_wo,	\
 	}
 
 static const struct mtk_gate imp_ess_clks[] = {
@@ -78,7 +82,7 @@ static const struct mtk_clk_desc imp_iic_wrap_ess_desc = {
 		.parent_name = _parent,			\
 		.regs = &imp_es_cg_regs,		\
 		.shift = _shift,			\
-		.ops = &mtk_clk_gate_ops_setclr,	\
+		.ops = &mtk_clk_gate_ops_setclr_wo,	\
 	}
 
 static const struct mtk_gate imp_es_clks[] = {
@@ -113,7 +117,7 @@ static const struct mtk_gate_regs imp_ws_cg_regs = {
 		.parent_name = _parent,			\
 		.regs = &imp_ws_cg_regs,		\
 		.shift = _shift,			\
-		.ops = &mtk_clk_gate_ops_setclr,	\
+		.ops = &mtk_clk_gate_ops_setclr_wo,	\
 	}
 
 static const struct mtk_gate imp_w_s_clks[] = {
