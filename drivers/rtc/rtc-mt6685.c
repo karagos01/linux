@@ -18,6 +18,7 @@
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/pm_wakeirq.h>
 #include <linux/regmap.h>
 #include <linux/rtc.h>
 
@@ -376,6 +377,9 @@ static int mt6685_rtc_probe(struct platform_device *pdev)
 			return ret;
 		}
 		device_init_wakeup(&pdev->dev, true);
+		ret = devm_pm_set_wake_irq(&pdev->dev, rtc->irq);
+		if (ret)
+			dev_warn(&pdev->dev, "failed to set wake IRQ: %d\n", ret);
 		rtc->rtc_dev->ops = &mt6685_rtc_alarm_ops;
 	} else {
 		/* No interrupt wired: time-of-day only, no alarm. */
