@@ -27,6 +27,7 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/pm_wakeup.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/soc/mediatek/mtk-connsys.h>
@@ -1224,6 +1225,25 @@ static int mtk_connsys_probe(struct platform_device *pdev)
 	return 0;
 }
 
+/*
+ * The radio firmwares run from the connsys and cannot be restarted by the
+ * kernel (they are loaded by the bootloader): keep the power domain on
+ * across system sleep while any radio is up, as the downstream stack does.
+ */
+static int mtk_connsys_suspend(struct device *dev)
+{
+	struct mtk_connsys *cs = dev_get_drvdata(dev);
+
+	mutex_lock(&cs->lock);
+	if (cs->radios)
+		device_set_awake_path(dev);
+	mutex_unlock(&cs->lock);
+
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(mtk_connsys_pm_ops, mtk_connsys_suspend, NULL);
+
 static const struct of_device_id mtk_connsys_of_match[] = {
 	{ .compatible = "mediatek,mt6878-connsys" },
 	{ /* sentinel */ }
@@ -1235,6 +1255,7 @@ static struct platform_driver mtk_connsys_driver = {
 	.driver = {
 		.name = "mtk-connsys",
 		.of_match_table = mtk_connsys_of_match,
+		.pm = pm_sleep_ptr(&mtk_connsys_pm_ops),
 		/* Radio drivers keep a reference to the connsys */
 		.suppress_bind_attrs = true,
 	},
