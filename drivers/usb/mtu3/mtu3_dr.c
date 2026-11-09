@@ -243,8 +243,33 @@ static void ssusb_mode_sw_work(struct work_struct *work)
 	struct mtu3 *mtu = ssusb->u3d;
 	enum usb_role desired_role = otg_sx->desired_role;
 	enum usb_role current_role;
+	unsigned long flags;
 
 	current_role = ssusb->is_host ? USB_ROLE_HOST : USB_ROLE_DEVICE;
+
+	/*
+	 * The partner went away while in device mode. When the PHY forces a
+	 * valid B-session, the controller never sees VBUS drop and keeps the
+	 * gadget "connected", which also blocks system suspend. Stop the
+	 * device controller and report the disconnect instead; it is
+	 * restarted when a device role is requested again.
+	 */
+	if (desired_role == USB_ROLE_NONE && current_role == USB_ROLE_DEVICE &&
+	    otg_sx->default_role == USB_ROLE_DEVICE) {
+		if (!mtu->is_active)
+			return;
+
+		pm_runtime_get_sync(ssusb->dev);
+		mtu3_stop(mtu);
+		spin_lock_irqsave(&mtu->lock, flags);
+		if (mtu->g.speed != USB_SPEED_UNKNOWN)
+			mtu3_gadget_disconnect(mtu);
+		mtu->g.speed = USB_SPEED_UNKNOWN;
+		mtu->connected = 0;
+		spin_unlock_irqrestore(&mtu->lock, flags);
+		pm_runtime_put(ssusb->dev);
+		return;
+	}
 
 	if (desired_role == USB_ROLE_NONE) {
 		/* the default mode is host as probe does */
@@ -253,8 +278,15 @@ static void ssusb_mode_sw_work(struct work_struct *work)
 			desired_role = USB_ROLE_DEVICE;
 	}
 
-	if (current_role == desired_role)
+	if (current_role == desired_role) {
+		/* a partner is back after a disconnect in device mode */
+		if (desired_role == USB_ROLE_DEVICE && !mtu->is_active) {
+			pm_runtime_get_sync(ssusb->dev);
+			mtu3_start(mtu);
+			pm_runtime_put(ssusb->dev);
+		}
 		return;
+	}
 
 	dev_dbg(ssusb->dev, "set role : %s\n", usb_role_string(desired_role));
 	mtu3_dbg_trace(ssusb->dev, "set role : %s", usb_role_string(desired_role));
