@@ -21,12 +21,10 @@ properties:
   io-channels:
     items:
       - description: battery voltage
-      - description: battery current
 
   io-channel-names:
     items:
       - const: vbat
-      - const: ibat
 
   monitored-battery: true
 
