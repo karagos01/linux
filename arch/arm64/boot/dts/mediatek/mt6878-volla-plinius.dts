@@ -935,6 +935,7 @@
 				     <MT6375_FL_DETACH>,
 				     <MT6375_FL_BC12_DN>;
 			interrupt-names = "attach", "detach", "bc12_done";
+			monitored-battery = <&battery>;
 
 			mt6375_otg_vbus: usb-otg-vbus-regulator {
 				regulator-name = "mt6375-usb-otg-vbus";
@@ -1070,6 +1071,9 @@
 		charge-full-design-microamp-hours = <3022000>;
 		voltage-max-design-microvolt = <4322000>;
 		voltage-min-design-microvolt = <3400000>;
+		constant-charge-current-max-microamp = <2000000>;
+		constant-charge-voltage-max-microvolt = <4350000>;
+		charge-term-current-microamp = <150000>;
 		factory-internal-resistance-micro-ohms = <120000>;
 		ocv-capacity-celsius = <25>;
 		ocv-capacity-table-0 = <4322000 100>, <4259456 95>,
@@ -1183,6 +1187,36 @@
 				};
 			};
 		};
+
+		battery-thermal {
+			polling-delay = <5000>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&battery_ntc>;
+
+			trips {
+				trip-hot {
+					temperature = <50000>;
+					hysteresis = <3000>;
+					type = "hot";
+				};
+
+				trip-crit {
+					temperature = <60000>;
+					hysteresis = <1000>;
+					type = "critical";
+				};
+			};
+		};
+	};
+
+	/* 10 kOhm NTC in the battery pack, pulled up to the 1.84 V gauge reference */
+	battery_ntc: thermistor {
+		compatible = "murata,ncp15xh103";
+		io-channels = <&mt6375_adc MT6375_ADC_BATON>;
+		pullup-uv = <1840000>;
+		pullup-ohm = <24000>;
+		pulldown-ohm = <0>;
+		#thermal-sensor-cells = <0>;
 	};
 };
 
