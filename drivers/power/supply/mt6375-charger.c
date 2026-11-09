@@ -125,6 +125,11 @@ static const struct reg_field mt6375_chg_fields[F_MAX] = {
 #define MT6375_IEOC_OFFSET	1
 #define MT6375_IEOC_MAX_UA	800000
 
+/* Battery temperature checks while an input supply is present */
+#define MT6375_TEMP_POLL_MS	10000
+/* Hysteresis to resume charging, in tenths of a degree Celsius */
+#define MT6375_TEMP_HYST	30
+
 /* Input current to fall back to when there is no Type-C/PD contract (USB2 SDP) */
 #define MT6375_AICR_DEFAULT_UA	500000
 
@@ -136,6 +141,13 @@ struct mt6375_chg_data {
 	struct power_supply *tcpm_psy;
 	struct notifier_block psy_nb;
 	struct work_struct pd_work;
+
+	/* Battery temperature range for charging, in tenths of a degree C */
+	struct delayed_work temp_work;
+	struct power_supply *bat_psy;
+	int temp_min;
+	int temp_max;
+	bool temp_blocked;
 };
 
 static int mt6375_chg_field_get(struct mt6375_chg_data *ddata,
@@ -654,6 +666,11 @@ static int mt6375_chg_apply_battery_info(struct mt6375_chg_data *ddata)
 			goto out;
 	}
 
+	if (info->temp_alert_min > INT_MIN && info->temp_alert_max < INT_MAX) {
+		ddata->temp_min = info->temp_alert_min * 10;
+		ddata->temp_max = info->temp_alert_max * 10;
+	}
+
 	if (info->charge_term_current_ua > 0) {
 		ret = mt6375_chg_set_value(ddata, F_IEOC,
 					   info->charge_term_current_ua);
@@ -669,10 +686,79 @@ out:
 	return ret;
 }
 
+/*
+ * Charge only while the battery is within its alert temperature range, as
+ * read by the battery gauge, and resume once it is back inside the range by
+ * the hysteresis. The input supply keeps powering the system meanwhile.
+ */
+static void mt6375_chg_temp_work(struct work_struct *work)
+{
+	struct mt6375_chg_data *ddata =
+		container_of(work, struct mt6375_chg_data, temp_work.work);
+	union power_supply_propval temp = {};
+	bool blocked = ddata->temp_blocked;
+	int ret, online;
+
+	ret = mt6375_chg_get_online(ddata, &online);
+	if (ret || !online) {
+		blocked = false;
+		goto apply;
+	}
+
+	if (!ddata->bat_psy)
+		ddata->bat_psy = power_supply_get_by_name(mt6375_chg_supplied_to[0]);
+	if (!ddata->bat_psy ||
+	    power_supply_get_property(ddata->bat_psy, POWER_SUPPLY_PROP_TEMP,
+				      &temp)) {
+		/* No temperature (yet): keep charging, check again later */
+		blocked = false;
+		goto resched;
+	}
+
+	if (temp.intval < ddata->temp_min || temp.intval > ddata->temp_max)
+		blocked = true;
+	else if (temp.intval >= ddata->temp_min + MT6375_TEMP_HYST &&
+		 temp.intval <= ddata->temp_max - MT6375_TEMP_HYST)
+		blocked = false;
+
+resched:
+	schedule_delayed_work(&ddata->temp_work,
+			      msecs_to_jiffies(MT6375_TEMP_POLL_MS));
+apply:
+	if (blocked == ddata->temp_blocked)
+		return;
+
+	ret = mt6375_chg_field_set(ddata, F_CHG_EN, !blocked);
+	if (ret) {
+		dev_err(ddata->dev, "Failed to %s charging: %d\n",
+			blocked ? "stop" : "resume", ret);
+		return;
+	}
+
+	ddata->temp_blocked = blocked;
+	if (blocked)
+		dev_warn(ddata->dev, "Battery at %d.%d degC, charging stopped\n",
+			 temp.intval / 10, abs(temp.intval % 10));
+	else
+		dev_info(ddata->dev, "Charging resumed\n");
+	power_supply_changed(ddata->psy);
+}
+
+static void mt6375_chg_temp_work_cancel(void *data)
+{
+	struct mt6375_chg_data *ddata = data;
+
+	cancel_delayed_work_sync(&ddata->temp_work);
+	if (ddata->bat_psy)
+		power_supply_put(ddata->bat_psy);
+}
+
 static irqreturn_t mt6375_chg_irq_handler(int irq, void *data)
 {
 	struct mt6375_chg_data *ddata = data;
 
+	if (ddata->temp_max > ddata->temp_min)
+		mod_delayed_work(system_wq, &ddata->temp_work, 0);
 	power_supply_changed(ddata->psy);
 	return IRQ_HANDLED;
 }
@@ -735,9 +821,21 @@ static int mt6375_chg_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(ddata->psy),
 				     "Failed to register power supply\n");
 
+	INIT_DELAYED_WORK(&ddata->temp_work, mt6375_chg_temp_work);
+	ret = devm_add_action_or_reset(dev, mt6375_chg_temp_work_cancel, ddata);
+	if (ret)
+		return ret;
+
 	ret = mt6375_chg_apply_battery_info(ddata);
 	if (ret)
 		return ret;
+
+	/* Start out charging; the temperature check takes over from here */
+	ret = mt6375_chg_field_set(ddata, F_CHG_EN, 1);
+	if (ret)
+		return dev_err_probe(dev, ret, "Failed to enable charging\n");
+	if (ddata->temp_max > ddata->temp_min)
+		schedule_delayed_work(&ddata->temp_work, 0);
 
 	platform_set_drvdata(pdev, ddata);
 
