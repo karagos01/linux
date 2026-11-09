@@ -498,6 +498,13 @@ static int mtk_phy_power_on(struct phy *phy)
 		 * (descriptor read -71) and falls back to full speed.
 		 */
 		u2_phy_props_set(xsphy, inst);
+		/*
+		 * power_off() drops the session lines (SESSEND, no VBUSVALID),
+		 * e.g. across system suspend: restore the role the consumer
+		 * set, or a device-role port is never enumerated again.
+		 */
+		if (phy->attrs.mode != PHY_MODE_INVALID)
+			u2_phy_instance_set_mode(xsphy, inst, phy->attrs.mode);
 	}
 
 	return 0;
