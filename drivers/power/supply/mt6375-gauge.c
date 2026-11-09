@@ -158,6 +158,29 @@ static int mt6375_gauge_get_temp(struct mt6375_gauge_data *ddata, int *temp)
 	return 0;
 }
 
+/* Overheat or cold once the battery leaves its alert temperature range */
+static int mt6375_gauge_get_health(struct mt6375_gauge_data *ddata, int *health)
+{
+	struct power_supply_battery_info *info = ddata->info;
+	int temp, ret;
+
+	*health = POWER_SUPPLY_HEALTH_GOOD;
+
+	ret = mt6375_gauge_get_temp(ddata, &temp);
+	if (ret == -ENODATA)
+		return 0;
+	if (ret)
+		return ret;
+
+	if (info->temp_alert_max < INT_MAX && temp > info->temp_alert_max * 10)
+		*health = POWER_SUPPLY_HEALTH_OVERHEAT;
+	else if (info->temp_alert_min > INT_MIN &&
+		 temp < info->temp_alert_min * 10)
+		*health = POWER_SUPPLY_HEALTH_COLD;
+
+	return 0;
+}
+
 /* Latch the fuel-gauge accumulator so FG_CAR can be read coherently. */
 static int mt6375_gauge_latch(struct mt6375_gauge_data *ddata)
 {
@@ -342,6 +365,11 @@ static int mt6375_gauge_get_property(struct power_supply *psy,
 		if (ret)
 			return ret;
 		break;
+	case POWER_SUPPLY_PROP_HEALTH:
+		ret = mt6375_gauge_get_health(ddata, &val->intval);
+		if (ret)
+			return ret;
+		break;
 	case POWER_SUPPLY_PROP_PRESENT:
 		val->intval = 1;
 		break;
@@ -391,6 +419,7 @@ static int mt6375_gauge_get_property(struct power_supply *psy,
 
 static enum power_supply_property mt6375_gauge_properties[] = {
 	POWER_SUPPLY_PROP_STATUS,
+	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
