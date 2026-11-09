@@ -12,6 +12,7 @@
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/gfp.h>
+#include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqdomain.h>
@@ -116,11 +117,22 @@ static void mtk_spmi_pmic_irq_unmask(struct irq_data *d)
 	mtk_spmi_pmic_irq_set_unmasking(d, true);
 }
 
+/*
+ * All PMIC interrupts arrive through the single chained SPMI interrupt: a
+ * wakeup source here has to arm that one, or it is masked in system sleep.
+ */
+static int mtk_spmi_pmic_irq_set_wake(struct irq_data *d, unsigned int on)
+{
+	struct mtk_spmi_pmic *pmic = irq_data_get_irq_chip_data(d);
+
+	return irq_set_irq_wake(pmic->irq, on);
+}
+
 static struct irq_chip mtk_spmi_pmic_irq_chip = {
 	.name = "mtk-spmi-pmic",
 	.irq_mask = mtk_spmi_pmic_irq_mask,
 	.irq_unmask = mtk_spmi_pmic_irq_unmask,
-	.flags = IRQCHIP_SKIP_SET_WAKE,
+	.irq_set_wake = mtk_spmi_pmic_irq_set_wake,
 };
 
 static struct lock_class_key mtk_spmi_pmic_irq_lock_class, mtk_spmi_pmic_irq_request_class;
