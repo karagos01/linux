@@ -37,7 +37,6 @@
 	};
 
 	chosen {
-		bootargs = "clk_ignore_unused";
 		stdout-path = "serial0:921600n8";
 		#address-cells = <2>;
 		#size-cells = <2>;
