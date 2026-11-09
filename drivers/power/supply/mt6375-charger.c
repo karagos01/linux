@@ -133,6 +133,22 @@ static const struct reg_field mt6375_chg_fields[F_MAX] = {
 /* Input current to fall back to when there is no Type-C/PD contract (USB2 SDP) */
 #define MT6375_AICR_DEFAULT_UA	500000
 
+/* Battery temperature zones, coldest first */
+enum mt6375_chg_temp_zone {
+	MT6375_ZONE_COLD,	/* below the operating range: no charging */
+	MT6375_ZONE_COOL,	/* below the alert range: reduced charging */
+	MT6375_ZONE_NORMAL,
+	MT6375_ZONE_WARM,	/* above the alert range: reduced charging */
+	MT6375_ZONE_HOT,	/* above the operating range: no charging */
+	MT6375_ZONE_MAX
+};
+
+/* Charge limits for one zone; a zero current means no charging */
+struct mt6375_chg_limits {
+	int ichg_ua;
+	int cv_uv;
+};
+
 struct mt6375_chg_data {
 	struct device *dev;
 	struct regmap *regmap;
@@ -142,12 +158,20 @@ struct mt6375_chg_data {
 	struct notifier_block psy_nb;
 	struct work_struct pd_work;
 
-	/* Battery temperature range for charging, in tenths of a degree C */
+	/*
+	 * Battery temperature zones, see mt6375_chg_temp_work(). Limits are
+	 * in tenths of a degree C; temp_lock also covers the charge limits.
+	 */
 	struct delayed_work temp_work;
+	struct mutex temp_lock;
 	struct power_supply *bat_psy;
+	bool temp_zones;
 	int temp_min;
+	int temp_cool;
+	int temp_warm;
 	int temp_max;
-	bool temp_blocked;
+	enum mt6375_chg_temp_zone zone;
+	struct mt6375_chg_limits limits[MT6375_ZONE_MAX];
 };
 
 static int mt6375_chg_field_get(struct mt6375_chg_data *ddata,
@@ -387,6 +411,33 @@ static int mt6375_chg_get_property(struct power_supply *psy,
 	return ret;
 }
 
+/*
+ * The charge current/voltage written by userspace are the limits for the
+ * normal temperature zone; outside of it the reduced zone limits stay in force
+ * until the battery is back in the normal zone.
+ */
+static int mt6375_chg_set_normal_limit(struct mt6375_chg_data *ddata,
+				       enum power_supply_property psp, int val)
+{
+	struct mt6375_chg_limits *normal = &ddata->limits[MT6375_ZONE_NORMAL];
+	bool is_ichg = psp == POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT;
+	int ret;
+
+	guard(mutex)(&ddata->temp_lock);
+
+	if (ddata->zone == MT6375_ZONE_NORMAL) {
+		ret = mt6375_chg_set_value(ddata, is_ichg ? F_ICHG : F_CV, val);
+		if (ret)
+			return ret;
+	}
+
+	if (is_ichg)
+		normal->ichg_ua = val;
+	else
+		normal->cv_uv = val;
+	return 0;
+}
+
 static int mt6375_chg_set_property(struct power_supply *psy,
 				   enum power_supply_property psp,
 				   const union power_supply_propval *val)
@@ -397,9 +448,8 @@ static int mt6375_chg_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
 		return mt6375_chg_set_value(ddata, F_AICR, val->intval);
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
-		return mt6375_chg_set_value(ddata, F_ICHG, val->intval);
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
-		return mt6375_chg_set_value(ddata, F_CV, val->intval);
+		return mt6375_chg_set_normal_limit(ddata, psp, val->intval);
 	case POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT:
 		return mt6375_chg_set_value(ddata, F_IEOC, val->intval);
 	default:
@@ -636,14 +686,66 @@ static int mt6375_chg_init_otg_regulator(struct mt6375_chg_data *ddata)
 }
 
 /*
+ * Set up the battery temperature zones: no charging outside the operating
+ * range, reduced charging between it and the alert range (with the reduced
+ * limits the battery describes; no charging if it describes no current) and
+ * the normal limits inside the alert range. Either range alone works too.
+ */
+static void mt6375_chg_init_temp_zones(struct mt6375_chg_data *ddata,
+				       struct power_supply_battery_info *info)
+{
+	struct mt6375_chg_limits *normal = &ddata->limits[MT6375_ZONE_NORMAL];
+	struct mt6375_chg_limits *cool = &ddata->limits[MT6375_ZONE_COOL];
+	struct mt6375_chg_limits *warm = &ddata->limits[MT6375_ZONE_WARM];
+	bool alert = info->temp_alert_min > INT_MIN &&
+		     info->temp_alert_max < INT_MAX;
+	bool range = info->temp_min > INT_MIN && info->temp_max < INT_MAX;
+	int min, max;
+
+	if (!alert && !range)
+		return;
+
+	min = range ? info->temp_min : info->temp_alert_min;
+	max = range ? info->temp_max : info->temp_alert_max;
+	ddata->temp_min = min * 10;
+	ddata->temp_max = max * 10;
+	ddata->temp_cool = (alert ? info->temp_alert_min : min) * 10;
+	ddata->temp_warm = (alert ? info->temp_alert_max : max) * 10;
+
+	if (ddata->temp_min > ddata->temp_cool ||
+	    ddata->temp_cool > ddata->temp_warm ||
+	    ddata->temp_warm > ddata->temp_max) {
+		dev_warn(ddata->dev, "Invalid battery temperature ranges\n");
+		return;
+	}
+
+	cool->ichg_ua = max(info->alert_low_temp_charge_current_ua, 0);
+	cool->cv_uv = info->alert_low_temp_charge_voltage_uv > 0 ?
+		      info->alert_low_temp_charge_voltage_uv : normal->cv_uv;
+	warm->ichg_ua = max(info->alert_high_temp_charge_current_ua, 0);
+	warm->cv_uv = info->alert_high_temp_charge_voltage_uv > 0 ?
+		      info->alert_high_temp_charge_voltage_uv : normal->cv_uv;
+
+	ddata->temp_zones = true;
+}
+
+/*
  * Program the charge current, the charge voltage and the termination current
  * from the monitored battery, and let the charger terminate at end of charge.
  * Limits the battery does not describe keep their current (bootloader) value.
  */
 static int mt6375_chg_apply_battery_info(struct mt6375_chg_data *ddata)
 {
+	struct mt6375_chg_limits *normal = &ddata->limits[MT6375_ZONE_NORMAL];
 	struct power_supply_battery_info *info;
 	int ret;
+
+	ret = mt6375_chg_get_value(ddata, F_ICHG, &normal->ichg_ua);
+	if (ret)
+		return ret;
+	ret = mt6375_chg_get_value(ddata, F_CV, &normal->cv_uv);
+	if (ret)
+		return ret;
 
 	ret = power_supply_get_battery_info(ddata->psy, &info);
 	if (ret == -ENODEV || ret == -ENOENT)
@@ -657,6 +759,7 @@ static int mt6375_chg_apply_battery_info(struct mt6375_chg_data *ddata)
 					   info->constant_charge_current_max_ua);
 		if (ret)
 			goto out;
+		normal->ichg_ua = info->constant_charge_current_max_ua;
 	}
 
 	if (info->constant_charge_voltage_max_uv > 0) {
@@ -664,12 +767,10 @@ static int mt6375_chg_apply_battery_info(struct mt6375_chg_data *ddata)
 					   info->constant_charge_voltage_max_uv);
 		if (ret)
 			goto out;
+		normal->cv_uv = info->constant_charge_voltage_max_uv;
 	}
 
-	if (info->temp_alert_min > INT_MIN && info->temp_alert_max < INT_MAX) {
-		ddata->temp_min = info->temp_alert_min * 10;
-		ddata->temp_max = info->temp_alert_max * 10;
-	}
+	mt6375_chg_init_temp_zones(ddata, info);
 
 	if (info->charge_term_current_ua > 0) {
 		ret = mt6375_chg_set_value(ddata, F_IEOC,
@@ -686,61 +787,119 @@ out:
 	return ret;
 }
 
+static enum mt6375_chg_temp_zone
+mt6375_chg_zone_of(struct mt6375_chg_data *ddata, int temp)
+{
+	if (temp < ddata->temp_min)
+		return MT6375_ZONE_COLD;
+	if (temp < ddata->temp_cool)
+		return MT6375_ZONE_COOL;
+	if (temp <= ddata->temp_warm)
+		return MT6375_ZONE_NORMAL;
+	if (temp <= ddata->temp_max)
+		return MT6375_ZONE_WARM;
+	return MT6375_ZONE_HOT;
+}
+
+/* Zone for @temp; moving back towards the normal zone takes the hysteresis */
+static enum mt6375_chg_temp_zone
+mt6375_chg_next_zone(struct mt6375_chg_data *ddata, int temp)
+{
+	enum mt6375_chg_temp_zone cur = ddata->zone;
+	enum mt6375_chg_temp_zone zone = mt6375_chg_zone_of(ddata, temp);
+	enum mt6375_chg_temp_zone hyst;
+
+	if (cur < MT6375_ZONE_NORMAL && zone > cur &&
+	    zone <= MT6375_ZONE_NORMAL) {
+		hyst = mt6375_chg_zone_of(ddata, temp - MT6375_TEMP_HYST);
+		zone = hyst > cur ? hyst : cur;
+	} else if (cur > MT6375_ZONE_NORMAL && zone < cur &&
+		   zone >= MT6375_ZONE_NORMAL) {
+		hyst = mt6375_chg_zone_of(ddata, temp + MT6375_TEMP_HYST);
+		zone = hyst < cur ? hyst : cur;
+	}
+
+	return zone;
+}
+
+static int mt6375_chg_apply_zone(struct mt6375_chg_data *ddata,
+				 enum mt6375_chg_temp_zone zone)
+{
+	const struct mt6375_chg_limits *lim = &ddata->limits[zone];
+	int ret;
+
+	if (!lim->ichg_ua)
+		return mt6375_chg_field_set(ddata, F_CHG_EN, 0);
+
+	ret = mt6375_chg_set_value(ddata, F_ICHG, lim->ichg_ua);
+	if (ret)
+		return ret;
+	ret = mt6375_chg_set_value(ddata, F_CV, lim->cv_uv);
+	if (ret)
+		return ret;
+	return mt6375_chg_field_set(ddata, F_CHG_EN, 1);
+}
+
+static const char * const mt6375_chg_zone_names[] = {
+	[MT6375_ZONE_COLD]	= "cold, charging stopped",
+	[MT6375_ZONE_COOL]	= "cool, charging reduced",
+	[MT6375_ZONE_NORMAL]	= "normal, charging normally",
+	[MT6375_ZONE_WARM]	= "warm, charging reduced",
+	[MT6375_ZONE_HOT]	= "hot, charging stopped",
+};
+
 /*
- * Charge only while the battery is within its alert temperature range, as
- * read by the battery gauge, and resume once it is back inside the range by
- * the hysteresis. The input supply keeps powering the system meanwhile.
+ * While an input supply is present, follow the battery temperature read by
+ * the battery gauge through the temperature zones and program the charger
+ * with the limits of the current zone. The input supply keeps powering the
+ * system meanwhile. Without an input supply the normal limits are restored.
  */
 static void mt6375_chg_temp_work(struct work_struct *work)
 {
 	struct mt6375_chg_data *ddata =
 		container_of(work, struct mt6375_chg_data, temp_work.work);
 	union power_supply_propval temp = {};
-	bool blocked = ddata->temp_blocked;
-	int ret, online;
+	enum mt6375_chg_temp_zone zone;
+	int ret, online = 0;
+
+	mutex_lock(&ddata->temp_lock);
+	zone = ddata->zone;
 
 	ret = mt6375_chg_get_online(ddata, &online);
 	if (ret || !online) {
-		blocked = false;
+		zone = MT6375_ZONE_NORMAL;
 		goto apply;
 	}
 
 	if (!ddata->bat_psy)
 		ddata->bat_psy = power_supply_get_by_name(mt6375_chg_supplied_to[0]);
-	if (!ddata->bat_psy ||
-	    power_supply_get_property(ddata->bat_psy, POWER_SUPPLY_PROP_TEMP,
-				      &temp)) {
-		/* No temperature (yet): keep charging, check again later */
-		blocked = false;
-		goto resched;
-	}
+	/* Without a temperature (yet) stay in the current zone */
+	if (ddata->bat_psy &&
+	    !power_supply_get_property(ddata->bat_psy, POWER_SUPPLY_PROP_TEMP,
+				       &temp))
+		zone = mt6375_chg_next_zone(ddata, temp.intval);
 
-	if (temp.intval < ddata->temp_min || temp.intval > ddata->temp_max)
-		blocked = true;
-	else if (temp.intval >= ddata->temp_min + MT6375_TEMP_HYST &&
-		 temp.intval <= ddata->temp_max - MT6375_TEMP_HYST)
-		blocked = false;
-
-resched:
 	schedule_delayed_work(&ddata->temp_work,
 			      msecs_to_jiffies(MT6375_TEMP_POLL_MS));
 apply:
-	if (blocked == ddata->temp_blocked)
-		return;
-
-	ret = mt6375_chg_field_set(ddata, F_CHG_EN, !blocked);
-	if (ret) {
-		dev_err(ddata->dev, "Failed to %s charging: %d\n",
-			blocked ? "stop" : "resume", ret);
+	if (zone == ddata->zone) {
+		mutex_unlock(&ddata->temp_lock);
 		return;
 	}
 
-	ddata->temp_blocked = blocked;
-	if (blocked)
-		dev_warn(ddata->dev, "Battery at %d.%d degC, charging stopped\n",
-			 temp.intval / 10, abs(temp.intval % 10));
-	else
-		dev_info(ddata->dev, "Charging resumed\n");
+	ret = mt6375_chg_apply_zone(ddata, zone);
+	if (ret) {
+		mutex_unlock(&ddata->temp_lock);
+		dev_err(ddata->dev, "Failed to program charge limits: %d\n", ret);
+		return;
+	}
+	ddata->zone = zone;
+	mutex_unlock(&ddata->temp_lock);
+
+	if (online)
+		dev_info(ddata->dev, "Battery at %d.%d degC: %s\n",
+			 temp.intval / 10, abs(temp.intval % 10),
+			 mt6375_chg_zone_names[zone]);
 	power_supply_changed(ddata->psy);
 }
 
@@ -757,7 +916,7 @@ static irqreturn_t mt6375_chg_irq_handler(int irq, void *data)
 {
 	struct mt6375_chg_data *ddata = data;
 
-	if (ddata->temp_max > ddata->temp_min)
+	if (ddata->temp_zones)
 		mod_delayed_work(system_wq, &ddata->temp_work, 0);
 	power_supply_changed(ddata->psy);
 	return IRQ_HANDLED;
@@ -811,6 +970,11 @@ static int mt6375_chg_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to enable BC1.2\n");
 
+	ddata->zone = MT6375_ZONE_NORMAL;
+	ret = devm_mutex_init(dev, &ddata->temp_lock);
+	if (ret)
+		return ret;
+
 	cfg.drv_data = ddata;
 	cfg.fwnode = dev_fwnode(dev);
 	cfg.supplied_to = mt6375_chg_supplied_to;
@@ -834,7 +998,7 @@ static int mt6375_chg_probe(struct platform_device *pdev)
 	ret = mt6375_chg_field_set(ddata, F_CHG_EN, 1);
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to enable charging\n");
-	if (ddata->temp_max > ddata->temp_min)
+	if (ddata->temp_zones)
 		schedule_delayed_work(&ddata->temp_work, 0);
 
 	platform_set_drvdata(pdev, ddata);
