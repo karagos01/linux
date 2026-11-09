@@ -713,6 +713,14 @@ int power_supply_get_battery_info(struct power_supply *psy,
 		info->temp_alert_min = min_max[0];
 		info->temp_alert_max = min_max[1];
 	}
+	fwnode_property_read_u32(fwnode, "alert-low-temp-charge-current-microamp",
+				 &info->alert_low_temp_charge_current_ua);
+	fwnode_property_read_u32(fwnode, "alert-low-temp-charge-voltage-microvolt",
+				 &info->alert_low_temp_charge_voltage_uv);
+	fwnode_property_read_u32(fwnode, "alert-high-temp-charge-current-microamp",
+				 &info->alert_high_temp_charge_current_ua);
+	fwnode_property_read_u32(fwnode, "alert-high-temp-charge-voltage-microvolt",
+				 &info->alert_high_temp_charge_voltage_uv);
 	if (!fwnode_property_read_u32_array(fwnode, "operating-range-celsius",
 					    min_max, ARRAY_SIZE(min_max))) {
 		info->temp_min = min_max[0];
