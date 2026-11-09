@@ -24,6 +24,7 @@
 #include <linux/power_supply.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
+#include <linux/thermal.h>
 
 #define MT6375_GAUGE_DEFAULT_RINT_UOHM	120000
 
@@ -52,6 +53,9 @@
  */
 #define MT6375_GAUGE_REST_UA		60000
 
+/* Thermal zone of the battery NTC thermistor */
+#define MT6375_GAUGE_TZ_NAME		"battery-thermal"
+
 struct mt6375_gauge_data {
 	struct device *dev;
 	struct regmap *regmap;
@@ -60,6 +64,7 @@ struct mt6375_gauge_data {
 	struct power_supply *psy;
 	struct power_supply_battery_info *info;
 	struct power_supply *chg_psy;
+	struct thermal_zone_device *tz;
 
 	/* Serialises the coulomb-counter latch-read-release sequence. */
 	struct mutex car_lock;
@@ -114,6 +119,43 @@ static bool mt6375_gauge_is_charging(struct mt6375_gauge_data *ddata)
 	if (ret)
 		return false;
 	return val.intval != 0;
+}
+
+/* The battery is charging, full or idle as the charger feeding it says */
+static int mt6375_gauge_get_status(struct mt6375_gauge_data *ddata, int *status)
+{
+	union power_supply_propval val;
+
+	if (!mt6375_gauge_is_charging(ddata)) {
+		*status = POWER_SUPPLY_STATUS_DISCHARGING;
+		return 0;
+	}
+
+	if (power_supply_get_property(ddata->chg_psy, POWER_SUPPLY_PROP_STATUS,
+				      &val))
+		*status = POWER_SUPPLY_STATUS_UNKNOWN;
+	else
+		*status = val.intval;
+	return 0;
+}
+
+/* Battery temperature in tenths of a degree Celsius, from the NTC thermal zone */
+static int mt6375_gauge_get_temp(struct mt6375_gauge_data *ddata, int *temp)
+{
+	int mdeg, ret;
+
+	if (IS_ERR_OR_NULL(ddata->tz)) {
+		ddata->tz = thermal_zone_get_zone_by_name(MT6375_GAUGE_TZ_NAME);
+		if (IS_ERR(ddata->tz))
+			return -ENODATA;
+	}
+
+	ret = thermal_zone_get_temp(ddata->tz, &mdeg);
+	if (ret)
+		return ret;
+
+	*temp = mdeg / 100;
+	return 0;
 }
 
 /* Latch the fuel-gauge accumulator so FG_CAR can be read coherently. */
@@ -295,6 +337,11 @@ static int mt6375_gauge_get_property(struct power_supply *psy,
 	int ret;
 
 	switch (psp) {
+	case POWER_SUPPLY_PROP_STATUS:
+		ret = mt6375_gauge_get_status(ddata, &val->intval);
+		if (ret)
+			return ret;
+		break;
 	case POWER_SUPPLY_PROP_PRESENT:
 		val->intval = 1;
 		break;
@@ -313,6 +360,11 @@ static int mt6375_gauge_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
 		ret = mt6375_gauge_get_capacity(ddata, &val->intval);
+		if (ret)
+			return ret;
+		break;
+	case POWER_SUPPLY_PROP_TEMP:
+		ret = mt6375_gauge_get_temp(ddata, &val->intval);
 		if (ret)
 			return ret;
 		break;
@@ -338,11 +390,13 @@ static int mt6375_gauge_get_property(struct power_supply *psy,
 }
 
 static enum power_supply_property mt6375_gauge_properties[] = {
+	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
 	POWER_SUPPLY_PROP_CAPACITY,
+	POWER_SUPPLY_PROP_TEMP,
 	POWER_SUPPLY_PROP_CHARGE_COUNTER,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
 	POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN,
@@ -355,6 +409,7 @@ static const struct power_supply_desc mt6375_gauge_psy_desc = {
 	.properties	= mt6375_gauge_properties,
 	.num_properties	= ARRAY_SIZE(mt6375_gauge_properties),
 	.get_property	= mt6375_gauge_get_property,
+	.external_power_changed = power_supply_changed,
 };
 
 static int mt6375_gauge_probe(struct platform_device *pdev)
