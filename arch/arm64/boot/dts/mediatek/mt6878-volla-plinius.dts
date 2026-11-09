@@ -948,9 +948,8 @@
 
 		gauge {
 			compatible = "mediatek,mt6375-gauge";
-			io-channels = <&mt6375_adc MT6375_ADC_VBAT>,
-				      <&mt6375_adc MT6375_ADC_IBAT>;
-			io-channel-names = "vbat", "ibat";
+			io-channels = <&mt6375_adc MT6375_ADC_VBAT>;
+			io-channel-names = "vbat";
 			monitored-battery = <&battery>;
 		};
 
