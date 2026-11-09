@@ -59,7 +59,7 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 					MT6878_TOP_AXI_PROT_EN_INFRASYS_CLR_0,
 					MT6878_TOP_AXI_PROT_EN_INFRASYS_STA_0),
 		},
-		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF | MTK_SCPD_ACTIVE_WAKEUP,
 	},
 	[MT6878_POWER_DOMAIN_SSUSB] = {
 		.name = "ssusb",
