@@ -24,6 +24,9 @@
 #define MT6375_REG_ADC_CFG3	0x1A6
 #define MT6375_REG_ADC_CHEN	0x1A7
 #define MT6375_REG_ADC_CH1RPTH	0x1AA
+/* Fuel-gauge auxiliary ADC (HK2 bank) */
+#define MT6375_REG_AUXADC_OUT_CH3	0x408
+#define MT6375_REG_AUXADC_RQST0		0x438
 
 #define MT6375_ADCEN_MASK	BIT(7)
 #define MT6375_ZCVEN_MASK	BIT(6)
@@ -36,17 +39,64 @@
 #define ADC_POLL_TIME_US	100
 #define ADC_POLL_TIMEOUT_US	1000
 
+#define MT6375_AUXADC_BATON_RQST	BIT(3)
+#define MT6375_AUXADC_OUT_RDY		BIT(15)
+#define MT6375_AUXADC_OUT_MASK		GENMASK(11, 0)
+#define AUXADC_POLL_TIMEOUT_US		11000
+
 struct mt6375_priv {
 	struct device *dev;
 	struct regmap *regmap;
 	struct mutex lock;
 };
 
+/*
+ * The battery NTC (BATON) is measured by the fuel-gauge auxiliary ADC: request
+ * a conversion and wait for the ready flag of the 12-bit result.
+ */
+static int mt6375_adc_read_baton(struct mt6375_priv *priv, int *val)
+{
+	unsigned int rdy;
+	__le16 le_val;
+	int ret;
+
+	mutex_lock(&priv->lock);
+
+	ret = regmap_write(priv->regmap, MT6375_REG_AUXADC_RQST0,
+			   MT6375_AUXADC_BATON_RQST);
+	if (ret)
+		goto out;
+
+	usleep_range(1000, 1200);
+
+	ret = regmap_read_poll_timeout(priv->regmap,
+				       MT6375_REG_AUXADC_OUT_CH3 + 1, rdy,
+				       rdy & (MT6375_AUXADC_OUT_RDY >> 8),
+				       ADC_POLL_TIME_US * 5,
+				       AUXADC_POLL_TIMEOUT_US);
+	if (ret)
+		goto out;
+
+	ret = regmap_raw_read(priv->regmap, MT6375_REG_AUXADC_OUT_CH3, &le_val,
+			      sizeof(le_val));
+	if (ret)
+		goto out;
+
+	*val = le16_to_cpu(le_val) & MT6375_AUXADC_OUT_MASK;
+	ret = IIO_VAL_INT;
+out:
+	mutex_unlock(&priv->lock);
+	return ret;
+}
+
 static int mt6375_adc_read_channel(struct mt6375_priv *priv, int chan, int *val)
 {
 	__be16 be_val;
 	unsigned int addr = MT6375_REG_ADC_MONRPTH, regval;
 	int ret;
+
+	if (chan == MT6375_ADC_BATON)
+		return mt6375_adc_read_baton(priv, val);
 
 	mutex_lock(&priv->lock);
 	pm_stay_awake(priv->dev);
@@ -114,6 +164,11 @@ static int mt6375_adc_read_scale(struct mt6375_priv *priv, int chan, int *val1, 
 	case MT6375_ADC_PDVBUS:
 		*val1 = 25000;
 		return IIO_VAL_INT;
+	case MT6375_ADC_BATON:
+		/* 12-bit conversion of a 2.76 V full scale, in mV */
+		*val1 = 2760;
+		*val2 = 12;
+		return IIO_VAL_FRACTIONAL_LOG2;
 	}
 
 	return -EINVAL;
@@ -183,6 +238,7 @@ static const struct iio_chan_spec mt6375_adc_channels[] = {
 	MT6375_ADC_CHAN(SBU1, IIO_VOLTAGE),
 	MT6375_ADC_CHAN(SBU2, IIO_VOLTAGE),
 	MT6375_ADC_CHAN(FGCIC1, IIO_CURRENT),
+	MT6375_ADC_CHAN(BATON, IIO_VOLTAGE),
 	IIO_CHAN_SOFT_TIMESTAMP(MT6375_ADC_MAX_CHANNEL)
 };
 
