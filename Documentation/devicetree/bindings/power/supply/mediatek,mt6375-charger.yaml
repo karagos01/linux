@@ -13,9 +13,19 @@ description:
   This module is part of the MT6375 MFD device. It provides the single-cell
   switching battery charger with BC1.2 USB port detection.
 
+allOf:
+  - $ref: power-supply.yaml#
+
 properties:
   compatible:
     const: mediatek,mt6375-charger
+
+  monitored-battery:
+    description:
+      The battery the charger feeds. Its constant-charge-current-max-microamp,
+      constant-charge-voltage-max-microvolt and charge-term-current-microamp
+      set the charge current, the charge voltage and the end-of-charge
+      termination current.
 
   interrupts:
     description:
@@ -46,6 +56,6 @@ required:
   - interrupts
   - interrupt-names
 
-additionalProperties: false
+unevaluatedProperties: false
 
 ...
