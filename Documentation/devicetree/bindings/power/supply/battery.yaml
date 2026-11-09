@@ -128,6 +128,30 @@ properties:
       - description: alert when battery temperature is lower than this value
       - description: alert when battery temperature is higher than this value
 
+  alert-low-temp-charge-current-microamp:
+    description: |
+      Reduced constant charge current to use while the battery temperature is
+      below the lower alert-celsius limit but still inside
+      operating-range-celsius.
+
+  alert-low-temp-charge-voltage-microvolt:
+    description: |
+      Reduced constant charge voltage to use while the battery temperature is
+      below the lower alert-celsius limit but still inside
+      operating-range-celsius.
+
+  alert-high-temp-charge-current-microamp:
+    description: |
+      Reduced constant charge current to use while the battery temperature is
+      above the upper alert-celsius limit but still inside
+      operating-range-celsius.
+
+  alert-high-temp-charge-voltage-microvolt:
+    description: |
+      Reduced constant charge voltage to use while the battery temperature is
+      above the upper alert-celsius limit but still inside
+      operating-range-celsius.
+
   # The volt-drop* -properties describe voltage-drop for a battery, described
   # as VDROP in:
   # https://patentimages.storage.googleapis.com/6c/f5/17/c1d901c220f6a9/US20150032394A1.pdf
