@@ -27,11 +27,6 @@
 #include <linux/property.h>
 #include <linux/regulator/consumer.h>
 #include <linux/spi/spi.h>
-#include <linux/workqueue.h>
-
-/* Bring-up diagnostic: poll the touch frame instead of using the IRQ. */
-static bool ft3681_poll;
-module_param_named(poll, ft3681_poll, bool, 0644);
 
 #define FT3681_MAX_POINTS	10
 #define FT3681_ONE_TCH_LEN_V1	6
@@ -43,10 +38,6 @@ module_param_named(poll, ft3681_poll, bool, 0644);
 #define FT3681_REG_CHIP_ID	0xa3
 #define FT3681_REG_CHIP_ID2	0x9f
 #define FT3681_REG_FW_VER	0xa6
-#define FT3681_REG_WORKMODE	0x00
-#define FT3681_REG_INT_CNT	0x8f
-#define FT3681_REG_FLOW_CNT	0x91
-#define FT3681_REG_POWER_MODE	0xa5
 #define FT3681_CHIP_ID		0x56
 #define FT3681_CHIP_ID2		0x62
 
@@ -83,9 +74,6 @@ struct ft3681 {
 	struct touchscreen_properties prop;
 	struct gpio_desc *reset_gpio;
 	struct regulator *vdd;
-	struct delayed_work poll_work;
-	unsigned int poll_dbg;	/* diagnostic log budget */
-	u8 prev_intc;		/* last FT3681_REG_INT_CNT seen */
 	u8 *frame;		/* parsed touch frame (FT3681_FRAME_LEN) */
 	u8 *tx;			/* DMA-safe SPI buffers (FT3681_BUF_LEN) */
 	u8 *rx;
@@ -220,72 +208,11 @@ static irqreturn_t ft3681_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static void ft3681_poll_work(struct work_struct *work)
-{
-	struct ft3681 *ts = container_of(work, struct ft3681, poll_work.work);
-	u8 flow = 0, intc = 0, wmode = 0xee, pmode = 0xee;
-	int ret;
-
-	/* Diagnostics: is the FW main loop running and generating interrupts? */
-	ft3681_read(ts, FT3681_REG_FLOW_CNT, &flow, 1);
-	ft3681_read(ts, FT3681_REG_INT_CNT, &intc, 1);
-	ft3681_read(ts, FT3681_REG_WORKMODE, &wmode, 1);
-	ft3681_read(ts, FT3681_REG_POWER_MODE, &pmode, 1);
-
-	ret = ft3681_read(ts, FT3681_REG_TD_ADDR, ts->frame, FT3681_FRAME_LEN);
-
-	/* Log the first few polls, then only when the chip's internal IRQ
-	 * counter moves (a touch) or a valid touch frame shows up.
-	 */
-	if (ts->poll_dbg || intc != ts->prev_intc ||
-	    (ret == 0 && ts->frame[FT3681_E_NUM] != 0xff)) {
-		if (ts->poll_dbg)
-			ts->poll_dbg--;
-		dev_info(&ts->spi->dev,
-			 "diag: flow=%02x int=%02x wm=%02x pw=%02x rd=%d frame=%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-			 flow, intc, wmode, pmode, ret,
-			 ts->frame[0], ts->frame[1], ts->frame[2], ts->frame[3],
-			 ts->frame[4], ts->frame[5], ts->frame[6], ts->frame[7],
-			 ts->frame[8], ts->frame[9]);
-	}
-	ts->prev_intc = intc;
-	if (!ret)
-		ft3681_report(ts);
-
-	schedule_delayed_work(&ts->poll_work, msecs_to_jiffies(300));
-}
-
-static ssize_t frame_show(struct device *dev, struct device_attribute *attr,
-			  char *out)
-{
-	struct ft3681 *ts = spi_get_drvdata(to_spi_device(dev));
-	u8 flow = 0, intc = 0, wm = 0, pm = 0;
-	int ret;
-
-	ft3681_read(ts, FT3681_REG_FLOW_CNT, &flow, 1);
-	ft3681_read(ts, FT3681_REG_INT_CNT, &intc, 1);
-	ft3681_read(ts, FT3681_REG_WORKMODE, &wm, 1);
-	ft3681_read(ts, FT3681_REG_POWER_MODE, &pm, 1);
-	ret = ft3681_read(ts, FT3681_REG_TD_ADDR, ts->frame, FT3681_FRAME_LEN);
-
-	return sysfs_emit(out, "rd=%d flow=%02x int=%02x wm=%02x pm=%02x frame=%*ph\n",
-			  ret, flow, intc, wm, pm, 24, ts->frame);
-}
-static DEVICE_ATTR_RO(frame);
-
-static struct attribute *ft3681_attrs[] = {
-	&dev_attr_frame.attr,
-	NULL,
-};
-static const struct attribute_group ft3681_group = {
-	.attrs = ft3681_attrs,
-};
-
 static void ft3681_reset(struct ft3681 *ts)
 {
 	/* reset is active low: assert (line low), hold, release, wait for FW */
 	gpiod_set_value_cansleep(ts->reset_gpio, 1);
-	msleep(2);
+	usleep_range(2000, 3000);
 	gpiod_set_value_cansleep(ts->reset_gpio, 0);
 	msleep(200);
 }
@@ -321,17 +248,11 @@ static void ft3681_disable_vdd(void *data)
 	regulator_disable(data);
 }
 
-static void ft3681_stop_poll(void *data)
-{
-	struct ft3681 *ts = data;
-
-	cancel_delayed_work_sync(&ts->poll_work);
-}
-
 static int ft3681_probe(struct spi_device *spi)
 {
 	struct device *dev = &spi->dev;
 	struct ft3681 *ts;
+	u8 fw;
 	int ret;
 
 	if (!spi->irq)
@@ -384,12 +305,8 @@ static int ft3681_probe(struct spi_device *spi)
 	if (ret)
 		return ret;
 
-	{
-		u8 fw = 0;
-
-		if (!ft3681_read(ts, FT3681_REG_FW_VER, &fw, 1))
-			dev_info(dev, "FT3681 firmware version 0x%02x\n", fw);
-	}
+	if (!ft3681_read(ts, FT3681_REG_FW_VER, &fw, 1))
+		dev_dbg(dev, "firmware version 0x%02x\n", fw);
 
 	ts->input = devm_input_allocate_device(dev);
 	if (!ts->input)
@@ -417,24 +334,10 @@ static int ft3681_probe(struct spi_device *spi)
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to register input\n");
 
-	ret = devm_device_add_group(dev, &ft3681_group);
+	ret = devm_request_threaded_irq(dev, spi->irq, NULL, ft3681_irq,
+					IRQF_ONESHOT, dev_name(dev), ts);
 	if (ret)
-		return ret;
-
-	ts->poll_dbg = 4;
-	if (ft3681_poll) {
-		INIT_DELAYED_WORK(&ts->poll_work, ft3681_poll_work);
-		ret = devm_add_action_or_reset(dev, ft3681_stop_poll, ts);
-		if (ret)
-			return ret;
-		schedule_delayed_work(&ts->poll_work, msecs_to_jiffies(100));
-		dev_info(dev, "using polling mode (bring-up)\n");
-	} else {
-		ret = devm_request_threaded_irq(dev, spi->irq, NULL, ft3681_irq,
-						IRQF_ONESHOT, dev_name(dev), ts);
-		if (ret)
-			return dev_err_probe(dev, ret, "failed to request irq\n");
-	}
+		return dev_err_probe(dev, ret, "failed to request irq\n");
 
 	return 0;
 }
