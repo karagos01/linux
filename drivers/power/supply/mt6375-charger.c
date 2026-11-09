@@ -130,6 +130,12 @@ static const struct reg_field mt6375_chg_fields[F_MAX] = {
 /* Hysteresis to resume charging, in tenths of a degree Celsius */
 #define MT6375_TEMP_HYST	30
 
+/*
+ * After the charger has reported a full battery, short top-off bursts (e.g.
+ * after a load peak above the input current limit) keep reporting full.
+ */
+#define MT6375_FULL_HOLD_MS	60000
+
 /* Input current to fall back to when there is no Type-C/PD contract (USB2 SDP) */
 #define MT6375_AICR_DEFAULT_UA	500000
 
@@ -157,6 +163,10 @@ struct mt6375_chg_data {
 	struct power_supply *tcpm_psy;
 	struct notifier_block psy_nb;
 	struct work_struct pd_work;
+
+	/* Battery reported full, and when a top-off started after that (or 0) */
+	bool full;
+	unsigned long topoff_start;
 
 	/*
 	 * Battery temperature zones, see mt6375_chg_temp_work(). Limits are
@@ -207,6 +217,7 @@ static int mt6375_chg_get_status(struct mt6375_chg_data *ddata, int *status)
 	if (ret)
 		return ret;
 	if (!online) {
+		ddata->full = false;
 		*status = POWER_SUPPLY_STATUS_DISCHARGING;
 		return 0;
 	}
@@ -228,10 +239,24 @@ static int mt6375_chg_get_status(struct mt6375_chg_data *ddata, int *status)
 	case MT6375_CHG_STAT_FAST:
 	case MT6375_CHG_STAT_EOC:
 	case MT6375_CHG_STAT_BKGND:
-		*status = chg_en ? POWER_SUPPLY_STATUS_CHARGING :
-				   POWER_SUPPLY_STATUS_NOT_CHARGING;
+		if (!chg_en) {
+			*status = POWER_SUPPLY_STATUS_NOT_CHARGING;
+			break;
+		}
+		if (ddata->full && !ddata->topoff_start)
+			ddata->topoff_start = jiffies ?: 1;
+		if (ddata->full &&
+		    time_before(jiffies, ddata->topoff_start +
+				msecs_to_jiffies(MT6375_FULL_HOLD_MS))) {
+			*status = POWER_SUPPLY_STATUS_FULL;
+			break;
+		}
+		ddata->full = false;
+		*status = POWER_SUPPLY_STATUS_CHARGING;
 		break;
 	case MT6375_CHG_STAT_DONE:
+		ddata->full = true;
+		ddata->topoff_start = 0;
 		*status = POWER_SUPPLY_STATUS_FULL;
 		break;
 	case MT6375_CHG_STAT_SLEEP:
