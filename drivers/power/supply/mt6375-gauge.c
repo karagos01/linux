@@ -10,13 +10,15 @@
  * the BM bank). The OCV estimate is accurate only while the cell rests, so it
  * is used to anchor the gauge whenever the current is small; between anchors
  * the accumulated charge from the coulomb counter tracks the state of charge
- * under load. Battery voltage and current come from the auxiliary ADC. This
+ * under load. The battery voltage comes from the auxiliary ADC, the signed
+ * battery current from the gauge's own current sense. This
  * avoids the vendor's out-of-tree coulomb-counter daemon while still following
  * the charge accurately through a charge/discharge cycle.
  */
 
 #include <linux/delay.h>
 #include <linux/iio/consumer.h>
+#include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -48,10 +50,19 @@
 #define MT6375_FG_SW_READ_PRE		BIT(0)
 
 /*
+ * Instant battery current from the gauge's own sense resistor (CIC1), latched
+ * like FG_CAR. Same sign convention as FG_CAR; one LSB is 610.352 uA.
+ */
+#define MT6375_REG_FGADC_CUR		0x2E7
+#define MT6375_FGADC_CUR_LSB_NA		610352
+
+/*
  * Below this current magnitude the cell is treated as resting, so the OCV
  * estimate is trustworthy and the coulomb tracker is re-anchored to it.
  */
 #define MT6375_GAUGE_REST_UA		60000
+/* How long the cell has to rest before its voltage has relaxed to the OCV */
+#define MT6375_GAUGE_RELAX_MS		60000
 
 /* Thermal zone of the battery NTC thermistor */
 #define MT6375_GAUGE_TZ_NAME		"battery-thermal"
@@ -60,7 +71,6 @@ struct mt6375_gauge_data {
 	struct device *dev;
 	struct regmap *regmap;
 	struct iio_channel *vbat_chan;
-	struct iio_channel *ibat_chan;
 	struct power_supply *psy;
 	struct power_supply_battery_info *info;
 	struct power_supply *chg_psy;
@@ -73,6 +83,8 @@ struct mt6375_gauge_data {
 	bool cc_anchored;
 	int anchor_soc;
 	s64 anchor_charge_uah;
+	/* When the current last dropped below MT6375_GAUGE_REST_UA, or 0 */
+	unsigned long rest_since;
 };
 
 /* Returns battery terminal voltage in microvolts */
@@ -84,22 +96,6 @@ static int mt6375_gauge_get_voltage(struct mt6375_gauge_data *ddata, int *uV)
 	if (ret < 0)
 		return ret;
 	*uV = val;
-	return 0;
-}
-
-/* Returns battery current magnitude in microamperes */
-static int mt6375_gauge_get_current(struct mt6375_gauge_data *ddata, int *uA)
-{
-	int ret, val;
-
-	if (!ddata->ibat_chan) {
-		*uA = 0;
-		return 0;
-	}
-	ret = iio_read_channel_processed(ddata->ibat_chan, &val);
-	if (ret < 0)
-		return ret;
-	*uA = val;
 	return 0;
 }
 
@@ -279,6 +275,35 @@ static int mt6375_gauge_read_charge(struct mt6375_gauge_data *ddata, s64 *uah)
 	return 0;
 }
 
+/*
+ * Returns the battery current in microamperes, positive while charging and
+ * negative while discharging.
+ */
+static int mt6375_gauge_get_current(struct mt6375_gauge_data *ddata, int *uA)
+{
+	u8 buf[2];
+	int raw, ret;
+
+	mutex_lock(&ddata->car_lock);
+	ret = mt6375_gauge_latch(ddata);
+	if (!ret) {
+		ret = regmap_bulk_read(ddata->regmap, MT6375_REG_FGADC_CUR, buf,
+				       sizeof(buf));
+		mt6375_gauge_unlatch(ddata);
+	}
+	mutex_unlock(&ddata->car_lock);
+	if (ret)
+		return ret;
+
+	/* Values above 0x7fff count down from 0xffff while discharging */
+	raw = buf[0] | buf[1] << 8;
+	if (raw > S16_MAX)
+		raw -= U16_MAX;
+
+	*uA = div_s64((s64)raw * MT6375_FGADC_CUR_LSB_NA, 1000);
+	return 0;
+}
+
 /* Open-circuit state of charge from the ADC voltage, IR-compensated. */
 static int mt6375_gauge_ocv_soc(struct mt6375_gauge_data *ddata)
 {
@@ -297,15 +322,10 @@ static int mt6375_gauge_ocv_soc(struct mt6375_gauge_data *ddata)
 
 	/*
 	 * Compensate the measured terminal voltage back to the open-circuit
-	 * voltage. While charging, current flows into the cell and raises the
-	 * terminal voltage, so remove the IR term; while discharging it sags,
-	 * so add it back.
+	 * voltage: a charging current raises the terminal voltage, a
+	 * discharging one makes it sag.
 	 */
-	ocv = vbat;
-	if (mt6375_gauge_is_charging(ddata))
-		ocv -= (s64)ibat * rint / 1000000;
-	else
-		ocv += (s64)ibat * rint / 1000000;
+	ocv = vbat - div_s64((s64)ibat * rint, 1000000);
 
 	ret = power_supply_batinfo_ocv2cap(ddata->info, ocv, 25);
 	if (ret < 0)
@@ -333,15 +353,22 @@ static int mt6375_gauge_get_capacity(struct mt6375_gauge_data *ddata, int *cap)
 	}
 
 	ret = mt6375_gauge_get_current(ddata, &ibat);
-	if (ret)
-		ibat = 0;
 
 	/*
-	 * Re-anchor to the OCV estimate whenever the cell is at rest (or on the
-	 * first read): OCV is trustworthy there. Under load, hold the anchor and
-	 * add the charge that has flowed since, measured by the coulomb counter.
+	 * Re-anchor to the OCV estimate on the first read and whenever the cell
+	 * has rested long enough for its voltage to relax: OCV is trustworthy
+	 * there. Otherwise hold the anchor and add the charge that has flowed
+	 * since, measured by the coulomb counter.
 	 */
-	if (!ddata->cc_anchored || abs(ibat) < MT6375_GAUGE_REST_UA) {
+	if (ret || abs(ibat) >= MT6375_GAUGE_REST_UA)
+		ddata->rest_since = 0;
+	else if (!ddata->rest_since)
+		ddata->rest_since = jiffies ?: 1;
+
+	if (!ddata->cc_anchored ||
+	    (ddata->rest_since &&
+	     time_after(jiffies, ddata->rest_since +
+			msecs_to_jiffies(MT6375_GAUGE_RELAX_MS)))) {
 		ddata->anchor_soc = ocv_soc;
 		ddata->anchor_charge_uah = charge_uah;
 		ddata->cc_anchored = true;
@@ -469,13 +496,6 @@ static int mt6375_gauge_probe(struct platform_device *pdev)
 	if (IS_ERR(ddata->vbat_chan))
 		return dev_err_probe(dev, PTR_ERR(ddata->vbat_chan),
 				     "Failed to get vbat ADC channel\n");
-
-	ddata->ibat_chan = devm_iio_channel_get(dev, "ibat");
-	if (IS_ERR(ddata->ibat_chan)) {
-		if (PTR_ERR(ddata->ibat_chan) == -EPROBE_DEFER)
-			return -EPROBE_DEFER;
-		ddata->ibat_chan = NULL;
-	}
 
 	cfg.drv_data = ddata;
 	cfg.fwnode = dev_fwnode(dev);
