@@ -172,11 +172,17 @@ static int mt6375_gauge_get_health(struct mt6375_gauge_data *ddata, int *health)
 	if (ret)
 		return ret;
 
-	if (info->temp_alert_max < INT_MAX && temp > info->temp_alert_max * 10)
+	/* Outside the operating range: overheat/cold; outside alert: warm/cool */
+	if (info->temp_max < INT_MAX && temp > info->temp_max * 10)
 		*health = POWER_SUPPLY_HEALTH_OVERHEAT;
+	else if (info->temp_min > INT_MIN && temp < info->temp_min * 10)
+		*health = POWER_SUPPLY_HEALTH_COLD;
+	else if (info->temp_alert_max < INT_MAX &&
+		 temp > info->temp_alert_max * 10)
+		*health = POWER_SUPPLY_HEALTH_WARM;
 	else if (info->temp_alert_min > INT_MIN &&
 		 temp < info->temp_alert_min * 10)
-		*health = POWER_SUPPLY_HEALTH_COLD;
+		*health = POWER_SUPPLY_HEALTH_COOL;
 
 	return 0;
 }
