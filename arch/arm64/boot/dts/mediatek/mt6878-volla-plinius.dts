@@ -1074,6 +1074,8 @@
 		constant-charge-current-max-microamp = <2000000>;
 		constant-charge-voltage-max-microvolt = <4350000>;
 		charge-term-current-microamp = <150000>;
+		/* Charge only between 0 and 50 degC, as the stock firmware does */
+		alert-celsius = <0 50>;
 		factory-internal-resistance-micro-ohms = <120000>;
 		ocv-capacity-celsius = <25>;
 		ocv-capacity-table-0 = <4322000 100>, <4259456 95>,
