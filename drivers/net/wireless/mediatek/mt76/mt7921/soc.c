@@ -353,11 +353,14 @@ static void mt7921_soc_conninfra_sleep(struct mt792x_dev *dev)
 
 static int mt7921_soc_wfsys_on(struct mt792x_dev *dev)
 {
+	struct mtk_connsys *cs = to_soc_dev(dev)->cs;
 	int ret;
+
+	mtk_connsys_bringup_begin(cs);
 
 	ret = mt7921_soc_conninfra_wakeup(dev);
 	if (ret)
-		return ret;
+		goto unlock;
 
 	soc_wr(dev, SOC_CKGEN_COEX_0_SET, SOC_COEX_0_CKEN);
 	soc_wr(dev, SOC_CKGEN_COEX_1_SET, SOC_COEX_1_CKEN);
@@ -407,6 +410,8 @@ static int mt7921_soc_wfsys_on(struct mt792x_dev *dev)
 
 out:
 	mt7921_soc_conninfra_sleep(dev);
+unlock:
+	mtk_connsys_bringup_end(cs);
 
 	return ret;
 }
@@ -1224,6 +1229,23 @@ static int mt7921_soc_run_firmware(struct mt792x_dev *dev)
 	return 0;
 }
 
+/* Starting the firmware calibrates the RF, keep the other radios off it */
+static int mt7921_soc_start_firmware(struct mt792x_dev *dev)
+{
+	struct mtk_connsys *cs = to_soc_dev(dev)->cs;
+	int err;
+
+	mtk_connsys_bringup_begin(cs);
+
+	err = mt7921_soc_drv_own(dev);
+	if (!err)
+		err = mt7921_soc_run_firmware(dev);
+
+	mtk_connsys_bringup_end(cs);
+
+	return err;
+}
+
 static int mt7921_soc_mcu_init(struct mt792x_dev *dev)
 {
 	static const struct mt76_mcu_ops mt7921_soc_mcu_ops = {
@@ -1231,15 +1253,10 @@ static int mt7921_soc_mcu_init(struct mt792x_dev *dev)
 		.mcu_skb_send_msg = mt7921_soc_mcu_send_message,
 		.mcu_parse_response = mt7921_soc_mcu_parse_response,
 	};
-	int err;
 
 	dev->mt76.mcu_ops = &mt7921_soc_mcu_ops;
 
-	err = mt7921_soc_drv_own(dev);
-	if (err)
-		return err;
-
-	return mt7921_soc_run_firmware(dev);
+	return mt7921_soc_start_firmware(dev);
 }
 
 static int mt7921_soc_wfsys_reset(struct mt792x_dev *dev)
@@ -1307,11 +1324,7 @@ static int mt7921_soc_mac_reset(struct mt792x_dev *dev)
 		dev->irq_map->rx.wm_complete_mask |
 		dev->irq_map->rx.wm2_complete_mask | MT_INT_MCU_CMD);
 
-	err = mt7921_soc_drv_own(dev);
-	if (err)
-		goto out;
-
-	err = mt7921_soc_run_firmware(dev);
+	err = mt7921_soc_start_firmware(dev);
 	if (err)
 		goto out;
 
