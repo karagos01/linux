@@ -219,7 +219,8 @@ void mtk_gamma_config(struct device *dev, unsigned int w,
 	mtk_ddp_write(cmdq_pkt, sz, &gamma->cmdq_reg, gamma->regs, DISP_GAMMA_SIZE);
 	if (gamma->data && gamma->data->has_dither)
 		mtk_dither_set_common(gamma->regs, &gamma->cmdq_reg, bpc,
-				      DISP_GAMMA_CFG, GAMMA_DITHERING, cmdq_pkt);
+				      MTK_MAX_BPC, DISP_GAMMA_CFG,
+				      GAMMA_DITHERING, cmdq_pkt);
 }
 
 void mtk_gamma_start(struct device *dev)

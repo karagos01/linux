@@ -102,6 +102,8 @@ struct mtk_ddp_comp_dev {
 	const struct drm_dsc_config *dsc;
 	/* DSC: SoC specific data, NULL if the encoder is only bypassed */
 	const struct mtk_disp_dsc_data *dsc_data;
+	/* DITHER: bit depth of the pixel pipeline feeding the dither engine */
+	unsigned int pipe_bpc;
 };
 
 /**
@@ -179,26 +181,29 @@ static void mtk_ddp_clk_disable(struct device *dev)
 }
 
 void mtk_dither_set_common(void __iomem *regs, struct cmdq_client_reg *cmdq_reg,
-			   unsigned int bpc, unsigned int cfg,
+			   unsigned int bpc, unsigned int pipe_bpc, unsigned int cfg,
 			   unsigned int dither_en, struct cmdq_pkt *cmdq_pkt)
 {
+	unsigned int shift;
+
 	/* If bpc equal to 0, the dithering function didn't be enabled */
 	if (bpc == 0)
 		return;
 
-	if (bpc >= MTK_MIN_BPC) {
+	if (bpc >= MTK_MIN_BPC && bpc <= pipe_bpc) {
+		shift = pipe_bpc - bpc;
 		mtk_ddp_write(cmdq_pkt, 0, cmdq_reg, regs, DISP_REG_DITHER_5);
 		mtk_ddp_write(cmdq_pkt, 0, cmdq_reg, regs, DISP_REG_DITHER_7);
 		mtk_ddp_write(cmdq_pkt,
-			      DITHER_LSB_ERR_SHIFT_R(MTK_MAX_BPC - bpc) |
-			      DITHER_ADD_LSHIFT_R(MTK_MAX_BPC - bpc) |
+			      DITHER_LSB_ERR_SHIFT_R(shift) |
+			      DITHER_ADD_LSHIFT_R(shift) |
 			      DITHER_NEW_BIT_MODE,
 			      cmdq_reg, regs, DISP_REG_DITHER_15);
 		mtk_ddp_write(cmdq_pkt,
-			      DITHER_LSB_ERR_SHIFT_B(MTK_MAX_BPC - bpc) |
-			      DITHER_ADD_LSHIFT_B(MTK_MAX_BPC - bpc) |
-			      DITHER_LSB_ERR_SHIFT_G(MTK_MAX_BPC - bpc) |
-			      DITHER_ADD_LSHIFT_G(MTK_MAX_BPC - bpc),
+			      DITHER_LSB_ERR_SHIFT_B(shift) |
+			      DITHER_ADD_LSHIFT_B(shift) |
+			      DITHER_LSB_ERR_SHIFT_G(shift) |
+			      DITHER_ADD_LSHIFT_G(shift),
 			      cmdq_reg, regs, DISP_REG_DITHER_16);
 		mtk_ddp_write(cmdq_pkt, dither_en, cmdq_reg, regs, cfg);
 	}
@@ -213,8 +218,8 @@ static void mtk_dither_config(struct device *dev, unsigned int w,
 	mtk_ddp_write(cmdq_pkt, w << 16 | h, &priv->cmdq_reg, priv->regs, DISP_REG_DITHER_SIZE);
 	mtk_ddp_write(cmdq_pkt, DITHER_RELAY_MODE, &priv->cmdq_reg, priv->regs,
 		      DISP_REG_DITHER_CFG);
-	mtk_dither_set_common(priv->regs, &priv->cmdq_reg, bpc, DISP_REG_DITHER_CFG,
-			      DITHER_ENGINE_EN, cmdq_pkt);
+	mtk_dither_set_common(priv->regs, &priv->cmdq_reg, bpc, priv->pipe_bpc,
+			      DISP_REG_DITHER_CFG, DITHER_ENGINE_EN, cmdq_pkt);
 }
 
 static void mtk_dither_start(struct device *dev)
@@ -236,8 +241,8 @@ static void mtk_dither_set(struct device *dev, unsigned int bpc,
 {
 	struct mtk_ddp_comp_dev *priv = dev_get_drvdata(dev);
 
-	mtk_dither_set_common(priv->regs, &priv->cmdq_reg, bpc, cfg,
-			      DISP_DITHERING, cmdq_pkt);
+	mtk_dither_set_common(priv->regs, &priv->cmdq_reg, bpc, MTK_MAX_BPC,
+			      cfg, DISP_DITHERING, cmdq_pkt);
 }
 
 static void mtk_dsc_encoder_config(struct mtk_ddp_comp_dev *priv,
@@ -932,6 +937,16 @@ int mtk_ddp_comp_init(struct device *dev, struct device_node *node, struct mtk_d
 
 	if (of_device_is_compatible(node, "mediatek,mt6878-disp-dsc"))
 		priv->dsc_data = &mt6878_dsc_data;
+
+	/*
+	 * The MT6878 display pipeline carries 12 bits per component up to the
+	 * dither engine, so the dither has to drop two more bits than on the
+	 * SoCs with a 10-bit pipeline; with the 10-bit shifts the engine
+	 * corrupts the upper half of every component.
+	 */
+	priv->pipe_bpc = MTK_MAX_BPC;
+	if (of_device_is_compatible(node, "mediatek,mt6878-disp-dither"))
+		priv->pipe_bpc = 12;
 
 	priv->clk = of_clk_get(node, 0);
 	if (IS_ERR(priv->clk))
