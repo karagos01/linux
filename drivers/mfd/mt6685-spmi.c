@@ -113,26 +113,26 @@ static void mt6685_handle_chained_irq(struct irq_desc *desc)
 {
 	struct mt6685 *mt = irq_desc_get_handler_data(desc);
 	struct irq_chip *chip = irq_desc_get_chip(desc);
-	bool handled = false;
 	unsigned long status;
 	unsigned int val;
 	int bit;
 
 	chained_irq_enter(chip, desc);
 
-	if (regmap_read(mt->regmap, MT6685_SCK_TOP_INT_STATUS0, &val) == 0 &&
-	    val) {
+	if (regmap_read(mt->regmap, MT6685_SCK_TOP_INT_STATUS0, &val))
+		val = 0;
+
+	/*
+	 * Nothing pending: the PMIC can send a further RCS while a source
+	 * is masked for its threaded handler. Only the RCS needs acking.
+	 */
+	if (val) {
 		status = val;
-		for_each_set_bit(bit, &status, MT6685_NR_INT) {
+		for_each_set_bit(bit, &status, MT6685_NR_INT)
 			generic_handle_domain_irq_safe(mt->domain, bit);
-			handled = true;
-		}
 		/* Write 1 to clear the serviced sources. */
 		regmap_write(mt->regmap, MT6685_SCK_TOP_INT_STATUS0, val);
 	}
-
-	if (!handled)
-		handle_bad_irq(desc);
 
 	/* Release the SPMI RCS flag so the PMIC can raise the next interrupt. */
 	regmap_write(mt->regmap, MT6685_RCS_IRQ_DONE, 1);
