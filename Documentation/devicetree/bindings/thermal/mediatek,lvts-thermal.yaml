@@ -19,6 +19,7 @@ properties:
   compatible:
     enum:
       - mediatek,mt6878-lvts-ap
+      - mediatek,mt6878-lvts-gpu
       - mediatek,mt6878-lvts-mcu
       - mediatek,mt7987-lvts-ap
       - mediatek,mt7988-lvts-ap
@@ -107,6 +108,7 @@ allOf:
             contains:
               enum:
                 - mediatek,mt6878-lvts-ap
+                - mediatek,mt6878-lvts-gpu
                 - mediatek,mt6878-lvts-mcu
     then:
       required:
