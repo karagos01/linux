@@ -896,6 +896,20 @@
 			iommus = <&disp_iommu 0x2a0>;
 		};
 
+		gpu: gpu@13000000 {
+			compatible = "mediatek,mt6878-mali", "arm,mali-valhall-csf";
+			reg = <0x13000000 0x480000>;
+			clocks = <&gpufreq 0>;
+			clock-names = "core";
+			interrupts = <GIC_SPI 271 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 270 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 269 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "job", "mmu", "gpu";
+			nvmem-cells = <&gpufreq_shader_present>;
+			nvmem-cell-names = "shader-present";
+			power-domains = <&gpufreq>;
+		};
+
 		gpueb_mbox: mailbox@13c3fd80 {
 			compatible = "mediatek,mt6878-gpueb-mbox";
 			reg = <0x13c3fd80 0x280>,
