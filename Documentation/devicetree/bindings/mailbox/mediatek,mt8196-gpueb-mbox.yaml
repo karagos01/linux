@@ -12,6 +12,7 @@ maintainers:
 properties:
   compatible:
     enum:
+      - mediatek,mt6878-gpueb-mbox
       - mediatek,mt8196-gpueb-mbox
 
   reg:
@@ -41,9 +42,22 @@ required:
   - compatible
   - reg
   - reg-names
-  - clocks
   - interrupts
   - "#mbox-cells"
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt8196-gpueb-mbox
+    then:
+      required:
+        - clocks
+    else:
+      # The GPUEB of MT6878 runs from its own PLL, which it controls itself
+      properties:
+        clocks: false
 
 additionalProperties: false
 
