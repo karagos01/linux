@@ -896,6 +896,15 @@
 			iommus = <&disp_iommu 0x2a0>;
 		};
 
+		gpueb_mbox: mailbox@13c3fd80 {
+			compatible = "mediatek,mt6878-gpueb-mbox";
+			reg = <0x13c3fd80 0x280>,
+			      <0x13c62000 0x7c>;
+			reg-names = "data", "ctl";
+			interrupts = <GIC_SPI 273 IRQ_TYPE_LEVEL_HIGH 0>;
+			#mbox-cells = <1>;
+		};
+
 		mmsys: syscon@14000000 {
 			compatible = "mediatek,mt6878-mmsys0", "syscon";
 			reg = <0x14000000 0x1000>;
