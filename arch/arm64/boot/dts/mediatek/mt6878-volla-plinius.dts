@@ -1118,6 +1118,13 @@
 		#thermal-sensor-cells = <1>;
 	};
 
+	lvts_gpu: thermal-sensor@13ff0000 {
+		compatible = "mediatek,mt6878-lvts-gpu";
+		reg = <0x13ff0000 0x1000>;
+		interrupts = <GIC_SPI 277 IRQ_TYPE_LEVEL_HIGH 0>;
+		#thermal-sensor-cells = <1>;
+	};
+
 	scp: scp@1c400000 {
 		compatible = "mediatek,mt6878-scp";
 		reg = <0x1c400000 0x100000>,
@@ -1200,6 +1207,34 @@
 					temperature = <115000>;
 					hysteresis = <1000>;
 					type = "critical";
+				};
+			};
+		};
+
+		gpu-thermal {
+			polling-delay = <1000>;
+			polling-delay-passive = <250>;
+			thermal-sensors = <&lvts_gpu MT6878_GPU_LVTS8_0>;
+
+			trips {
+				gpu_passive: trip-passive {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				gpu_crit: trip-crit {
+					temperature = <115000>;
+					hysteresis = <1000>;
+					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&gpu_passive>;
+					cooling-device =
+						<&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};

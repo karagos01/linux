@@ -908,6 +908,7 @@
 			nvmem-cells = <&gpufreq_shader_present>;
 			nvmem-cell-names = "shader-present";
 			power-domains = <&gpufreq>;
+			#cooling-cells = <2>;
 		};
 
 		gpueb_mbox: mailbox@13c3fd80 {
