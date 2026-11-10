@@ -240,8 +240,14 @@
 			no-map;
 		};
 
-		me-gpueb-shared@7fe70000 {
-			reg = <0x0 0x7fe70000 0x0 0x00180000>;
+		/* GPUEB: gpufreq shared memory, then the rest of its region */
+		gpueb_gpufreq_mem: gpueb-gpufreq@7fe70000 {
+			reg = <0x0 0x7fe70000 0x0 0x00004000>;
+			no-map;
+		};
+
+		gpueb-reserved@7fe74000 {
+			reg = <0x0 0x7fe74000 0x0 0x0017c000>;
 			no-map;
 		};
 

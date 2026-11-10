@@ -905,6 +905,25 @@
 			#mbox-cells = <1>;
 		};
 
+		gpufreq: power-controller@13c3fd1c {
+			compatible = "mediatek,mt6878-gpufreq";
+			reg = <0x13c3fd1c 0x64>,
+			      <0x13f90000 0x2000>;
+			reg-names = "gpr", "rpc";
+			mboxes = <&gpueb_mbox 0>, <&gpueb_mbox 1>, <&gpueb_mbox 2>,
+				 <&gpueb_mbox 3>, <&gpueb_mbox 4>, <&gpueb_mbox 5>,
+				 <&gpueb_mbox 7>;
+			mbox-names = "fast-dvfs-event", "gpufreq", "sleep", "timer",
+				     "fhctl", "ccf", "fast-dvfs";
+			memory-region = <&gpueb_gpufreq_mem>;
+			#clock-cells = <1>;
+			#nvmem-cell-cells = <0>;
+			#power-domain-cells = <0>;
+
+			gpufreq_shader_present: shader-present {
+			};
+		};
+
 		mmsys: syscon@14000000 {
 			compatible = "mediatek,mt6878-mmsys0", "syscon";
 			reg = <0x14000000 0x1000>;
@@ -1209,10 +1228,14 @@
 			compatible = "mediatek,sspm_ap-shared";
 		};
 
-		mblock-46-me_GPUEB_SHARED {
-			reg = <0x00 0x7fe70000 0x00 0x180000>;
+		gpueb_gpufreq_mem: gpueb-gpufreq@7fe70000 {
+			reg = <0x00 0x7fe70000 0x00 0x4000>;
 			no-map;
-			compatible = "mediatek,me_GPUEB_SHARED";
+		};
+
+		gpueb-reserved@7fe74000 {
+			reg = <0x00 0x7fe74000 0x00 0x17c000>;
+			no-map;
 		};
 
 		mblock-45-adsp_shared_reserved {
