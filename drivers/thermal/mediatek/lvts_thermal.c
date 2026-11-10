@@ -2318,7 +2318,14 @@ static const struct lvts_ctrl_data mt6878_lvts_gpu_data_ctrl[] = {
 		},
 		VALID_SENSOR_MAP(1, 0, 0, 0),
 		.offset = 0x0,
-		.mode = LVTS_MSR_FILTERED_MODE,
+		/*
+		 * The GPU controller sits in the MFG power domain: it is reset
+		 * whenever the GPU powers off, and the GPUEB firmware sets it
+		 * up again on power-on in its own way: only the ATP result
+		 * carries the valid bit, and only while the GPU is up. Reads
+		 * fail with -EAGAIN while the GPU is off.
+		 */
+		.mode = LVTS_MSR_ATP_MODE,
 	},
 };
 
