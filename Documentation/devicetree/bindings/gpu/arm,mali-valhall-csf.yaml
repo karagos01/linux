@@ -18,6 +18,7 @@ properties:
     oneOf:
       - items:
           - enum:
+              - mediatek,mt6878-mali
               - mediatek,mt8196-mali
               - nxp,imx95-mali            # G310
               - rockchip,rk3588-mali
@@ -142,6 +143,28 @@ allOf:
           items:
             - const: core
             - const: stacks
+      required:
+        - nvmem-cells
+        - nvmem-cell-names
+        - power-domains
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt6878-mali
+    then:
+      properties:
+        mali-supply: false
+        sram-supply: false
+        operating-points-v2: false
+        power-domains:
+          maxItems: 1
+        power-domain-names: false
+        clocks:
+          maxItems: 1
+        clock-names:
+          items:
+            - const: core
       required:
         - nvmem-cells
         - nvmem-cell-names
