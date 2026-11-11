@@ -1148,6 +1148,8 @@
 		interrupt-names = "ipc0", "ipc1", "mbox0", "mbox1",
 				  "mbox2", "mbox3", "mbox4";
 		mediatek,infracfg = <&infracfg_ao>;
+		/* stk_ps reads ~400 uncovered; its firmware turns "near" at ~530 */
+		proximity-near-level = <550>;
 	};
 };
 
