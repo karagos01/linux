@@ -64,6 +64,7 @@ config MTK_CONNSYS
 	tristate "MediaTek connectivity subsystem power control"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
 	depends on HAVE_ARM_SMCCC && OF
+	depends on WWAN
 	depends on REGULATOR
 	select MFD_SYSCON
 	help
@@ -76,6 +77,7 @@ config MTK_CONNSYS_GNSS
 	tristate "MediaTek connsys GNSS (GPS) subsystem"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
 	depends on HAVE_ARM_SMCCC && OF
+	depends on WWAN
 	depends on MTK_CONNSYS
 	help
 	  Say yes here to bring up the GPS subsystem of the MediaTek
@@ -88,6 +90,7 @@ config MTK_CCCI
 	tristate "MediaTek modem control and communication (CCCI)"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
 	depends on HAVE_ARM_SMCCC && OF
+	depends on WWAN
 	help
 	  Say yes here to boot the integrated cellular modem of MediaTek
 	  SoCs like the MT6878 and to talk to it through the CCIF mailbox.

@@ -10,9 +10,10 @@
  * non-cacheable AP/MD shared memory.
  *
  * The logical channels the modem uses at boot (file system, RPC) and the
- * AT command channel are exported as character devices. Packets of the file
- * system and RPC channels keep their 16 byte CCCI header, as the userspace
- * servers need its reserved field to address their replies.
+ * vendor control channels are exported as character devices. Packets of the
+ * file system and RPC channels keep their 16 byte CCCI header, as the
+ * userspace servers need its reserved field to address their replies. The
+ * primary AT command channel is a WWAN AT port, where ModemManager finds it.
  *
  * The protocol follows the MediaTek downstream ECCCI driver.
  */
@@ -43,6 +44,7 @@
 #include <linux/uaccess.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
+#include <linux/wwan.h>
 #include <asm/arch_timer.h>
 
 /* Secure monitor calls */
@@ -497,9 +499,12 @@ struct ccci_port {
 	u16 tx_ch;
 	u8 txq;
 	bool user_header;
+	bool wwan_at;		/* a WWAN AT port instead of a misc device */
 
 	struct mtk_ccci *ccci;
 	struct miscdevice misc;
+	struct wwan_port *wwan;
+	bool wwan_open;
 	struct sk_buff_head rx_list;
 	wait_queue_head_t rx_wq;
 	struct mutex tx_mutex;
@@ -511,7 +516,7 @@ static const struct ccci_port ccci_port_cfg[] = {
 	{ .name = "ccci_fs",     .rx_ch = 14,  .tx_ch = 15,  .txq = 4, .user_header = true },
 	{ .name = "ccci_rpc",    .rx_ch = 32,  .tx_ch = 33,  .txq = 1, .user_header = true },
 	{ .name = "ccci_ipc",    .rx_ch = 34,  .tx_ch = 36,  .txq = 1, .user_header = true },
-	{ .name = "ccci_at",     .rx_ch = 10,  .tx_ch = 12,  .txq = 5 },
+	{ .name = "ccci_at",     .rx_ch = 10,  .tx_ch = 12,  .txq = 5, .wwan_at = true },
 	{ .name = "ccci_at2",    .rx_ch = 38,  .tx_ch = 40,  .txq = 1 },
 	{ .name = "ccci_mipc0",  .rx_ch = 214, .tx_ch = 215, .txq = 5 },
 	{ .name = "ccci_mipc1",  .rx_ch = 216, .tx_ch = 217, .txq = 5 },
@@ -1379,6 +1384,14 @@ static void ccci_dispatch(struct mtk_ccci *ccci, struct sk_buff *skb)
 		}
 		if (!port->user_header)
 			skb_pull(skb, sizeof(*hdr));
+		if (port->wwan) {
+			/* the WWAN core queues without bound: only while open */
+			if (READ_ONCE(port->wwan_open))
+				wwan_port_rx(port->wwan, skb);
+			else
+				kfree_skb(skb);
+			return;
+		}
 		if (skb_queue_len(&port->rx_list) >= CCCI_PORT_RX_MAX)
 			kfree_skb(skb_dequeue(&port->rx_list));
 		skb_queue_tail(&port->rx_list, skb);
@@ -1608,6 +1621,73 @@ static int ccci_port_mmap(struct file *file, struct vm_area_struct *vma)
 			       PHYS_PFN(ccci->nc_smem_phys +
 					ccci->smem[SMEM_MD_DRDI].ap_offset),
 			       size, vma->vm_page_prot);
+}
+
+/* the primary AT channel, exported as a WWAN AT port */
+static int ccci_wwan_start(struct wwan_port *wport)
+{
+	struct ccci_port *port = wwan_port_get_drvdata(wport);
+
+	WRITE_ONCE(port->wwan_open, true);
+	return 0;
+}
+
+static void ccci_wwan_stop(struct wwan_port *wport)
+{
+	struct ccci_port *port = wwan_port_get_drvdata(wport);
+
+	WRITE_ONCE(port->wwan_open, false);
+}
+
+static int ccci_wwan_send(struct wwan_port *wport, struct sk_buff *skb,
+			  bool blocking)
+{
+	struct ccci_port *port = wwan_port_get_drvdata(wport);
+	struct mtk_ccci *ccci = port->ccci;
+	struct ccci_header hdr = { };
+	int ret;
+
+	if (ccci->state != MD_STATE_READY)
+		return -ENODEV;
+
+	hdr.channel = cpu_to_le16(port->tx_ch);
+	hdr.data[1] = cpu_to_le32(sizeof(hdr) + skb->len);
+
+	mutex_lock(&port->tx_mutex);
+	ret = ccci_send(ccci, port->txq, &hdr, skb->data, skb->len, blocking);
+	mutex_unlock(&port->tx_mutex);
+	if (!ret)
+		consume_skb(skb);
+	return ret;
+}
+
+static int ccci_wwan_tx(struct wwan_port *wport, struct sk_buff *skb)
+{
+	return ccci_wwan_send(wport, skb, false);
+}
+
+static int ccci_wwan_tx_blocking(struct wwan_port *wport, struct sk_buff *skb)
+{
+	return ccci_wwan_send(wport, skb, true);
+}
+
+static const struct wwan_port_ops ccci_wwan_ops = {
+	.start = ccci_wwan_start,
+	.stop = ccci_wwan_stop,
+	.tx = ccci_wwan_tx,
+	.tx_blocking = ccci_wwan_tx_blocking,
+};
+
+static void ccci_ports_remove(struct mtk_ccci *ccci, int n)
+{
+	while (--n >= 0) {
+		struct ccci_port *port = &ccci->ports[n];
+
+		if (port->wwan)
+			wwan_remove_port(port->wwan);
+		else
+			misc_deregister(&port->misc);
+	}
 }
 
 static const struct file_operations ccci_port_fops = {
@@ -2744,22 +2824,33 @@ static int mtk_ccci_probe(struct platform_device *pdev)
 		skb_queue_head_init(&port->rx_list);
 		init_waitqueue_head(&port->rx_wq);
 		mutex_init(&port->tx_mutex);
-		port->misc.minor = MISC_DYNAMIC_MINOR;
-		port->misc.name = port->name;
-		port->misc.fops = &ccci_port_fops;
-		port->misc.parent = dev;
-		ret = misc_register(&port->misc);
+		if (port->wwan_at) {
+			struct wwan_port_caps caps = {
+				/* a CCCI packet can't be split: write in pieces */
+				.frag_len = CCMNI_MTU - sizeof(struct ccci_header),
+			};
+
+			port->wwan = wwan_create_port(dev, WWAN_PORT_AT,
+						      &ccci_wwan_ops, &caps, port);
+			ret = PTR_ERR_OR_ZERO(port->wwan);
+			if (ret)
+				port->wwan = NULL;
+		} else {
+			port->misc.minor = MISC_DYNAMIC_MINOR;
+			port->misc.name = port->name;
+			port->misc.fops = &ccci_port_fops;
+			port->misc.parent = dev;
+			ret = misc_register(&port->misc);
+		}
 		if (ret) {
-			while (--i >= 0)
-				misc_deregister(&ccci->ports[i].misc);
+			ccci_ports_remove(ccci, i);
 			return ret;
 		}
 	}
 
 	ret = ccci_net_init(ccci);
 	if (ret) {
-		for (i = 0; i < ARRAY_SIZE(ccci->ports); i++)
-			misc_deregister(&ccci->ports[i].misc);
+		ccci_ports_remove(ccci, ARRAY_SIZE(ccci->ports));
 		return dev_err_probe(dev, ret, "failed to set up the network interfaces\n");
 	}
 
@@ -2771,10 +2862,9 @@ static void mtk_ccci_remove(struct platform_device *pdev)
 	struct mtk_ccci *ccci = platform_get_drvdata(pdev);
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(ccci->ports); i++) {
-		misc_deregister(&ccci->ports[i].misc);
+	ccci_ports_remove(ccci, ARRAY_SIZE(ccci->ports));
+	for (i = 0; i < ARRAY_SIZE(ccci->ports); i++)
 		skb_queue_purge(&ccci->ports[i].rx_list);
-	}
 	cancel_work_sync(&ccci->rx_work);
 	ccci_net_exit(ccci);
 }
