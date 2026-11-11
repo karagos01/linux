@@ -515,6 +515,8 @@ struct ccci_port {
 
 static const struct ccci_port ccci_port_cfg[] = {
 	{ .name = "ccci_fs",     .rx_ch = 14,  .tx_ch = 15,  .txq = 4, .user_header = true },
+	/* speech control (call audio), mailbox messages included */
+	{ .name = "ccci_aud",    .rx_ch = 4,   .tx_ch = 5,   .txq = 0, .user_header = true },
 	{ .name = "ccci_rpc",    .rx_ch = 32,  .tx_ch = 33,  .txq = 1, .user_header = true },
 	{ .name = "ccci_ipc",    .rx_ch = 34,  .tx_ch = 36,  .txq = 1, .user_header = true },
 	{ .name = "ccci_at",     .rx_ch = 10,  .tx_ch = 12,  .txq = 5, .wwan_at = true },
@@ -1580,7 +1582,13 @@ static ssize_t ccci_port_write(struct file *file, const char __user *buf,
 		len = CCMNI_MTU - sizeof(hdr);
 	}
 	hdr.channel = cpu_to_le16(port->tx_ch);
-	hdr.data[1] = cpu_to_le32(sizeof(hdr) + len);
+	/* a mailbox message is the header alone, data[1] carries its id */
+	if (hdr.data[0] == cpu_to_le32(CCCI_CTRL_MAGIC)) {
+		if (len)
+			return -EINVAL;
+	} else {
+		hdr.data[1] = cpu_to_le32(sizeof(hdr) + len);
+	}
 
 	data = memdup_user(buf + off, len);
 	if (IS_ERR(data))
