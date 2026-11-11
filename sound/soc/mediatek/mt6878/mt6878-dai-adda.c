@@ -104,11 +104,15 @@ static unsigned int mtk_adda_ul_rate_transform(struct mtk_base_afe *afe,
 static const struct snd_kcontrol_new mtk_adda_dl_ch1_mix[] = {
 	SOC_DAPM_SINGLE_AUTODISABLE("DL0_CH1", AFE_CONN_ADDA_DL_CH1,
 				    I_DL0_CH1, 1, 0),
+	SOC_DAPM_SINGLE_AUTODISABLE("PCM_1_CAP_CH1", AFE_CONN_ADDA_DL_CH1_PCM,
+				    I_PCM_1_CAP_CH1, 1, 0),
 };
 
 static const struct snd_kcontrol_new mtk_adda_dl_ch2_mix[] = {
 	SOC_DAPM_SINGLE_AUTODISABLE("DL0_CH2", AFE_CONN_ADDA_DL_CH2,
 				    I_DL0_CH2, 1, 0),
+	SOC_DAPM_SINGLE_AUTODISABLE("PCM_1_CAP_CH1", AFE_CONN_ADDA_DL_CH2_PCM,
+				    I_PCM_1_CAP_CH1, 1, 0),
 };
 
 /* connection-matrix mixers: route the ADDA uplink into the VUL9 memif */
@@ -301,6 +305,8 @@ static const struct snd_soc_dapm_route mtk_dai_adda_routes[] = {
 	/* playback */
 	{"ADDA_DL_CH1", "DL0_CH1", "DL0"},
 	{"ADDA_DL_CH2", "DL0_CH2", "DL0"},
+	{"ADDA_DL_CH1", "PCM_1_CAP_CH1", "PCM 1 Capture"},
+	{"ADDA_DL_CH2", "PCM_1_CAP_CH1", "PCM 1 Capture"},
 
 	{"ADDA Playback", NULL, "ADDA_DL_CH1"},
 	{"ADDA Playback", NULL, "ADDA_DL_CH2"},

@@ -332,4 +332,29 @@
 #define I_DL1_CH1			2
 #define I_DL1_CH2			3
 
+/*
+ * Modem PCM interface 1 (the MD1 speech link), RE from the stock
+ * mtk_dai_pcm_hw_params() and mtk_dai_pcm_widgets: CON1 bit 0 enables the
+ * interface, the rest is the format; CON2[25:18] carries the sample rate.
+ */
+#define PCM_INTF_CON1			0x00d0
+#define PCM_INTF_CON1_EN_SFT		0
+#define PCM_INTF_CON1_FMT		0x46	/* PCM mode B, AFIFO */
+#define PCM_INTF_CON1_MODE_SFT		3	/* 0 8k, 1 16k, 2 32k, 3 48k */
+#define PCM_INTF_CON2			0x00d4
+#define PCM_INTF_CON2_RATE_MASK		GENMASK(25, 18)
+#define PCM_INTF_CON2_RATE_SFT		18
+
+/*
+ * Speech interconnect (stock mtk_adda_dl_ch{1,2}_mix and
+ * mtk_pcm_1_playback_ch{1,2}_mix): the PCM 1 capture port (modem downlink)
+ * into the ADDA downlink, and the ADDA uplink into the PCM 1 playback ports
+ * (modem uplink).
+ */
+#define AFE_CONN_ADDA_DL_CH1_PCM	0x2250
+#define AFE_CONN_ADDA_DL_CH2_PCM	0x2270
+#define I_PCM_1_CAP_CH1			4
+#define AFE_CONN_PCM_1_PB_CH1		0x2d40
+#define AFE_CONN_PCM_1_PB_CH2		0x2d60
+
 #endif /* _MT6878_REG_H_ */

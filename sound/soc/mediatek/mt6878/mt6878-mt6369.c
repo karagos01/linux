@@ -45,6 +45,16 @@ SND_SOC_DAILINK_DEFS(speaker_playback,
 	DAILINK_COMP_ARRAY(COMP_DUMMY()),
 	DAILINK_COMP_ARRAY(COMP_EMPTY()));
 
+SND_SOC_DAILINK_DEFS(hostless_speech,
+	DAILINK_COMP_ARRAY(COMP_CPU("Hostless Speech DAI")),
+	DAILINK_COMP_ARRAY(COMP_DUMMY()),
+	DAILINK_COMP_ARRAY(COMP_EMPTY()));
+
+SND_SOC_DAILINK_DEFS(pcm_1,
+	DAILINK_COMP_ARRAY(COMP_CPU("PCM 1")),
+	DAILINK_COMP_ARRAY(COMP_DUMMY()),
+	DAILINK_COMP_ARRAY(COMP_EMPTY()));
+
 SND_SOC_DAILINK_DEFS(i2s_out4,
 	DAILINK_COMP_ARRAY(COMP_CPU("I2SOUT4")),
 	DAILINK_COMP_ARRAY(COMP_DUMMY()),
@@ -201,6 +211,16 @@ static struct snd_soc_dai_link mt6878_mt6369_dai_links[] = {
 		.playback_only = 1,
 		SND_SOC_DAILINK_REG(speaker_playback),
 	},
+	{
+		/* held open during a call: clocks the modem PCM link */
+		.name = "Hostless_Speech",
+		.stream_name = "Hostless_Speech",
+		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
+			    SND_SOC_DPCM_TRIGGER_PRE},
+		.dynamic = 1,
+		.ignore_suspend = 1,
+		SND_SOC_DAILINK_REG(hostless_speech),
+	},
 	/* back end */
 	{
 		.name = "Primary Codec",
@@ -215,6 +235,12 @@ static struct snd_soc_dai_link mt6878_mt6369_dai_links[] = {
 		.playback_only = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(i2s_out4),
+	},
+	{
+		.name = "PCM 1",
+		.no_pcm = 1,
+		.ignore_suspend = 1,
+		SND_SOC_DAILINK_REG(pcm_1),
 	},
 };
 
