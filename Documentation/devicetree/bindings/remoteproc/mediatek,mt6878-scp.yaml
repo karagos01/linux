@@ -74,6 +74,13 @@ properties:
       idle before sending it mailbox traffic, so a sleeping SCP keeps acking
       commands. If absent, the awake handshake is disabled.
 
+  proximity-near-level:
+    $ref: /schemas/iio/common.yaml#/properties/proximity-near-level
+    description:
+      Raw reading of the proximity sensor behind the SCP from which an
+      object counts as near. It depends on the board (sensor position,
+      cover glass, aperture), so it is given here rather than in the driver.
+
 required:
   - compatible
   - reg
@@ -111,4 +118,5 @@ examples:
         interrupt-names = "ipc0", "ipc1", "mbox0", "mbox1",
                           "mbox2", "mbox3", "mbox4";
         mediatek,infracfg = <&infracfg_ao>;
+        proximity-near-level = <550>;
     };
