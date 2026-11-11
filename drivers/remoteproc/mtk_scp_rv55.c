@@ -38,6 +38,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/rtc.h>
 #include <linux/sched/clock.h>
@@ -348,6 +349,7 @@ struct mt6878_scp {
 
 	/* IIO devices, one per physical sensor (indexed by scp_sensor_table) */
 	struct scp_sensor *sensors;
+	u32 prox_near_level;		/* board "proximity-near-level" */
 
 	struct delayed_work report;
 };
@@ -366,6 +368,7 @@ struct scp_sensor_desc {
 	bool fusion;				/* SCP-fused virtual sensor */
 	bool event;				/* delivers IIO events, not samples */
 	bool raw;				/* stream raw samples (ENABLE_RAW) */
+	bool raw_only;				/* serve only the raw samples */
 };
 
 /* per-sensor runtime state; iio_priv() holds a pointer to one of these */
@@ -458,7 +461,35 @@ SCP_3AXIS_CHANNELS(scp_accel_channels, IIO_ACCEL);
 SCP_3AXIS_CHANNELS(scp_gyro_channels, IIO_ANGL_VEL);
 SCP_3AXIS_CHANNELS(scp_magn_channels, IIO_MAGN);
 SCP_1VAL_CHANNELS(scp_light_channels, IIO_LIGHT);
-SCP_1VAL_CHANNELS(scp_prox_channels, IIO_PROXIMITY);
+
+static ssize_t scp_prox_near_level(struct iio_dev *indio, uintptr_t priv,
+				   const struct iio_chan_spec *chan, char *buf)
+{
+	return sysfs_emit(buf, "%u\n",
+			  iio_to_sensor(indio)->scp->prox_near_level);
+}
+
+static const struct iio_chan_spec_ext_info scp_prox_ext_info[] = {
+	{
+		.name = "nearlevel",
+		.shared = IIO_SEPARATE,
+		.read = scp_prox_near_level,
+	},
+	{ }
+};
+
+static const struct iio_chan_spec scp_prox_channels[] = {
+	{
+		.type = IIO_PROXIMITY,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SAMP_FREQ),
+		.ext_info = scp_prox_ext_info,
+		.scan_index = 0,
+		.scan_type = { .sign = 's', .realbits = 32,
+			       .storagebits = 32, .endianness = IIO_CPU },
+	},
+	IIO_CHAN_SOFT_TIMESTAMP(1),
+};
 SCP_3AXIS_CHANNELS(scp_gravity_channels, IIO_GRAVITY);
 SCP_3AXIS_CHANNELS(scp_linaccel_channels, IIO_ACCEL);
 SCP_UNCAL_3AXIS_CHANNELS(scp_uncal_accel_channels, IIO_ACCEL);
@@ -640,12 +671,27 @@ static const struct iio_chan_spec scp_wake_channels[] = {
 	.raw = true,						\
 }
 
+/*
+ * Proximity in raw mode. The processed stk_ps sample is the firmware's own
+ * near/far decision as a distance (0 or 5 cm), which inverts the IIO
+ * convention that a higher reading means closer. Its raw sample is the
+ * photodiode count (about 400 uncovered, rising past 1000 when covered),
+ * which is what in_proximity_raw is meant to carry, so serve only that.
+ */
+#define SCP_SENSOR_PROX(_t, _name, _ch) {			\
+	.type = _t, .name = _name, .channels = _ch,		\
+	.num_channels = ARRAY_SIZE(_ch), .nvals = 1,		\
+	.default_gain = 1, .unit_div = 1,			\
+	.period_ns = SCP_SENSOR_PERIOD_NS,			\
+	.raw = true, .raw_only = true,				\
+}
+
 static const struct scp_sensor_desc scp_sensor_table[] = {
 	SCP_SENSOR(SCP_SENSOR_TYPE_ACCEL,  "mtk-scp-accel",     scp_accel_channels, 3, 1000,    1),
 	SCP_SENSOR(SCP_SENSOR_TYPE_GYRO,   "mtk-scp-gyro",      scp_gyro_channels,  3, 1000000, 1),
 	SCP_SENSOR(SCP_SENSOR_TYPE_MAGN,   "mtk-scp-magn",      scp_magn_channels,  3, 1000,    100),
 	SCP_SENSOR(SCP_SENSOR_TYPE_ALS,    "mtk-scp-als",       scp_light_channels, 1, 1,       1),
-	SCP_SENSOR(SCP_SENSOR_TYPE_PS,     "mtk-scp-proximity", scp_prox_channels,  1, 1,       1),
+	SCP_SENSOR_PROX(SCP_SENSOR_TYPE_PS, "mtk-scp-proximity", scp_prox_channels),
 	SCP_SENSOR_RAW(SCP_SENSOR_TYPE_SAR, "mtk-scp-sar",      scp_sar_channels,   3, 1,       1),
 	SCP_FUSION(SCP_SENSOR_TYPE_GRAVITY,      "mtk-scp-gravity",      scp_gravity_channels,  3, 1000000, 1),
 	SCP_FUSION(SCP_SENSOR_TYPE_LINEAR_ACCEL, "mtk-scp-linear-accel", scp_linaccel_channels, 3, 1000000, 1),
@@ -1225,10 +1271,12 @@ static void scp_drain_data_work(struct work_struct *work)
 		 * Processed samples arrive as DATA_ACTION (action 0). A raw-mode
 		 * sensor (the SAR) additionally reports its unprocessed per-channel
 		 * reading as RAW_ACTION once ENABLE_RAW is set, so accept that too
-		 * for those; the remaining actions are meta (flush-complete, bias,
-		 * calibration...) with no reading and are dropped.
+		 * for those (and only that for a raw_only one); the remaining
+		 * actions are meta (flush-complete, bias, calibration...) with no
+		 * reading and are dropped.
 		 */
-		if (rec.action != SCP_SENSOR_ACTION_DATA &&
+		if (rec.action == SCP_SENSOR_ACTION_DATA ?
+		    s->desc->raw_only :
 		    !(s->desc->raw && rec.action == SCP_SENSOR_ACTION_RAW))
 			continue;
 
@@ -1490,6 +1538,10 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 	INIT_WORK(&scp->drain, scp_drain_data_work);
 	INIT_DELAYED_WORK(&scp->report, mt6878_scp_report);
 	platform_set_drvdata(pdev, scp);
+
+	/* optional: proximity reading from which an object counts as near */
+	device_property_read_u32(dev, "proximity-near-level",
+				 &scp->prox_near_level);
 
 	scp->sram = devm_platform_ioremap_resource_byname(pdev, "sram");
 	if (IS_ERR(scp->sram))
