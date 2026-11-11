@@ -503,7 +503,8 @@ struct ccci_port {
 
 	struct mtk_ccci *ccci;
 	struct miscdevice misc;
-	struct wwan_port *wwan;
+	struct wwan_port *wwan;	/* set while the modem is ready */
+	spinlock_t wwan_lock;	/* port->wwan vs. RX */
 	bool wwan_open;
 	struct sk_buff_head rx_list;
 	wait_queue_head_t rx_wq;
@@ -594,6 +595,7 @@ struct mtk_ccci {
 	bool irqs_on;
 	bool dvfsrc_started;
 	struct work_struct rx_work;
+	struct work_struct wwan_work;
 	unsigned long pending_ch;
 
 	struct mutex lock;		/* held during a start */
@@ -612,6 +614,8 @@ static void ccci_set_state(struct mtk_ccci *ccci, enum md_state state)
 	dev_info(ccci->dev, "modem state: %s\n", md_state_names[state]);
 	sysfs_notify(&ccci->dev->kobj, NULL, "state");
 	wake_up_all(&ccci->state_wq);
+	/* the WWAN AT port only exists while the modem answers */
+	schedule_work(&ccci->wwan_work);
 }
 
 static unsigned long ccci_smc(unsigned long req, unsigned long sub,
@@ -1384,12 +1388,15 @@ static void ccci_dispatch(struct mtk_ccci *ccci, struct sk_buff *skb)
 		}
 		if (!port->user_header)
 			skb_pull(skb, sizeof(*hdr));
-		if (port->wwan) {
+		if (port->wwan_at) {
 			/* the WWAN core queues without bound: only while open */
-			if (READ_ONCE(port->wwan_open))
+			spin_lock(&port->wwan_lock);
+			if (port->wwan && port->wwan_open) {
 				wwan_port_rx(port->wwan, skb);
-			else
-				kfree_skb(skb);
+				skb = NULL;
+			}
+			spin_unlock(&port->wwan_lock);
+			kfree_skb(skb);
 			return;
 		}
 		if (skb_queue_len(&port->rx_list) >= CCCI_PORT_RX_MAX)
@@ -1678,15 +1685,66 @@ static const struct wwan_port_ops ccci_wwan_ops = {
 	.tx_blocking = ccci_wwan_tx_blocking,
 };
 
+/*
+ * Create the WWAN AT port when the modem becomes ready and remove it when it
+ * stops or crashes: a modem manager probes a port as soon as it appears and
+ * gives up on one that does not answer.
+ */
+static void ccci_wwan_work(struct work_struct *work)
+{
+	struct mtk_ccci *ccci = container_of(work, struct mtk_ccci, wwan_work);
+	bool ready = READ_ONCE(ccci->state) == MD_STATE_READY;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ccci->ports); i++) {
+		struct ccci_port *port = &ccci->ports[i];
+		struct wwan_port_caps caps = {
+			/* a CCCI packet can't be split: write in pieces */
+			.frag_len = CCMNI_MTU - sizeof(struct ccci_header),
+		};
+		struct wwan_port *wport;
+
+		if (!port->wwan_at || ready == !!port->wwan)
+			continue;
+
+		if (!ready) {
+			spin_lock_bh(&port->wwan_lock);
+			wport = port->wwan;
+			port->wwan = NULL;
+			spin_unlock_bh(&port->wwan_lock);
+			wwan_remove_port(wport);
+			continue;
+		}
+
+		wport = wwan_create_port(ccci->dev, WWAN_PORT_AT, &ccci_wwan_ops,
+					 &caps, port);
+		if (IS_ERR(wport)) {
+			dev_err(ccci->dev, "failed to create the WWAN port: %pe\n",
+				wport);
+			continue;
+		}
+		spin_lock_bh(&port->wwan_lock);
+		port->wwan = wport;
+		spin_unlock_bh(&port->wwan_lock);
+	}
+}
+
 static void ccci_ports_remove(struct mtk_ccci *ccci, int n)
 {
 	while (--n >= 0) {
 		struct ccci_port *port = &ccci->ports[n];
+		struct wwan_port *wport;
 
-		if (port->wwan)
-			wwan_remove_port(port->wwan);
-		else
+		if (!port->wwan_at) {
 			misc_deregister(&port->misc);
+			continue;
+		}
+		spin_lock_bh(&port->wwan_lock);
+		wport = port->wwan;
+		port->wwan = NULL;
+		spin_unlock_bh(&port->wwan_lock);
+		if (wport)
+			wwan_remove_port(wport);
 	}
 }
 
@@ -2740,6 +2798,7 @@ static int mtk_ccci_probe(struct platform_device *pdev)
 	mutex_init(&ccci->lock);
 	init_waitqueue_head(&ccci->state_wq);
 	INIT_WORK(&ccci->rx_work, ccci_rx_work);
+	INIT_WORK(&ccci->wwan_work, ccci_wwan_work);
 	platform_set_drvdata(pdev, ccci);
 
 	ccci->ap_ccif = devm_platform_ioremap_resource_byname(pdev, "ap-ccif");
@@ -2824,24 +2883,14 @@ static int mtk_ccci_probe(struct platform_device *pdev)
 		skb_queue_head_init(&port->rx_list);
 		init_waitqueue_head(&port->rx_wq);
 		mutex_init(&port->tx_mutex);
-		if (port->wwan_at) {
-			struct wwan_port_caps caps = {
-				/* a CCCI packet can't be split: write in pieces */
-				.frag_len = CCMNI_MTU - sizeof(struct ccci_header),
-			};
-
-			port->wwan = wwan_create_port(dev, WWAN_PORT_AT,
-						      &ccci_wwan_ops, &caps, port);
-			ret = PTR_ERR_OR_ZERO(port->wwan);
-			if (ret)
-				port->wwan = NULL;
-		} else {
-			port->misc.minor = MISC_DYNAMIC_MINOR;
-			port->misc.name = port->name;
-			port->misc.fops = &ccci_port_fops;
-			port->misc.parent = dev;
-			ret = misc_register(&port->misc);
-		}
+		spin_lock_init(&port->wwan_lock);
+		if (port->wwan_at)
+			continue;	/* created once the modem is ready */
+		port->misc.minor = MISC_DYNAMIC_MINOR;
+		port->misc.name = port->name;
+		port->misc.fops = &ccci_port_fops;
+		port->misc.parent = dev;
+		ret = misc_register(&port->misc);
 		if (ret) {
 			ccci_ports_remove(ccci, i);
 			return ret;
@@ -2862,6 +2911,7 @@ static void mtk_ccci_remove(struct platform_device *pdev)
 	struct mtk_ccci *ccci = platform_get_drvdata(pdev);
 	int i;
 
+	disable_work_sync(&ccci->wwan_work);
 	ccci_ports_remove(ccci, ARRAY_SIZE(ccci->ports));
 	for (i = 0; i < ARRAY_SIZE(ccci->ports); i++)
 		skb_queue_purge(&ccci->ports[i].rx_list);
