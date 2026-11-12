@@ -279,6 +279,7 @@ struct mtk_mfg {
 	unsigned int shared_mem_size;
 	u16 ghpm_en_reg;
 	u32 ipi_magic;
+	struct mtk_mfg_ipi_msg ipi_tx;
 	unsigned short num_gpu_opps;
 	unsigned short num_stack_opps;
 	struct dev_pm_opp_data *gpu_opps;
@@ -508,19 +509,34 @@ static int mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
 	unsigned long wait;
 	int ret;
 
-	msg->magic = mfg->ipi_magic;
+	/*
+	 * The mailbox core queues a pointer to the message, which may be sent
+	 * after this function has timed out and returned. Send a copy that
+	 * outlives the call. All callers are serialised by the genpd lock.
+	 */
+	mfg->ipi_tx = *msg;
+	mfg->ipi_tx.magic = mfg->ipi_magic;
 
-	ret = mbox_send_message(mfg->gf_mbox->ch, msg);
+	/* Forget a late reply to an earlier message that timed out */
+	reinit_completion(&mfg->gf_mbox->rx_done);
+
+	ret = mbox_send_message(mfg->gf_mbox->ch, &mfg->ipi_tx);
 	if (ret < 0) {
 		dev_err(dev, "Cannot send GPUFreq IPI command: %pe\n", ERR_PTR(ret));
 		return ret;
 	}
 
-	wait = wait_for_completion_timeout(&mfg->gf_mbox->rx_done, msecs_to_jiffies(500));
-	if (!wait)
-		return -ETIMEDOUT;
-
-	msg = mfg->gf_mbox->rx_data;
+	/* The EB echoes the command; skip a late reply to an earlier one */
+	do {
+		wait = wait_for_completion_timeout(&mfg->gf_mbox->rx_done,
+						   msecs_to_jiffies(500));
+		if (!wait) {
+			dev_err(dev, "GPUFreq IPI command %u timed out\n",
+				le32_to_cpu(mfg->ipi_tx.cmd));
+			return -ETIMEDOUT;
+		}
+		msg = mfg->gf_mbox->rx_data;
+	} while (msg->cmd != mfg->ipi_tx.cmd);
 
 	if (msg->u.return_value < 0) {
 		dev_err(dev, "IPI return: %d\n", msg->u.return_value);
