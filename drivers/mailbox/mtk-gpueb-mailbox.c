@@ -116,8 +116,16 @@ static irqreturn_t mtk_gpueb_mbox_thread(int irq, void *data)
 
 		mtk_gpueb_mbox_read_rx(buf, ch);
 		writel(BIT(ch->num), ch->ebm->mbox_ctl + GPUEB_MBOX_CTL_IRQ_CLR);
-		mbox_chan_received_data(&ch->ebm->mbox.chans[ch->num], buf);
+		/*
+		 * The reply has been copied out, so the channel is free again.
+		 * Unblock it before handing the reply to the client: a client
+		 * waiting for this reply may send its next message right away,
+		 * from another CPU, and send_data() must not see the channel
+		 * as busy then. The mailbox core does not retry a message that
+		 * send_data() refused, so it would sit in the queue forever.
+		 */
 		atomic_set(&ch->rx_status, 0);
+		mbox_chan_received_data(&ch->ebm->mbox.chans[ch->num], buf);
 		return IRQ_HANDLED;
 	}
 
