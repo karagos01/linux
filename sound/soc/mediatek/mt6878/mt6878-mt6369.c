@@ -200,6 +200,8 @@ static struct snd_soc_dai_link mt6878_mt6369_dai_links[] = {
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
 		.capture_only = 1,
+		/* offer only the rates the ADDA uplink can run at */
+		.dpcm_merged_rate = 1,
 		SND_SOC_DAILINK_REG(capture_0),
 	},
 	{

@@ -445,6 +445,14 @@ static const struct snd_soc_dai_ops mtk_dai_adda_ops = {
 				 SNDRV_PCM_RATE_96000 |\
 				 SNDRV_PCM_RATE_192000)
 
+/* the uplink SRC has no 11.025/22.05/44.1 kHz family, nor 12/24 kHz */
+#define MTK_ADDA_CAPTURE_RATES (SNDRV_PCM_RATE_8000 |\
+				SNDRV_PCM_RATE_16000 |\
+				SNDRV_PCM_RATE_32000 |\
+				SNDRV_PCM_RATE_48000 |\
+				SNDRV_PCM_RATE_96000 |\
+				SNDRV_PCM_RATE_192000)
+
 #define MTK_ADDA_FORMATS (SNDRV_PCM_FMTBIT_S16_LE |\
 			  SNDRV_PCM_FMTBIT_S24_LE |\
 			  SNDRV_PCM_FMTBIT_S32_LE)
@@ -464,7 +472,7 @@ static struct snd_soc_dai_driver mtk_dai_adda_driver[] = {
 			.stream_name = "ADDA Capture",
 			.channels_min = 1,
 			.channels_max = 2,
-			.rates = MTK_ADDA_PLAYBACK_RATES,
+			.rates = MTK_ADDA_CAPTURE_RATES,
 			.formats = MTK_ADDA_FORMATS,
 		},
 		.ops = &mtk_dai_adda_ops,
