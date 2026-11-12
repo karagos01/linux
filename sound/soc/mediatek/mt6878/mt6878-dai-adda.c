@@ -349,12 +349,19 @@ static int mtk_dai_adda_hw_params(struct snd_pcm_substream *substream,
 		 * Enable the ADDA downlink SRC as well: the stock capture path
 		 * turns the DL SRC on to clock the shared ADDA block even when
 		 * only capturing (no DL data flows without the DL interconnect).
+		 * Leave it alone when a playback stream has already set it up,
+		 * possibly at another rate (e.g. a call at 16 kHz).
 		 */
-		regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON0,
-			     AFE_ADDA_DL_SRC2_48K |
-			     BIT(AFE_ADDA_DL_SRC2_CON0_SRC_ON_SFT) | BIT(0));
-		regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON1, 0xf74ff74f);
-		regmap_write(afe->regmap, AFE_ADDA_DL_SDM_DITHER_CON, 0x190000);
+		if (!snd_soc_dai_stream_active(dai, SNDRV_PCM_STREAM_PLAYBACK)) {
+			regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON0,
+				     AFE_ADDA_DL_SRC2_48K |
+				     BIT(AFE_ADDA_DL_SRC2_CON0_SRC_ON_SFT) |
+				     BIT(0));
+			regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON1,
+				     0xf74ff74f);
+			regmap_write(afe->regmap, AFE_ADDA_DL_SDM_DITHER_CON,
+				     0x190000);
+		}
 
 		/* uplink SRC gain (0 dB) - without this the SRC output is muted */
 		regmap_write(afe->regmap, AFE_ADDA_UL_SRC_CON1,
@@ -373,9 +380,14 @@ static int mtk_dai_adda_hw_params(struct snd_pcm_substream *substream,
 		regmap_write(afe->regmap, AFE_ADDA_UL_SRC_VOICE_MODE_CFG5,
 			     0x0000c048);
 
-		/* program the UL SRC rate; the SRC-on bit is driven by DAPM */
-		regmap_write(afe->regmap, AFE_ADDA_UL_SRC_CON0,
-			     mtk_adda_ul_rate_transform(afe, rate));
+		/*
+		 * program the UL SRC rate; the SRC-on bit is driven by DAPM and
+		 * may already be set (e.g. the uplink feeds the modem PCM, whose
+		 * playback path powers it before the capture stream is set up)
+		 */
+		regmap_update_bits(afe->regmap, AFE_ADDA_UL_SRC_CON0,
+				   (u32)~BIT(AFE_ADDA_UL_SRC_CON0_SRC_ON_SFT),
+				   mtk_adda_ul_rate_transform(afe, rate));
 
 		/* ADDA analog interface: UL clock, UL config and UL AFE-on */
 		regmap_update_bits(afe->regmap, AFE_ADDA_UL_DL_CON0, 0x3f, 0x1d);
