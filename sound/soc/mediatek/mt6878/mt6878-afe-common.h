@@ -106,6 +106,7 @@ struct mtk_base_afe;
 struct mtk_afe_adda_priv {
 	int dl_rate;
 	int ul_rate;
+	unsigned int dl_gain;	/* "ADDA DL Playback Volume" value */
 };
 
 /* per-I2S/ETDM-DAI private data (dai_priv[]) */

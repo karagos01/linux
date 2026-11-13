@@ -17,10 +17,12 @@
  */
 
 #include <linux/delay.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 
 #include <sound/pcm.h>
 #include <sound/soc.h>
+#include <sound/tlv.h>
 
 #include "mt6878-afe-common.h"
 #include "mt6878-afe-gpio.h"
@@ -325,6 +327,81 @@ static const struct snd_soc_dapm_route mtk_dai_adda_routes[] = {
 	{"ADDA Capture", NULL, "ADDA UL MTKAIF"},
 };
 
+/*
+ * Downlink digital gain (AFE_ADDA_DL_SRC2_CON1): two copies of a linear
+ * 16-bit gain, 0xf74f being 0 dB. Exposed in 1 dB steps from -40 dB to
+ * 0 dB, with 0 as mute. It sits in front of both the earpiece and the
+ * loudspeaker, also during a call, and extends the analog output gains,
+ * which do not go below -10 dB.
+ */
+#define MTK_ADDA_DL_GAIN_MAX	41
+
+static const u16 mtk_adda_dl_gain_table[MTK_ADDA_DL_GAIN_MAX + 1] = {
+	0x0000, 0x0279, 0x02c6, 0x031d, 0x037e, 0x03eb, 0x0466, 0x04ef,
+	0x0589, 0x0636, 0x06f8, 0x07d2, 0x08c6, 0x09d8, 0x0b0c, 0x0c65,
+	0x0de8, 0x0f9b, 0x1182, 0x13a5, 0x160b, 0x18bb, 0x1bc0, 0x1f22,
+	0x22ef, 0x2732, 0x2bfa, 0x3158, 0x375e, 0x3e1f, 0x45b3, 0x4e35,
+	0x57c0, 0x6275, 0x6e78, 0x7bf3, 0x8b12, 0x9c0b, 0xaf15, 0xc472,
+	0xdc6a, 0xf74f,
+};
+
+static const DECLARE_TLV_DB_SCALE(mtk_adda_dl_gain_tlv, -4100, 100, 1);
+
+static u32 mtk_adda_dl_gain_word(unsigned int val)
+{
+	u32 g = mtk_adda_dl_gain_table[min(val, MTK_ADDA_DL_GAIN_MAX)];
+
+	return g << 16 | g;
+}
+
+static struct mtk_afe_adda_priv *mtk_adda_priv(struct snd_kcontrol *kcontrol)
+{
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
+	struct mt6878_afe_private *afe_priv = afe->platform_priv;
+
+	return afe_priv->dai_priv[MT6878_DAI_ADDA];
+}
+
+static int mtk_adda_dl_gain_get(struct snd_kcontrol *kcontrol,
+				struct snd_ctl_elem_value *ucontrol)
+{
+	ucontrol->value.integer.value[0] = mtk_adda_priv(kcontrol)->dl_gain;
+
+	return 0;
+}
+
+static int mtk_adda_dl_gain_put(struct snd_kcontrol *kcontrol,
+				struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
+	struct mtk_afe_adda_priv *adda_priv = mtk_adda_priv(kcontrol);
+	unsigned int val = ucontrol->value.integer.value[0];
+
+	if (val > MTK_ADDA_DL_GAIN_MAX)
+		return -EINVAL;
+	if (val == adda_priv->dl_gain)
+		return 0;
+
+	adda_priv->dl_gain = val;
+
+	/* hw_params programs it otherwise; only touch a powered AFE */
+	if (pm_runtime_get_if_in_use(afe->dev) > 0) {
+		regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON1,
+			     mtk_adda_dl_gain_word(val));
+		pm_runtime_put(afe->dev);
+	}
+
+	return 1;
+}
+
+static const struct snd_kcontrol_new mtk_adda_controls[] = {
+	SOC_SINGLE_EXT_TLV("ADDA DL Playback Volume", SND_SOC_NOPM, 0,
+			   MTK_ADDA_DL_GAIN_MAX, 0, mtk_adda_dl_gain_get,
+			   mtk_adda_dl_gain_put, mtk_adda_dl_gain_tlv),
+};
+
 /* dai ops */
 static int mtk_dai_adda_hw_params(struct snd_pcm_substream *substream,
 				  struct snd_pcm_hw_params *params,
@@ -358,7 +435,7 @@ static int mtk_dai_adda_hw_params(struct snd_pcm_substream *substream,
 				     BIT(AFE_ADDA_DL_SRC2_CON0_SRC_ON_SFT) |
 				     BIT(0));
 			regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON1,
-				     0xf74ff74f);
+				     mtk_adda_dl_gain_word(adda_priv->dl_gain));
 			regmap_write(afe->regmap, AFE_ADDA_DL_SDM_DITHER_CON,
 				     0x190000);
 		}
@@ -416,7 +493,8 @@ static int mtk_dai_adda_hw_params(struct snd_pcm_substream *substream,
 	regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON0,
 		     mtk_adda_dl_rate_transform(afe, rate) |
 		     BIT(AFE_ADDA_DL_SRC2_CON0_SRC_ON_SFT) | BIT(0));
-	regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON1, 0xf74ff74f);
+	regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON1,
+		     mtk_adda_dl_gain_word(adda_priv->dl_gain));
 
 	/*
 	 * ADDA analog interface clock and downlink AFE-on. The AFE-on bit must
@@ -488,6 +566,7 @@ static int mt6878_dai_adda_set_priv(struct mtk_base_afe *afe)
 	if (!priv)
 		return -ENOMEM;
 
+	priv->dl_gain = MTK_ADDA_DL_GAIN_MAX;	/* 0 dB */
 	afe_priv->dai_priv[MT6878_DAI_ADDA] = priv;
 
 	return 0;
@@ -506,6 +585,8 @@ int mt6878_dai_adda_register(struct mtk_base_afe *afe)
 	dai->dai_drivers = mtk_dai_adda_driver;
 	dai->num_dai_drivers = ARRAY_SIZE(mtk_dai_adda_driver);
 
+	dai->controls = mtk_adda_controls;
+	dai->num_controls = ARRAY_SIZE(mtk_adda_controls);
 	dai->dapm_widgets = mtk_dai_adda_widgets;
 	dai->num_dapm_widgets = ARRAY_SIZE(mtk_dai_adda_widgets);
 	dai->dapm_routes = mtk_dai_adda_routes;
