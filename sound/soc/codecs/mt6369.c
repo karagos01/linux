@@ -752,7 +752,9 @@ static const struct snd_soc_dapm_route mt6369_dapm_routes[] = {
  * Both 5-bit fields encode ATTENUATION: the register value increases as the
  * output gets quieter (0x00 = +8 dB, 0x09 = -1 dB, 0x12 = -10 dB, 0x1f = mute
  * on power-down). This polarity is the opposite of mt6359's lineout control;
- * both were confirmed on this device by an acoustic loopback.
+ * both were confirmed on this device by an acoustic loopback. Values between
+ * 0x13 and 0x1e attenuate no further than 0x12, so the controls stop at
+ * -10 dB; quieter levels come from the AFE downlink digital gain.
  *
  * The controls are exposed loudness-ascending (0 = quietest, 0x12 = loudest)
  * so "turn it up" means a higher number; the register written is the inverse.
@@ -762,6 +764,7 @@ static const struct snd_soc_dapm_route mt6369_dapm_routes[] = {
  */
 #define MT6369_OUT_GAIN_MAX		0x12	/* register 0..0x12 (-10..+8 dB) */
 static const DECLARE_TLV_DB_SCALE(out_gain_tlv, -1000, 100, 0);
+
 
 static unsigned int *mt6369_out_gain(struct mt6369_priv *priv,
 				     struct snd_kcontrol *kcontrol, bool *on)
@@ -783,10 +786,12 @@ static int mt6369_get_out_gain(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	struct soc_mixer_control *mc =
+		(struct soc_mixer_control *)kcontrol->private_value;
 	bool on;
 
 	ucontrol->value.integer.value[0] =
-		MT6369_OUT_GAIN_MAX - *mt6369_out_gain(priv, kcontrol, &on);
+		mc->max - *mt6369_out_gain(priv, kcontrol, &on);
 
 	return 0;
 }
@@ -806,7 +811,7 @@ static int mt6369_put_out_gain(struct snd_kcontrol *kcontrol,
 		return -EINVAL;
 
 	gain = mt6369_out_gain(priv, kcontrol, &on);
-	reg = MT6369_OUT_GAIN_MAX - val;	/* control is loudness, reg is attenuation */
+	reg = mc->max - val;	/* control is loudness, reg is attenuation */
 	if (reg == *gain)
 		return 0;
 
