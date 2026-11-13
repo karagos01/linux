@@ -33,7 +33,9 @@ struct mt6369_priv {
 	bool ul_active;		/* capture (uplink) stream powered */
 	bool dl_active;		/* playback (downlink) stream powered */
 	bool spk_on;		/* lineout analog output stage powered */
+	bool rcv_on;		/* receiver analog output stage powered */
 	unsigned int lineout_gain;	/* LOL analog gain (ANA_CON129), 0..0x12 */
+	unsigned int rcv_gain;	/* receiver analog gain (ANA_CON133), 0..0x12 */
 };
 
 /*
@@ -105,16 +107,18 @@ static int mt_rcv_event(struct snd_soc_dapm_widget *w,
 		 * applies on power-down; using it here would keep the output
 		 * muted while playing.
 		 */
-		regmap_write(regmap, MT6369_AUDDEC_ANA_CON133, MT6369_RCV_GAIN);
+		regmap_write(regmap, MT6369_AUDDEC_ANA_CON133, priv->rcv_gain);
 		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON24, 0x11, 0x1);
 		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON0, 0x9, 0x9);
 		regmap_write(regmap, MT6369_AUDDEC_ANA_CON16, 0x1);
 		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON10, 0xc, 0x8);
 
 		mt6369_zcd_enable(priv, true, 2);
+		priv->rcv_on = true;
 		break;
 
 	case SND_SOC_DAPM_PRE_PMD:
+		priv->rcv_on = false;
 		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON10, 0xc, 0x0);
 		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON0, 0x9, 0x0);
 		regmap_update_bits(regmap, MT6369_AUDDEC_ANA_CON24, 0x1, 0x0);
@@ -231,7 +235,7 @@ static void mt6369_spk_enable(struct mt6369_priv *priv)
 
 	/*
 	 * Lineout gain (ZCD_CON1/2 == ANA_CON129/130). LOL (CON129) feeds the
-	 * external aw87565 amps and is exposed as the "Lineout Playback Volume" control;
+	 * loudspeaker aw87565 and is the "Lineout Playback Volume" control;
 	 * apply the user-selected value (default 0x09 == -1 dB, matching the
 	 * stock speaker playback state). LOR (CON130) is unused on this board.
 	 */
@@ -740,65 +744,90 @@ static const struct snd_soc_dapm_route mt6369_dapm_routes[] = {
 };
 
 /*
- * "Lineout Playback Volume": the LOL analog output gain (ANA_CON129, ZCD_CON1 lineout
- * gain field) that drives both external aw87565 amps. The 5-bit field encodes
- * ATTENUATION: register value increases as the output gets quieter (0x00 =
- * +8 dB, 0x09 = -1 dB stock default, 0x12 = -10 dB, 0x1f = mute on power-down).
- * Note this polarity is the opposite of mt6359's lineout control -- confirmed
- * on this device by an acoustic loopback (lower register = louder capture).
+ * Analog output gains, one per external amplifier input:
+ *  - "Lineout Playback Volume": the LOL gain (ANA_CON129, ZCD_CON1), which
+ *    feeds the loudspeaker aw87565.
+ *  - "Receiver Playback Volume": the receiver gain (ANA_CON133), which feeds
+ *    the earpiece aw87565. The LOL gain has no effect on the earpiece.
+ * Both 5-bit fields encode ATTENUATION: the register value increases as the
+ * output gets quieter (0x00 = +8 dB, 0x09 = -1 dB, 0x12 = -10 dB, 0x1f = mute
+ * on power-down). This polarity is the opposite of mt6359's lineout control;
+ * both were confirmed on this device by an acoustic loopback.
  *
- * The control is exposed loudness-ascending (0 = quietest, 0x12 = loudest) so
- * "turn it up" means a higher number; the register written is the inverse.
- * Cached in priv because the power sequence (re)writes CON129 on every enable
- * and mutes it on disable, so the control cannot read the live register.
+ * The controls are exposed loudness-ascending (0 = quietest, 0x12 = loudest)
+ * so "turn it up" means a higher number; the register written is the inverse.
+ * They are cached in priv because the power sequences (re)write the registers
+ * on every enable and mute them on disable, so a control cannot read the live
+ * register.
  */
-#define MT6369_LINEOUT_GAIN_MAX		0x12	/* register 0..0x12 (-10..+8 dB) */
-static const DECLARE_TLV_DB_SCALE(lineout_tlv, -1000, 100, 0);
+#define MT6369_OUT_GAIN_MAX		0x12	/* register 0..0x12 (-10..+8 dB) */
+static const DECLARE_TLV_DB_SCALE(out_gain_tlv, -1000, 100, 0);
 
-static int mt6369_get_lineout_gain(struct snd_kcontrol *kcontrol,
-				   struct snd_ctl_elem_value *ucontrol)
+static unsigned int *mt6369_out_gain(struct mt6369_priv *priv,
+				     struct snd_kcontrol *kcontrol, bool *on)
+{
+	struct soc_mixer_control *mc =
+		(struct soc_mixer_control *)kcontrol->private_value;
+
+	if (mc->reg == MT6369_AUDDEC_ANA_CON133) {
+		*on = priv->rcv_on;
+		return &priv->rcv_gain;
+	}
+
+	*on = priv->spk_on;
+	return &priv->lineout_gain;
+}
+
+static int mt6369_get_out_gain(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	bool on;
 
 	ucontrol->value.integer.value[0] =
-		MT6369_LINEOUT_GAIN_MAX - priv->lineout_gain;
+		MT6369_OUT_GAIN_MAX - *mt6369_out_gain(priv, kcontrol, &on);
 
 	return 0;
 }
 
-static int mt6369_put_lineout_gain(struct snd_kcontrol *kcontrol,
-				   struct snd_ctl_elem_value *ucontrol)
+static int mt6369_put_out_gain(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
 	unsigned int val = ucontrol->value.integer.value[0];
-	unsigned int reg;
+	unsigned int *gain, reg;
+	bool on;
 
 	if (val > mc->max)
 		return -EINVAL;
 
-	reg = MT6369_LINEOUT_GAIN_MAX - val;	/* control is loudness, reg is attenuation */
-	if (reg == priv->lineout_gain)
+	gain = mt6369_out_gain(priv, kcontrol, &on);
+	reg = MT6369_OUT_GAIN_MAX - val;	/* control is loudness, reg is attenuation */
+	if (reg == *gain)
 		return 0;
 
-	priv->lineout_gain = reg;
+	*gain = reg;
 	/*
-	 * Apply immediately only while the lineout stage is powered; otherwise
-	 * mt6369_spk_enable() picks the value up on the next power-up.
+	 * Apply immediately only while the output stage is powered; otherwise
+	 * its power-up sequence picks the value up.
 	 */
-	if (priv->spk_on)
-		regmap_write(priv->regmap, MT6369_AUDDEC_ANA_CON129, reg);
+	if (on)
+		regmap_write(priv->regmap, mc->reg, reg);
 
 	return 1;
 }
 
 static const struct snd_kcontrol_new mt6369_snd_controls[] = {
 	SOC_SINGLE_EXT_TLV("Lineout Playback Volume", MT6369_AUDDEC_ANA_CON129, 0,
-			   MT6369_LINEOUT_GAIN_MAX, 0, mt6369_get_lineout_gain,
-			   mt6369_put_lineout_gain, lineout_tlv),
+			   MT6369_OUT_GAIN_MAX, 0, mt6369_get_out_gain,
+			   mt6369_put_out_gain, out_gain_tlv),
+	SOC_SINGLE_EXT_TLV("Receiver Playback Volume", MT6369_AUDDEC_ANA_CON133, 0,
+			   MT6369_OUT_GAIN_MAX, 0, mt6369_get_out_gain,
+			   mt6369_put_out_gain, out_gain_tlv),
 };
 
 static const struct snd_soc_component_driver mt6369_soc_component_driver = {
@@ -941,6 +970,7 @@ static int mt6369_platform_driver_probe(struct platform_device *pdev)
 
 	priv->dev = dev;
 	priv->lineout_gain = 0x09;	/* -1 dB, stock speaker default */
+	priv->rcv_gain = MT6369_RCV_GAIN;	/* -10 dB, stock receiver default */
 	priv->regmap = dev_get_regmap(dev->parent, NULL);
 	if (!priv->regmap)
 		return dev_err_probe(dev, -ENODEV, "failed to get parent regmap\n");
