@@ -231,7 +231,7 @@ static void mt6369_spk_enable(struct mt6369_priv *priv)
 
 	/*
 	 * Lineout gain (ZCD_CON1/2 == ANA_CON129/130). LOL (CON129) feeds the
-	 * external aw87565 amps and is exposed as the "Lineout Volume" control;
+	 * external aw87565 amps and is exposed as the "Lineout Playback Volume" control;
 	 * apply the user-selected value (default 0x09 == -1 dB, matching the
 	 * stock speaker playback state). LOR (CON130) is unused on this board.
 	 */
@@ -740,7 +740,7 @@ static const struct snd_soc_dapm_route mt6369_dapm_routes[] = {
 };
 
 /*
- * "Lineout Volume": the LOL analog output gain (ANA_CON129, ZCD_CON1 lineout
+ * "Lineout Playback Volume": the LOL analog output gain (ANA_CON129, ZCD_CON1 lineout
  * gain field) that drives both external aw87565 amps. The 5-bit field encodes
  * ATTENUATION: register value increases as the output gets quieter (0x00 =
  * +8 dB, 0x09 = -1 dB stock default, 0x12 = -10 dB, 0x1f = mute on power-down).
@@ -796,7 +796,7 @@ static int mt6369_put_lineout_gain(struct snd_kcontrol *kcontrol,
 }
 
 static const struct snd_kcontrol_new mt6369_snd_controls[] = {
-	SOC_SINGLE_EXT_TLV("Lineout Volume", MT6369_AUDDEC_ANA_CON129, 0,
+	SOC_SINGLE_EXT_TLV("Lineout Playback Volume", MT6369_AUDDEC_ANA_CON129, 0,
 			   MT6369_LINEOUT_GAIN_MAX, 0, mt6369_get_lineout_gain,
 			   mt6369_put_lineout_gain, lineout_tlv),
 };
