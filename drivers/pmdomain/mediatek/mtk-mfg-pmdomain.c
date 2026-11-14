@@ -21,12 +21,14 @@
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_opp.h>
+#include <linux/pm_qos.h>
 #include <linux/regulator/consumer.h>
 #include <linux/units.h>
 
 #define GPR_LP_STATE		0x0028
 #define   EB_ON_SUSPEND		0x0
 #define   EB_ON_RESUME		0x1
+#define   EB_ON_IDLE		0x4
 #define GPR_IPI_MAGIC		0x34
 
 #define RPC_PWR_CON		0x0504
@@ -141,6 +143,11 @@
 #define GPUEB_MEM_MAGIC			0xBABADADAUL
 
 #define GPUEB_TIMEOUT_US		10000UL
+/*
+ * CPU wakeup latency to hold while talking to the GPUEB: low enough to keep
+ * the CPUs out of the MCUSYS-off idle states (exit latency > 1 ms).
+ */
+#define GPUEB_CPU_LATENCY_US		500
 #define GPUEB_POLL_US			50
 
 #define MAX_OPP_NUM			70
@@ -287,6 +294,7 @@ struct mtk_mfg {
 	struct mtk_mfg_mbox *gf_mbox;
 	struct mtk_mfg_mbox *slp_mbox;
 	const struct mtk_mfg_variant *variant;
+	struct pm_qos_request qos;
 };
 
 /**
@@ -407,8 +415,13 @@ static int mtk_mfg_eb_on(struct mtk_mfg *mfg)
 	int ret;
 
 	if (mfg->variant->eb_always_on) {
+		/*
+		 * Once the SoC has been through an MCUSYS-off idle state, the
+		 * EB reports EB_ON_IDLE instead of EB_ON_RESUME and stays
+		 * there, but it keeps serving IPIs as usual.
+		 */
 		ret = readl_poll_timeout(mfg->gpr + GPR_LP_STATE, val,
-					 (val == EB_ON_RESUME),
+					 (val == EB_ON_RESUME || val == EB_ON_IDLE),
 					 GPUEB_POLL_US, GPUEB_TIMEOUT_US);
 		if (ret)
 			dev_err(dev, "EB is not running, status = 0x%X\n", val);
@@ -803,8 +816,8 @@ static void mtk_mfg_detach_dev(struct generic_pm_domain *pd, struct device *dev)
 	dev_pm_opp_remove_all_dynamic(dev);
 }
 
-static int mtk_mfg_set_performance(struct generic_pm_domain *pd,
-				   unsigned int state)
+static int __mtk_mfg_set_performance(struct generic_pm_domain *pd,
+				     unsigned int state)
 {
 	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
 
@@ -821,7 +834,7 @@ static int mtk_mfg_set_performance(struct generic_pm_domain *pd,
 	return mtk_mfg_set_oppidx(mfg, state);
 }
 
-static int mtk_mfg_power_on(struct generic_pm_domain *pd)
+static int __mtk_mfg_power_on(struct generic_pm_domain *pd)
 {
 	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
 	int ret;
@@ -871,7 +884,7 @@ err_disable_regulators:
 	return ret;
 }
 
-static int mtk_mfg_power_off(struct generic_pm_domain *pd)
+static int __mtk_mfg_power_off(struct generic_pm_domain *pd)
 {
 	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
 	struct device *dev = &mfg->pdev->dev;
@@ -898,6 +911,56 @@ static int mtk_mfg_power_off(struct generic_pm_domain *pd)
 	}
 
 	return 0;
+}
+
+/*
+ * If all CPUs enter an MCUSYS-off idle state while the AP waits for a GPUEB
+ * reply, the reply never arrives and the EB ends up rejecting later power
+ * requests. Keep the CPUs out of those states for the duration of every
+ * exchange with the EB. The downstream driver gets the same effect by
+ * busy-polling for the reply with interrupts disabled.
+ */
+static void mtk_mfg_block_mcusys_off(struct mtk_mfg *mfg, bool block)
+{
+	cpu_latency_qos_update_request(&mfg->qos, block ? GPUEB_CPU_LATENCY_US :
+				       PM_QOS_DEFAULT_VALUE);
+}
+
+static int mtk_mfg_set_performance(struct generic_pm_domain *pd,
+				   unsigned int state)
+{
+	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
+	int ret;
+
+	mtk_mfg_block_mcusys_off(mfg, true);
+	ret = __mtk_mfg_set_performance(pd, state);
+	mtk_mfg_block_mcusys_off(mfg, false);
+
+	return ret;
+}
+
+static int mtk_mfg_power_on(struct generic_pm_domain *pd)
+{
+	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
+	int ret;
+
+	mtk_mfg_block_mcusys_off(mfg, true);
+	ret = __mtk_mfg_power_on(pd);
+	mtk_mfg_block_mcusys_off(mfg, false);
+
+	return ret;
+}
+
+static int mtk_mfg_power_off(struct generic_pm_domain *pd)
+{
+	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
+	int ret;
+
+	mtk_mfg_block_mcusys_off(mfg, true);
+	ret = __mtk_mfg_power_off(pd);
+	mtk_mfg_block_mcusys_off(mfg, false);
+
+	return ret;
 }
 
 static int mtk_mfg_init_mbox(struct mtk_mfg *mfg)
@@ -1104,6 +1167,8 @@ static int mtk_mfg_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, ret, "Variant init failed\n");
 	}
 
+	cpu_latency_qos_add_request(&mfg->qos, PM_QOS_DEFAULT_VALUE);
+
 	mfg->pd.name = dev_name(dev);
 	mfg->pd.attach_dev = mtk_mfg_attach_dev;
 	mfg->pd.detach_dev = mtk_mfg_detach_dev;
@@ -1113,8 +1178,10 @@ static int mtk_mfg_probe(struct platform_device *pdev)
 	mfg->pd.flags = GENPD_FLAG_OPP_TABLE_FW;
 
 	ret = pm_genpd_init(&mfg->pd, NULL, false);
-	if (ret)
-		return dev_err_probe(dev, ret, "Failed to initialise power domain\n");
+	if (ret) {
+		dev_err_probe(dev, ret, "Failed to initialise power domain\n");
+		goto err_remove_qos;
+	}
 
 	ret = mtk_mfg_init_mbox(mfg);
 	if (ret) {
@@ -1165,6 +1232,8 @@ err_free_mbox:
 	mfg->gf_mbox->ch = NULL;
 err_remove_genpd:
 	pm_genpd_remove(&mfg->pd);
+err_remove_qos:
+	cpu_latency_qos_remove_request(&mfg->qos);
 
 	return ret;
 }
@@ -1191,6 +1260,8 @@ static void mtk_mfg_remove(struct platform_device *pdev)
 
 	mbox_free_channel(mfg->slp_mbox->ch);
 	mfg->slp_mbox->ch = NULL;
+
+	cpu_latency_qos_remove_request(&mfg->qos);
 }
 
 static struct platform_driver mtk_mfg_driver = {
