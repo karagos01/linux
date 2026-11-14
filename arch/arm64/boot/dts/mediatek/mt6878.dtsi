@@ -425,11 +425,7 @@
 				mediatek,topckgen = <&topckgen>;
 				mediatek,apmixedsys = <&apmixedsys>;
 				mediatek,infracfg = <&infracfg_ao>;
-				/*
-				 * TODO: add power-domains = <&spm
-				 * MT6878_POWER_DOMAIN_AUDIO> once the audio
-				 * power domain is described by the SPM driver.
-				 */
+				power-domains = <&spm MT6878_POWER_DOMAIN_AUDIO>;
 				clocks = <&audiosys CLK_AFE_AUDIO_HOPPING>,
 					 <&audiosys CLK_AFE_AUDIO_F26M>,
 					 <&audiosys CLK_AFE_DL0_DAC>,
@@ -1183,6 +1179,14 @@
 
 				power-domain@MT6878_POWER_DOMAIN_CONN {
 					reg = <MT6878_POWER_DOMAIN_CONN>;
+					mediatek,infracfg = <&infracfg_ao>;
+					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT6878_POWER_DOMAIN_AUDIO {
+					reg = <MT6878_POWER_DOMAIN_AUDIO>;
+					clocks = <&topckgen CLK_TOP_AUD_INTBUS_SEL>;
+					clock-names = "audio";
 					mediatek,infracfg = <&infracfg_ao>;
 					#power-domain-cells = <0>;
 				};
