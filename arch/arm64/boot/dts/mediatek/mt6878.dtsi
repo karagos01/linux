@@ -1215,6 +1215,21 @@
 			status = "disabled";
 		};
 
+		/*
+		 * Always-on system timer. The arch timer stops in the deeper
+		 * CPU idle states (local-timer-stop), so this is the tick
+		 * broadcast device; without it one CPU always holds a
+		 * software broadcast hrtimer and cluster/MCUSYS off never
+		 * happens.
+		 */
+		systimer: timer@1cc10000 {
+			compatible = "mediatek,mt6878-timer",
+				     "mediatek,mt6765-timer";
+			reg = <0x1cc10000 0x1000>;
+			interrupts = <GIC_SPI 249 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&clk13m>;
+		};
+
 		watchdog: watchdog@1c00a000 {
 			compatible = "mediatek,mt6878-wdt",
 				     "mediatek,mt6589-wdt";
