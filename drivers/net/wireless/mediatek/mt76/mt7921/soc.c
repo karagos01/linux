@@ -1640,12 +1640,6 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 	/* No RX header translation, see mt7921_soc_reg_fixup() */
 	__clear_bit(IEEE80211_HW_SUPPORTS_RX_DECAP_OFFLOAD, mt76_hw(dev)->flags);
 
-	/* Runtime power management is not validated yet */
-	dev->pm.enable_user = false;
-	dev->pm.enable = false;
-	dev->pm.ds_enable_user = false;
-	dev->pm.ds_enable = false;
-
 	return 0;
 
 err_free_ccif_irq:
