@@ -19,10 +19,10 @@
 
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
-#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 
@@ -330,13 +330,51 @@ static const int memif_irq_usage[MT6878_MEMIF_NUM] = {
 	[MT6878_MEMIF_VUL9] = MT6878_IRQ_9,
 };
 
+static bool mt6878_afe_volatile_reg(struct device *dev, unsigned int reg)
+{
+	/* sub-block clock gates, also driven by the audiosys clock driver */
+	if (reg <= AUDIO_TOP_CON4)
+		return true;
+
+	/* interrupt status and the per-IRQ counter/clear registers */
+	if (reg == AFE_IRQ_MCU_STATUS)
+		return true;
+	if (reg >= AFE_IRQ_MCU_CNT(0) && reg <= AFE_IRQ_MCU_CNT(MT6878_IRQ_NUM - 1) &&
+	    !((reg - AFE_IRQ_MCU_CNT(0)) % 8))
+		return true;
+
+	/* memif hardware pointers */
+	if (reg >= AFE_DL_CUR_MSB(0) && reg <= AFE_DL_CUR(8) &&
+	    ((reg - AFE_DL_CUR_MSB(0)) % AFE_DL_BLOCK_STRIDE) <= 4)
+		return true;
+	if (reg == AFE_VUL_CUR_MSB(9) || reg == AFE_VUL_CUR(9))
+		return true;
+
+	/* monitors */
+	if (reg == ETDM_OUT4_MON)
+		return true;
+
+	return false;
+}
+
+/*
+ * The AFE sits in the AUDIO power domain, which is switched off whenever the
+ * AFE is runtime suspended, losing all register state. Keep a register cache
+ * so that controls can be changed while suspended and the state is restored
+ * on resume.
+ */
 static const struct regmap_config mt6878_afe_regmap_config = {
 	.reg_bits = 32,
 	.reg_stride = 4,
 	.val_bits = 32,
 	.max_register = 0x78fc,	/* AFE_MAX_REGISTER (RE from the stock regmap config) */
-	/* TODO: switch to REGCACHE_FLAT with a volatile_reg callback */
-	.cache_type = REGCACHE_NONE,
+	.volatile_reg = mt6878_afe_volatile_reg,
+	/*
+	 * No raw defaults: reading every register up to max_register at
+	 * init hits unbacked holes and hangs the bus. The cache holds only
+	 * the registers the driver touched, which is what a sync restores.
+	 */
+	.cache_type = REGCACHE_MAPLE,
 };
 
 static irqreturn_t mt6878_afe_irq_handler(int irq_id, void *dev)
@@ -389,6 +427,11 @@ static irqreturn_t mt6878_afe_irq_handler(int irq_id, void *dev)
 	return IRQ_HANDLED;
 }
 
+static void mt6878_afe_iounmap(void *base)
+{
+	iounmap(base);
+}
+
 static int mt6878_afe_runtime_suspend(struct device *dev)
 {
 	struct mtk_base_afe *afe = dev_get_drvdata(dev);
@@ -399,6 +442,10 @@ static int mt6878_afe_runtime_suspend(struct device *dev)
 	/* stop the audio engine */
 	regmap_update_bits(afe->regmap, AUDIO_ENGEN_CON0,
 			   AUDIO_ENGEN_CON0_ENGEN_ON, 0);
+
+	/* the power domain may go down: keep further accesses in the cache */
+	regcache_cache_only(afe->regmap, true);
+	regcache_mark_dirty(afe->regmap);
 
 disable:
 	mt6878_afe_disable_clock(afe);
@@ -417,12 +464,23 @@ static int mt6878_afe_runtime_resume(struct device *dev)
 	if (!afe->regmap)
 		return 0;
 
-	/* ungate the AFE sub-block clocks and start the audio engine */
+	regcache_cache_only(afe->regmap, false);
+
+	/*
+	 * Ungate the AFE sub-block clocks first (volatile, written straight to
+	 * the hardware), so that the cache sync below reaches every block.
+	 */
 	regmap_write(afe->regmap, AUDIO_TOP_CON0, 0);
 	regmap_write(afe->regmap, AUDIO_TOP_CON1, 0);
 	regmap_write(afe->regmap, AUDIO_TOP_CON2, 0);
 	regmap_write(afe->regmap, AUDIO_TOP_CON3, 0);
 	regmap_write(afe->regmap, AUDIO_TOP_CON4, 0);
+
+	ret = regcache_sync(afe->regmap);
+	if (ret)
+		dev_err(dev, "failed to restore registers: %d\n", ret);
+
+	/* start the audio engine */
 	regmap_update_bits(afe->regmap, AUDIO_ENGEN_CON0,
 			   AUDIO_ENGEN_CON0_ENGEN_ON, AUDIO_ENGEN_CON0_ENGEN_ON);
 
@@ -435,9 +493,43 @@ static int mt6878_afe_component_probe(struct snd_soc_component *component)
 	return 0;
 }
 
+/*
+ * The regmap cache holds only the registers read or written so far. While
+ * the AFE is runtime suspended (cache-only, power domain off) a read of a
+ * register that is not cached yet fails with -EBUSY; power up once to fetch
+ * it, after which it is cached.
+ */
+static unsigned int mt6878_afe_component_read(struct snd_soc_component *component,
+					      unsigned int reg)
+{
+	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(component);
+	unsigned int val = 0;
+	int ret;
+
+	ret = regmap_read(afe->regmap, reg, &val);
+	if (ret == -EBUSY && !pm_runtime_resume_and_get(afe->dev)) {
+		ret = regmap_read(afe->regmap, reg, &val);
+		pm_runtime_put(afe->dev);
+	}
+	if (ret)
+		dev_err(afe->dev, "read of %#x failed: %d\n", reg, ret);
+
+	return val;
+}
+
+static int mt6878_afe_component_write(struct snd_soc_component *component,
+				      unsigned int reg, unsigned int val)
+{
+	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(component);
+
+	return regmap_write(afe->regmap, reg, val);
+}
+
 static const struct snd_soc_component_driver mt6878_afe_component = {
 	.name = AFE_PCM_NAME,
 	.probe = mt6878_afe_component_probe,
+	.read = mt6878_afe_component_read,
+	.write = mt6878_afe_component_write,
 	.pcm_new = mtk_afe_pcm_new,
 	.pointer = mtk_afe_pcm_pointer,
 };
@@ -565,18 +657,18 @@ static int mt6878_afe_pcm_dev_probe(struct platform_device *pdev)
 	afe->runtime_suspend = mt6878_afe_runtime_suspend;
 
 	/*
-	 * The AFE register block is exposed as the parent "audiosys" syscon
-	 * (it also provides the AFE gate clocks); borrow its regmap and attach
-	 * this device to it so the AFE register definitions apply.
+	 * The AFE registers live in the parent "audiosys" node, which also
+	 * provides the AFE gate clocks through its syscon. Map the block again
+	 * for a cached regmap of our own; the gate clock registers are marked
+	 * volatile so the two users do not get in each other's way.
 	 */
-	afe->regmap = syscon_node_to_regmap(dev->parent->of_node);
-	if (IS_ERR(afe->regmap))
-		return dev_err_probe(dev, PTR_ERR(afe->regmap),
-				     "could not get regmap from parent\n");
+	afe->base_addr = of_iomap(dev->parent->of_node, 0);
+	if (!afe->base_addr)
+		return dev_err_probe(dev, -ENOMEM, "could not map the AFE registers\n");
 
-	ret = regmap_attach_dev(dev, afe->regmap, &mt6878_afe_regmap_config);
+	ret = devm_add_action_or_reset(dev, mt6878_afe_iounmap, afe->base_addr);
 	if (ret)
-		return dev_err_probe(dev, ret, "regmap_attach_dev failed\n");
+		return ret;
 
 	ret = mt6878_afe_gpio_init(afe);
 	if (ret)
@@ -585,6 +677,25 @@ static int mt6878_afe_pcm_dev_probe(struct platform_device *pdev)
 	ret = devm_pm_runtime_enable(dev);
 	if (ret)
 		return ret;
+
+	/* power the block up so the cache can read the register defaults */
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to resume device\n");
+
+	afe->regmap = devm_regmap_init_mmio(dev, afe->base_addr,
+					    &mt6878_afe_regmap_config);
+	if (IS_ERR(afe->regmap)) {
+		pm_runtime_put_sync(dev);
+		return dev_err_probe(dev, PTR_ERR(afe->regmap),
+				     "could not create the regmap\n");
+	}
+
+	/* the engine was started by the resume above without a regmap */
+	regmap_update_bits(afe->regmap, AUDIO_ENGEN_CON0,
+			   AUDIO_ENGEN_CON0_ENGEN_ON, AUDIO_ENGEN_CON0_ENGEN_ON);
+
+	pm_runtime_put(dev);
 
 	ret = devm_snd_soc_register_component(dev, &mt6878_afe_component,
 					      afe->dai_drivers,
