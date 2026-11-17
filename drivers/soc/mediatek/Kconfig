@@ -108,6 +108,16 @@ config MTK_DISP_REFRESH
 	  the panel brightness as a backlight device. Only useful
 	  until a real display driver is available for the SoC.
 
+config MTK_LPM
+	bool "MediaTek low power manager"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on ARM_PSCI_CPUIDLE || COMPILE_TEST
+	help
+	  Say yes here to let the SPM put the system resources (DRAM, EMI,
+	  RF rail) to sleep while all CPUs are idle. The driver describes
+	  the wake-up interrupts to TF-A, enables the SPM resource
+	  constraints and owns the software resource requests.
+
 config MTK_MMSYS
 	tristate "MediaTek MMSYS Support"
 	default ARCH_MEDIATEK
