@@ -25,6 +25,7 @@
 #include <linux/of_address.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
+#include <linux/soc/mediatek/mtk-lpm.h>
 
 #include <sound/pcm.h>
 #include <sound/soc.h>
@@ -449,6 +450,7 @@ static int mt6878_afe_runtime_suspend(struct device *dev)
 
 disable:
 	mt6878_afe_disable_clock(afe);
+	mtk_lpm_bus_release();
 	return 0;
 }
 
@@ -457,9 +459,18 @@ static int mt6878_afe_runtime_resume(struct device *dev)
 	struct mtk_base_afe *afe = dev_get_drvdata(dev);
 	int ret;
 
+	/*
+	 * The memory interfaces fetch and store their samples on their own
+	 * while the CPUs sleep between two period interrupts: the memory path
+	 * has to stay up for as long as the audio engine may run.
+	 */
+	mtk_lpm_bus_hold();
+
 	ret = mt6878_afe_enable_clock(afe);
-	if (ret)
+	if (ret) {
+		mtk_lpm_bus_release();
 		return ret;
+	}
 
 	if (!afe->regmap)
 		return 0;
