@@ -539,8 +539,9 @@
 /*
  * U3D_SSUSB_HWRSCS_CON / U3D_SSUSB_HWRSCS_STS
  * Hardware resource-control request: writing the request bits asks the SPM to
- * ungate the host clocks/power; the same bits read back in the status register
- * once the request is granted. SSUSB_HWRSCS_CON_MSK is cleared and the request
+ * keep the system resources the controller needs (and to ungate the host
+ * clocks/power); the same bits read back in the status register once the
+ * request is granted. SSUSB_HWRSCS_CON_MSK is cleared and the request
  * bits set for "on"; cleared for "off". The upper bits are preserved.
  */
 #define SSUSB_HWRSCS_REQ		0x5f

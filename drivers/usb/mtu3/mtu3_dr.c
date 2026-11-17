@@ -24,11 +24,13 @@ static inline struct ssusb_mtk *otg_sx_to_ssusb(struct otg_switch_mtk *otg_sx)
 }
 
 /*
- * On MT6878 and later the host clocks and power are gated until requested
- * through the IPPC hardware resource-control registers; without the request
- * the IPPC port-control writes (e.g. the U2 host-select) do not take effect
- * and the root hub never sees a device. Request the resources before routing
- * the port to the host, and release them when going back to device mode.
+ * On MT6878 and later the controller tells the SPM which system resources
+ * (memory path, bus, clock source, RF rail) it needs through the IPPC hardware
+ * resource-control registers. Without the request the IPPC port-control
+ * writes (e.g. the U2 host-select) do not take effect and the root hub never
+ * sees a device; and, in either role, the SPM is free to put the memory path
+ * to sleep while all CPUs are idle, under a controller that masters the bus
+ * on its own. The request is therefore kept for as long as a role is active.
  * No-op on SoCs that do not advertise "mediatek,hwrscs-vers".
  */
 static void ssusb_hwrscs_req(struct ssusb_mtk *ssusb, bool on)
@@ -205,9 +207,6 @@ static void switch_port_to_device(struct ssusb_mtk *ssusb)
 	}
 
 	ssusb_check_clocks(ssusb, check_clk);
-
-	/* release the host clocks/power now the port is back in device mode */
-	ssusb_hwrscs_req(ssusb, false);
 }
 
 /*
@@ -228,6 +227,8 @@ void ssusb_otg_restore(struct ssusb_mtk *ssusb)
 	ssusb_host_enable(ssusb);
 	ssusb_set_force_mode(ssusb, MTU3_DR_FORCE_DEVICE);
 	switch_port_to_device(ssusb);
+	ssusb_hwrscs_req(ssusb,
+			 ssusb->otg_switch.desired_role != USB_ROLE_NONE);
 	ssusb_gadget_restore(ssusb);
 }
 
@@ -256,7 +257,7 @@ int ssusb_set_vbus(struct otg_switch_mtk *otg_sx, int is_on)
 	return 0;
 }
 
-static void ssusb_mode_sw_work(struct work_struct *work)
+static void __ssusb_mode_sw_work(struct work_struct *work)
 {
 	struct otg_switch_mtk *otg_sx =
 		container_of(work, struct otg_switch_mtk, dr_work);
@@ -332,6 +333,31 @@ static void ssusb_mode_sw_work(struct work_struct *work)
 	default:
 		dev_err(ssusb->dev, "invalid role\n");
 	}
+	pm_runtime_put(ssusb->dev);
+}
+
+/*
+ * The controller masters the bus on its own for as long as it has a partner,
+ * so the system resources (memory path, bus, clock source) must not go to
+ * sleep behind its back while all CPUs are idle: keep them requested from
+ * before the controller is started until after it has been stopped. The
+ * request does not survive the IP reset of a role change, hence it is
+ * asserted again once the switch is done.
+ */
+static void ssusb_mode_sw_work(struct work_struct *work)
+{
+	struct otg_switch_mtk *otg_sx =
+		container_of(work, struct otg_switch_mtk, dr_work);
+	struct ssusb_mtk *ssusb = otg_sx_to_ssusb(otg_sx);
+	bool active = otg_sx->desired_role != USB_ROLE_NONE;
+
+	pm_runtime_get_sync(ssusb->dev);
+	if (active)
+		ssusb_hwrscs_req(ssusb, true);
+
+	__ssusb_mode_sw_work(work);
+
+	ssusb_hwrscs_req(ssusb, active);
 	pm_runtime_put(ssusb->dev);
 }
 
@@ -463,6 +489,9 @@ static int ssusb_role_sw_register(struct otg_switch_mtk *otg_sx)
 	if (IS_ERR(otg_sx->role_sw))
 		return PTR_ERR(otg_sx->role_sw);
 
+	/* the default role is active until the port manager says otherwise */
+	otg_sx->desired_role = otg_sx->default_role;
+	ssusb_hwrscs_req(ssusb, true);
 	ssusb_set_mode(otg_sx, otg_sx->default_role);
 
 	return 0;
