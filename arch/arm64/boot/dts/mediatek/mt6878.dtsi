@@ -226,6 +226,16 @@
 		};
 	};
 
+	/*
+	 * SPM resource constraints (TF-A): wake-up interrupt description and
+	 * the software resource requests.
+	 */
+	lpm {
+		compatible = "mediatek,mt6878-lpm";
+		interrupt-parent = <&gic>;
+		interrupts = <GIC_SPI 499 IRQ_TYPE_LEVEL_HIGH 0>;
+	};
+
 	clk13m: clock-13m {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
