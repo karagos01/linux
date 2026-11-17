@@ -63,6 +63,10 @@
 #define SCP_MBOX_SET_IRQ		0x100
 #define SCP_MBOX_CLR_IRQ		0x10c
 
+/* cfg_ap */
+#define SCP2SPM_IPC_CLR		0x18
+#define SCP2SPM_IPC_CLR_ALL	0xff
+
 #define SCP_NR_MBOX			5
 
 /*
@@ -325,6 +329,7 @@ struct scp_mbox {
 struct mt6878_scp {
 	struct device *dev;
 	void __iomem *sram;
+	void __iomem *cfg_ap;		/* optional: SCP to SPM IPC request */
 	struct scp_mbox mbox[SCP_NR_MBOX];
 	atomic_t ready;
 	atomic_t sensor_ready;
@@ -1375,6 +1380,17 @@ static void scp_sensorhub_work(struct work_struct *work)
 	dev_info(scp->dev, "sensor hub ready; sensors enabled on demand\n");
 }
 
+/*
+ * Every message from the SCP also raises a resource request towards the SPM,
+ * which keeps the whole system out of its low power states until the AP
+ * side clears it.
+ */
+static void scp_spm_ipc_clear(struct mt6878_scp *scp)
+{
+	if (scp->cfg_ap)
+		writel(SCP2SPM_IPC_CLR_ALL, scp->cfg_ap + SCP2SPM_IPC_CLR);
+}
+
 static irqreturn_t scp_mbox_isr(int irq, void *data)
 {
 	struct scp_mbox *mb = data;
@@ -1444,6 +1460,7 @@ static irqreturn_t scp_mbox_isr(int irq, void *data)
 	 * asserted and storms.
 	 */
 	writel(status, mb->base + SCP_MBOX_CLR_IRQ);
+	scp_spm_ipc_clear(scp);
 	return IRQ_HANDLED;
 }
 
@@ -1542,6 +1559,12 @@ static int mt6878_scp_probe(struct platform_device *pdev)
 	/* optional: proximity reading from which an object counts as near */
 	device_property_read_u32(dev, "proximity-near-level",
 				 &scp->prox_near_level);
+
+	if (platform_get_resource_byname(pdev, IORESOURCE_MEM, "cfg_ap")) {
+		scp->cfg_ap = devm_platform_ioremap_resource_byname(pdev, "cfg_ap");
+		if (IS_ERR(scp->cfg_ap))
+			return PTR_ERR(scp->cfg_ap);
+	}
 
 	scp->sram = devm_platform_ioremap_resource_byname(pdev, "sram");
 	if (IS_ERR(scp->sram))
