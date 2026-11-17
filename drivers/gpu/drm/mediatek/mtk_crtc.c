@@ -9,6 +9,7 @@
 #include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/soc/mediatek/mtk-cmdq.h>
+#include <linux/soc/mediatek/mtk-lpm.h>
 #include <linux/soc/mediatek/mtk-mmsys.h>
 #include <linux/soc/mediatek/mtk-mutex.h>
 
@@ -380,9 +381,17 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 		drm_connector_list_iter_end(&conn_iter);
 	}
 
+	/*
+	 * The pipeline fetches the framebuffer on its own for every frame,
+	 * also while all CPUs are idle: keep the memory path up for as long
+	 * as it runs.
+	 */
+	mtk_lpm_bus_hold();
+
 	ret = pm_runtime_resume_and_get(crtc->dev->dev);
 	if (ret < 0) {
 		drm_err(dev, "Failed to enable power domain: %d\n", ret);
+		mtk_lpm_bus_release();
 		return ret;
 	}
 
@@ -451,6 +460,7 @@ err_mutex_unprepare:
 	mtk_mutex_unprepare(mtk_crtc->mutex);
 err_pm_runtime_put:
 	pm_runtime_put(crtc->dev->dev);
+	mtk_lpm_bus_release();
 	return ret;
 }
 
@@ -488,6 +498,7 @@ static void mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
 	mtk_mutex_unprepare(mtk_crtc->mutex);
 
 	pm_runtime_put(drm->dev);
+	mtk_lpm_bus_release();
 
 	if (crtc->state->event && !crtc->state->active) {
 		spin_lock_irqsave(&crtc->dev->event_lock, flags);
