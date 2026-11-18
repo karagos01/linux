@@ -160,6 +160,18 @@
 #define MTK_SIP_HYPMMU_TYPE2_ENABLED	0xbb00ffa4
 #define MTK_SIP_HYPMMU_TYPE2_INV	0xbb00ffa7
 
+/*
+ * The secure bank (bank 4) of such an M4U belongs to TF-A, which uses it for
+ * its own masters (e.g. its secure GCE thread). TF-A sets it up on request and
+ * has to back it up and restore it around a power cycle of the M4U.
+ * Command: type[31:24] id[23:16] bank[15:8] cmd[7:0].
+ */
+#define MTK_SIP_IOMMU_SECURE_CONTROL	MTK_SIP_SMC_CMD(0x514)
+#define MTK_IOMMU_SEC_BK		4
+#define MTK_IOMMU_SEC_BK_INIT		0
+#define MTK_IOMMU_SEC_BK_BACKUP		2
+#define MTK_IOMMU_SEC_BK_RESTORE	3
+
 #define MTK_IOMMU_HAS_FLAG_MASK(pdata, _x, mask)	\
 				((((pdata)->flags) & (mask)) == (_x))
 
@@ -230,6 +242,9 @@ struct mtk_iommu_plat_data {
 	struct {
 		unsigned int	iova_region_nr;
 		const struct mtk_iommu_iova_region	*iova_region;
+	/* Identity-mapped window: the DRAM the masters can address physically */
+	phys_addr_t		direct_base;
+	size_t			direct_size;
 		/*
 		 * Indicate the correspondance between larbs, ports and regions.
 		 *
@@ -272,6 +287,7 @@ struct mtk_iommu_data {
 	struct iommu_group		*m4u_group[MTK_IOMMU_GROUP_MAX];
 	bool                            enable_4GB;
 	bool				hyp_mmu; /* HYP_MMU_TYPE2 active */
+	bool				sec_bk_saved;
 
 	struct iommu_device		iommu;
 	const struct mtk_iommu_plat_data *plat_data;
@@ -742,6 +758,28 @@ static void mtk_iommu_domain_free(struct iommu_domain *domain)
 	kfree(to_mtk_domain(domain));
 }
 
+static void mtk_iommu_hyp_sync(struct mtk_iommu_data *data,
+			       unsigned long start, unsigned long end);
+
+/*
+ * The firmware switches the masters behind such an M4U between bypass and
+ * translation on its own (the display ports get translated after every power
+ * cycle of the display), so memory they are handed by physical address has to
+ * read the same either way: map it 1:1.
+ */
+static void mtk_iommu_map_direct(struct mtk_iommu_domain *dom, struct mtk_iommu_data *data)
+{
+	const struct mtk_iommu_plat_data *plat = data->plat_data;
+	size_t mapped = 0;
+	int ret;
+
+	ret = dom->iop->map_pages(dom->iop, plat->direct_base, plat->direct_base, SZ_16M,
+				  plat->direct_size / SZ_16M, IOMMU_READ | IOMMU_WRITE,
+				  GFP_KERNEL, &mapped);
+	if (ret || mapped != plat->direct_size)
+		dev_warn(data->dev, "identity mapping failed: %d (0x%zx)\n", ret, mapped);
+}
+
 static int mtk_iommu_attach_device(struct iommu_domain *domain,
 				   struct device *dev, struct iommu_domain *old)
 {
@@ -751,6 +789,7 @@ static int mtk_iommu_attach_device(struct iommu_domain *domain,
 	struct device *m4udev = data->dev;
 	struct mtk_iommu_bank_data *bank;
 	unsigned int bankid;
+	bool direct_sync = false;
 	int ret, region_id;
 
 	region_id = mtk_iommu_get_iova_region_id(dev, data->plat_data);
@@ -771,6 +810,11 @@ static int mtk_iommu_attach_device(struct iommu_domain *domain,
 			return ret;
 		}
 		dom->bank = &data->bank[bankid];
+
+		if (data->plat_data->direct_size) {
+			mtk_iommu_map_direct(dom, data);
+			direct_sync = true;
+		}
 	}
 	mutex_unlock(&dom->mutex);
 
@@ -793,6 +837,11 @@ static int mtk_iommu_attach_device(struct iommu_domain *domain,
 
 		pm_runtime_put(m4udev);
 	}
+	/* The hypervisor can only mirror the table once it knows where it is */
+	if (direct_sync)
+		mtk_iommu_hyp_sync(data, data->plat_data->direct_base,
+				   data->plat_data->direct_base +
+				   data->plat_data->direct_size - 1);
 	mutex_unlock(&data->mutex);
 
 	if (region_id > 0) {
@@ -1084,6 +1133,17 @@ static void mtk_iommu_get_resv_regions(struct device *dev,
 
 	if ((int)regionid < 0)
 		return;
+
+	/* Keep the identity-mapped window out of the IOVA allocator */
+	if (data->plat_data->direct_size) {
+		region = iommu_alloc_resv_region(data->plat_data->direct_base,
+						 data->plat_data->direct_size,
+						 prot, IOMMU_RESV_RESERVED, GFP_KERNEL);
+		if (!region)
+			return;
+		list_add_tail(&region->list, head);
+	}
+
 	curdom = data->plat_data->iova_region + regionid;
 	for (i = 0; i < data->plat_data->iova_region_nr; i++) {
 		resv = data->plat_data->iova_region + i;
@@ -1123,6 +1183,17 @@ static const struct iommu_ops mtk_iommu_ops = {
 		.free		= mtk_iommu_domain_free,
 	}
 };
+
+static void mtk_iommu_sec_bank_call(const struct mtk_iommu_data *data, u32 cmd)
+{
+	struct arm_smccc_res res;
+
+	/* MM IOMMU type 0, DISP IOMMU id 0 */
+	arm_smccc_smc(MTK_SIP_IOMMU_SECURE_CONTROL, (MTK_IOMMU_SEC_BK << 8) | cmd,
+		      0, 0, 0, 0, 0, 0, &res);
+	if (res.a0)
+		dev_warn(data->dev, "secure bank command %u failed: %lu\n", cmd, res.a0);
+}
 
 static int mtk_iommu_hw_init(const struct mtk_iommu_data *data, unsigned int bankid)
 {
@@ -1200,6 +1271,9 @@ static int mtk_iommu_hw_init(const struct mtk_iommu_data *data, unsigned int ban
 		regval = lower_32_bits(data->protect_base) |
 			 upper_32_bits(data->protect_base);
 	writel_relaxed(regval, bankx->base + REG_MMU_IVRP_PADDR);
+
+	if (MTK_IOMMU_HAS_FLAG(data->plat_data, HYP_MMU_TYPE2))
+		mtk_iommu_sec_bank_call(data, MTK_IOMMU_SEC_BK_INIT);
 
 	if (devm_request_irq(bankx->parent_dev, bankx->irq, mtk_iommu_isr, 0,
 			     dev_name(bankx->parent_dev), (void *)bankx)) {
@@ -1556,6 +1630,10 @@ static int __maybe_unused mtk_iommu_runtime_suspend(struct device *dev)
 		reg->int_main_control[i] = readl_relaxed(base + REG_MMU_INT_MAIN_CONTROL);
 		reg->ivrp_paddr[i] = readl_relaxed(base + REG_MMU_IVRP_PADDR);
 	} while (++i < data->plat_data->banks_num);
+	if (MTK_IOMMU_HAS_FLAG(data->plat_data, HYP_MMU_TYPE2)) {
+		mtk_iommu_sec_bank_call(data, MTK_IOMMU_SEC_BK_BACKUP);
+		data->sec_bk_saved = true;
+	}
 	clk_disable_unprepare(data->bclk);
 	return 0;
 }
@@ -1597,6 +1675,9 @@ static int __maybe_unused mtk_iommu_runtime_resume(struct device *dev)
 		writel_relaxed(reg->ivrp_paddr[i], base + REG_MMU_IVRP_PADDR);
 		writel(m4u_dom->cfg.arm_v7s_cfg.ttbr, base + REG_MMU_PT_BASE_ADDR);
 	} while (++i < data->plat_data->banks_num);
+
+	if (data->sec_bk_saved)
+		mtk_iommu_sec_bank_call(data, MTK_IOMMU_SEC_BK_RESTORE);
 
 	/*
 	 * Users may allocate dma buffer before they call pm_runtime_get,
@@ -1745,6 +1826,8 @@ static const struct mtk_iommu_plat_data mt6878_data = {
 	.banks_enable   = {true},
 	.iova_region    = single_domain,
 	.iova_region_nr = ARRAY_SIZE(single_domain),
+	.direct_base    = 0x40000000,
+	.direct_size    = 0xc0000000,
 	.larbid_remap   = {{0}, {1}, {21}, {0}, {0}, {0}, {0}, {0}},
 };
 
