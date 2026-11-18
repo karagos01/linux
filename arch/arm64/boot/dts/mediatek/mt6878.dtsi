@@ -374,8 +374,23 @@
 		};
 
 		hwv: syscon@10320000 {
-			compatible = "mediatek,mt6878-hwv", "syscon";
+			compatible = "mediatek,mt6878-hwv", "syscon", "simple-mfd";
 			reg = <0x10320000 0x2000>;
+
+			/* Power domains switched through the hardware voter */
+			hwv_spm: power-controller {
+				compatible = "mediatek,mt6878-hwv-power-controller";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#power-domain-cells = <1>;
+
+				power-domain@MT6878_HWV_POWER_DOMAIN_MM_INFRA {
+					reg = <MT6878_HWV_POWER_DOMAIN_MM_INFRA>;
+					clocks = <&topckgen CLK_TOP_MMINFRA>;
+					clock-names = "mm_infra";
+					#power-domain-cells = <0>;
+				};
+			};
 		};
 
 		uart0: serial@11001000 {
@@ -890,7 +905,7 @@
 			reg = <0x1e980000 0x4000>;
 			interrupts = <GIC_SPI 290 IRQ_TYPE_LEVEL_HIGH 0>;
 			#mbox-cells = <2>;
-			clocks = <&clk26m>;
+			clocks = <&mminfra_config CLK_MMINFRA_GCE_D>;
 			clock-names = "gce";
 			/*
 			 * Route the GCE's command-buffer DMA through the display
@@ -900,6 +915,7 @@
 			 * mainline's larb field is 5-bit so a fake id < 32 is used.
 			 */
 			iommus = <&disp_iommu 0x2a0>;
+			power-domains = <&hwv_spm MT6878_HWV_POWER_DOMAIN_MM_INFRA>;
 		};
 
 		gpu: gpu@13000000 {
@@ -950,6 +966,15 @@
 			reg = <0x14000000 0x1000>;
 			#clock-cells = <1>;
 			mboxes = <&gce 0 1>;
+			mediatek,gce-client-reg = <&gce 1 0x0 0x1000>;
+			/* disp_token_disp_va_start0, disp_token_disp_va_end0 */
+			mediatek,gce-events = <0x2b4 0x2b5>;
+			/*
+			 * The GCE sits in a power domain that needs an mmsys
+			 * clock, and the mmsys itself only uses the mailbox once
+			 * the display runs: break the probe cycle here.
+			 */
+			post-init-providers = <&gce>;
 		};
 
 		mutex0: disp-mutex@14001000 {
@@ -968,6 +993,12 @@
 			clocks = <&mmsys CLK_MM_DISP_OVL0_2L>;
 			mediatek,gce-client-reg = <&gce 1 0x2000 0x1000>;
 			mediatek,larb = <&smi_larb0>;
+			/*
+			 * The CRTC takes its runtime PM reference on the first
+			 * component, so the OVL owns the display power domain
+			 * for the whole pipeline.
+			 */
+			power-domains = <&spm MT6878_POWER_DOMAIN_DISP>;
 		};
 
 		rsz0: rsz@14008000 {
@@ -1078,20 +1109,29 @@
 			#phy-cells = <0>;
 		};
 
+		mminfra_config: clock-controller@1e800000 {
+			compatible = "mediatek,mt6878-mminfra-config";
+			reg = <0x1e800000 0x1000>;
+			#clock-cells = <1>;
+			mediatek,hardware-voter = <&hwv>;
+		};
+
 		/*
-		 * Display SMI (local arbiters + common). No power-domains are
-		 * referenced: the disp/mm_infra domains are left powered by LK
-		 * (mm_infra is a hardware-voter domain with no upstream genpd
-		 * support) and kept on via clk_ignore_unused. The larbs/common
-		 * are clocked by the single CLK_MM_SMI_COMMON mmsys gate. OVL
-		 * fetches the framebuffer physically (no IOMMU) through larb0.
+		 * Display SMI (local arbiters + common). The larbs are clocked
+		 * by the CLK_MM_SMI_COMMON mmsys gate, which sits in the DISP
+		 * domain, so the common is placed there as well even though it
+		 * is part of MM_INFRA (the parent of DISP). The firmware decides
+		 * whether the OVL fetches the framebuffer physically or through
+		 * the display M4U, which maps the DRAM 1:1 for that reason.
 		 */
+
 		smi_common_disp: smi@1e801000 {
 			compatible = "mediatek,mt6878-smi-common";
 			reg = <0x1e801000 0x1000>;
 			clocks = <&mmsys CLK_MM_SMI_COMMON>,
 				 <&mmsys CLK_MM_SMI_COMMON>;
 			clock-names = "apb", "smi";
+			power-domains = <&spm MT6878_POWER_DOMAIN_DISP>;
 		};
 
 		smi_larb0: smi@1401e000 {
@@ -1102,6 +1142,7 @@
 			clocks = <&mmsys CLK_MM_SMI_COMMON>,
 				 <&mmsys CLK_MM_SMI_COMMON>;
 			clock-names = "apb", "smi";
+			power-domains = <&spm MT6878_POWER_DOMAIN_DISP>;
 		};
 
 		/*
@@ -1117,15 +1158,17 @@
 			reg = <0x1e802000 0x1000>;
 			interrupts = <GIC_SPI 278 IRQ_TYPE_LEVEL_HIGH 0>;
 			/*
-			 * clk26m stand-in (independent of mmsys, so no probe
-			 * cycle); the M4U core itself is clocked by LK. The M4U
-			 * is owned by the hypervisor, which traps the page-table
-			 * base write and mirrors our table (see mtk_iommu.c).
+			 * clk26m stand-in: the M4U sits behind the MMINFRA SMI
+			 * gate, which has to be left alone (see the MMINFRA
+			 * clock driver). The M4U is owned by the hypervisor,
+			 * which traps the page-table base write and mirrors our
+			 * table (see mtk_iommu.c).
 			 */
 			clocks = <&clk26m>;
 			clock-names = "bclk";
 			mediatek,larbs = <&smi_larb_gce>;
 			#iommu-cells = <1>;
+			power-domains = <&hwv_spm MT6878_HWV_POWER_DOMAIN_MM_INFRA>;
 		};
 
 		/*
@@ -1152,6 +1195,7 @@
 			reg = <0x1e809000 0x1000>;
 			clocks = <&clk26m>, <&clk26m>;
 			clock-names = "apb", "smi";
+			power-domains = <&hwv_spm MT6878_HWV_POWER_DOMAIN_MM_INFRA>;
 		};
 
 		smi_larb_gce: smi@1e808000 {
@@ -1164,6 +1208,7 @@
 			 * only for probe; keep it off the slow mm clock chain. */
 			clocks = <&clk26m>, <&clk26m>;
 			clock-names = "apb", "smi";
+			power-domains = <&hwv_spm MT6878_HWV_POWER_DOMAIN_MM_INFRA>;
 		};
 
 		smi_larb1: smi@1401f000 {
@@ -1204,6 +1249,36 @@
 				power-domain@MT6878_POWER_DOMAIN_SSUSB {
 					reg = <MT6878_POWER_DOMAIN_SSUSB>;
 					mediatek,infracfg = <&infracfg_ao>;
+					#power-domain-cells = <0>;
+				};
+
+				/*
+				 * DISP and MM_PROC sit below MM_INFRA, which only the
+				 * hardware voter can switch.
+				 */
+				power-domain@MT6878_POWER_DOMAIN_DISP {
+					reg = <MT6878_POWER_DOMAIN_DISP>;
+					/*
+					 * The SMI common gate has to run while the bus
+					 * protection handshakes. The other two are what
+					 * the register interface of the display blocks
+					 * needs and no driver asks for.
+					 */
+					clocks = <&topckgen CLK_TOP_DISP0>,
+						 <&mmsys CLK_MM_SMI_COMMON>,
+						 <&mmsys CLK_MM_DISP_APB_BUS>,
+						 <&mmsys CLK_MM_26M>;
+					clock-names = "disp", "disp-0", "disp-1",
+						      "disp-2";
+					mediatek,infracfg = <&infracfg_ao>;
+					power-domains = <&hwv_spm MT6878_HWV_POWER_DOMAIN_MM_INFRA>;
+					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT6878_POWER_DOMAIN_MM_PROC {
+					reg = <MT6878_POWER_DOMAIN_MM_PROC>;
+					mediatek,infracfg-nao = <&vlpcfg>;
+					power-domains = <&hwv_spm MT6878_HWV_POWER_DOMAIN_MM_INFRA>;
 					#power-domain-cells = <0>;
 				};
 			};
@@ -1249,6 +1324,11 @@
 				     "mediatek,mt6589-wdt";
 			reg = <0x1c00a000 0x100>;
 			#reset-cells = <1>;
+		};
+
+		vlpcfg: syscon@1c00c000 {
+			compatible = "mediatek,mt6878-vlpcfg", "syscon";
+			reg = <0x1c00c000 0x1000>;
 		};
 	};
 
