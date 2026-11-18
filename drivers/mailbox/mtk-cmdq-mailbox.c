@@ -2,6 +2,7 @@
 //
 // Copyright (c) 2018 MediaTek Inc.
 
+#include <linux/arm-smccc.h>
 #include <linux/bitops.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
@@ -18,6 +19,7 @@
 #include <linux/mailbox_controller.h>
 #include <linux/mailbox/mtk-cmdq-mailbox.h>
 #include <linux/of.h>
+#include <linux/soc/mediatek/mtk_sip_svc.h>
 
 #define CMDQ_MBOX_AUTOSUSPEND_DELAY_MS	100
 
@@ -99,8 +101,14 @@ struct gce_plat {
 	bool control_by_sw;
 	bool sw_ddr_en;
 	bool gce_vm;
+	/* TF-A owns part of the GCE configuration and a secure thread */
+	bool sec_ctl;
 	u32 gce_num;
 };
+
+#define MTK_SIP_CMDQ_CONTROL		MTK_SIP_SMC_CMD(0x518)
+#define CMDQ_SMC_ENABLE_DISP_VA		1
+#define CMDQ_SMC_MMUEN_SET		7
 
 static inline u32 cmdq_convert_gce_addr(dma_addr_t addr, const struct gce_plat *pdata)
 {
@@ -122,6 +130,40 @@ void cmdq_get_mbox_priv(struct mbox_chan *chan, struct cmdq_mbox_priv *priv)
 	priv->mminfra_offset = cmdq->pdata->mminfra_offset;
 }
 EXPORT_SYMBOL(cmdq_get_mbox_priv);
+
+/**
+ * cmdq_mbox_start_sec_disp_thread() - start the display thread of the firmware
+ * @chan: mailbox channel of the GCE
+ *
+ * On some SoCs the firmware keeps the access to parts of the display, lost
+ * with every power cycle of the display, to itself. It runs a secure GCE
+ * thread once which, when a packet sets the "va start" token, opens the
+ * display up again and answers with the "va end" token. The GCE has to be
+ * usable when that thread is started, the display powered.
+ *
+ * Return: 0 on success or when not needed, a negative error number otherwise.
+ */
+int cmdq_mbox_start_sec_disp_thread(struct mbox_chan *chan)
+{
+	struct cmdq *cmdq = container_of(chan->mbox, struct cmdq, mbox);
+	struct arm_smccc_res res;
+	int ret;
+
+	if (!cmdq->pdata->sec_ctl)
+		return 0;
+
+	ret = pm_runtime_resume_and_get(cmdq->mbox.dev);
+	if (ret < 0)
+		return ret;
+
+	arm_smccc_smc(MTK_SIP_CMDQ_CONTROL, CMDQ_SMC_ENABLE_DISP_VA, 0, 0, 0, 0, 0, 0, &res);
+
+	pm_runtime_mark_last_busy(cmdq->mbox.dev);
+	pm_runtime_put_autosuspend(cmdq->mbox.dev);
+
+	return res.a0 ? -EIO : 0;
+}
+EXPORT_SYMBOL(cmdq_mbox_start_sec_disp_thread);
 
 u8 cmdq_get_shift_pa(struct mbox_chan *chan)
 {
@@ -208,11 +250,14 @@ static void cmdq_thread_resume(struct cmdq_thread *thread)
 	writel(CMDQ_THR_RESUME, thread->base + CMDQ_THR_SUSPEND_TASK);
 }
 
-static void cmdq_init(struct cmdq *cmdq)
+static void cmdq_hw_init(struct cmdq *cmdq)
 {
+	struct arm_smccc_res res;
 	int i;
 
-	WARN_ON(clk_bulk_enable(cmdq->pdata->gce_num, cmdq->clocks));
+	/* Let the GCE fetch through the IOMMU again */
+	if (cmdq->pdata->sec_ctl)
+		arm_smccc_smc(MTK_SIP_CMDQ_CONTROL, CMDQ_SMC_MMUEN_SET, 0, 0, 0, 0, 0, 0, &res);
 
 	cmdq_vm_init(cmdq);
 	cmdq_gctl_value_toggle(cmdq, true);
@@ -220,6 +265,12 @@ static void cmdq_init(struct cmdq *cmdq)
 	writel(CMDQ_THR_ACTIVE_SLOT_CYCLES, cmdq->base + CMDQ_THR_SLOT_CYCLES);
 	for (i = 0; i <= CMDQ_MAX_EVENT; i++)
 		writel(i, cmdq->base + CMDQ_SYNC_TOKEN_UPDATE);
+}
+
+static void cmdq_init(struct cmdq *cmdq)
+{
+	WARN_ON(clk_bulk_enable(cmdq->pdata->gce_num, cmdq->clocks));
+	cmdq_hw_init(cmdq);
 	clk_bulk_disable(cmdq->pdata->gce_num, cmdq->clocks);
 }
 
@@ -387,6 +438,14 @@ static int cmdq_runtime_resume(struct device *dev)
 	ret = clk_bulk_enable(cmdq->pdata->gce_num, cmdq->clocks);
 	if (ret)
 		return ret;
+
+	/*
+	 * The GCE may sit in a power domain that was switched off while it was
+	 * runtime suspended (e.g. MM_INFRA on MT6878), which resets its global
+	 * configuration: redo it if it is gone.
+	 */
+	if (readl(cmdq->base + CMDQ_THR_SLOT_CYCLES) != CMDQ_THR_ACTIVE_SLOT_CYCLES)
+		cmdq_hw_init(cmdq);
 
 	cmdq_gctl_value_toggle(cmdq, true);
 	return 0;
@@ -875,6 +934,7 @@ static const struct gce_plat gce_plat_mt6878 = {
 	.mminfra_offset = SZ_1G,
 	.control_by_sw = true,
 	.sw_ddr_en = true,
+	.sec_ctl = true,
 	.gce_num = 1
 };
 

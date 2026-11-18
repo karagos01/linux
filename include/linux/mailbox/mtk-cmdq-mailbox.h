@@ -107,5 +107,6 @@ void cmdq_get_mbox_priv(struct mbox_chan *chan, struct cmdq_mbox_priv *priv);
  * Return: the shift bits of physical address
  */
 u8 cmdq_get_shift_pa(struct mbox_chan *chan);
+int cmdq_mbox_start_sec_disp_thread(struct mbox_chan *chan);
 
 #endif /* __MTK_CMDQ_MAILBOX_H__ */
