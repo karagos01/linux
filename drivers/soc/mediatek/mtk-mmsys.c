@@ -248,6 +248,62 @@ void mtk_mmsys_gce_event_enable(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(mtk_mmsys_gce_event_enable);
 
+/**
+ * mtk_mmsys_ddp_connect_cmdq() - connect two components through the GCE
+ * @dev: the mmsys device
+ * @cur: the upstream component
+ * @next: the downstream component
+ * @cmdq_pkt: the packet to append the register writes to
+ *
+ * The same as mtk_mmsys_ddp_connect(), for SoCs whose firmware only lets the
+ * routing registers be written after a handshake done in the same packet.
+ */
+void mtk_mmsys_ddp_connect_cmdq(struct device *dev, enum mtk_ddp_comp_id cur,
+				enum mtk_ddp_comp_id next, struct cmdq_pkt *cmdq_pkt)
+{
+	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
+	const struct mtk_mmsys_routes *routes = mmsys->data->routes;
+	int i;
+
+	for (i = 0; i < mmsys->data->num_routes; i++)
+		if (cur == routes[i].from_comp && next == routes[i].to_comp)
+			mtk_mmsys_update_bits(mmsys, routes[i].addr, routes[i].mask,
+					      routes[i].val, cmdq_pkt);
+}
+EXPORT_SYMBOL_GPL(mtk_mmsys_ddp_connect_cmdq);
+
+/**
+ * mtk_mmsys_gce_event_enable_cmdq() - mtk_mmsys_gce_event_enable() through the GCE
+ * @dev: the mmsys device
+ * @cmdq_pkt: the packet to append the register writes to
+ */
+void mtk_mmsys_gce_event_enable_cmdq(struct device *dev, struct cmdq_pkt *cmdq_pkt)
+{
+	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
+
+	if (!mmsys->data->gce_event_sel)
+		return;
+
+	mtk_mmsys_update_bits(mmsys, MT6878_MMSYS_GCE_EVENT_SEL, GENMASK(31, 0), 0x3, cmdq_pkt);
+	mtk_mmsys_update_bits(mmsys, MT6878_MMSYS_BYPASS_MUX_SHADOW, GENMASK(31, 0), 0x1,
+			      cmdq_pkt);
+	mtk_mmsys_update_bits(mmsys, MT6878_MMSYS_CROSSBAR_CON, GENMASK(31, 0), 0x00ff0000,
+			      cmdq_pkt);
+}
+EXPORT_SYMBOL_GPL(mtk_mmsys_gce_event_enable_cmdq);
+
+/**
+ * mtk_mmsys_has_cmdq() - tell whether the mmsys registers can be written by the GCE
+ * @dev: the mmsys device
+ */
+bool mtk_mmsys_has_cmdq(struct device *dev)
+{
+	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
+
+	return mmsys->cmdq_base.size;
+}
+EXPORT_SYMBOL_GPL(mtk_mmsys_has_cmdq);
+
 void mtk_mmsys_merge_async_config(struct device *dev, int idx, int width, int height,
 				  struct cmdq_pkt *cmdq_pkt)
 {

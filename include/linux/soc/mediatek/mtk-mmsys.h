@@ -99,6 +99,13 @@ void mtk_mmsys_ddp_dpi_fmt_config(struct device *dev, u32 val);
 
 void mtk_mmsys_gce_event_enable(struct device *dev);
 
+void mtk_mmsys_ddp_connect_cmdq(struct device *dev, enum mtk_ddp_comp_id cur,
+				enum mtk_ddp_comp_id next, struct cmdq_pkt *cmdq_pkt);
+
+void mtk_mmsys_gce_event_enable_cmdq(struct device *dev, struct cmdq_pkt *cmdq_pkt);
+
+bool mtk_mmsys_has_cmdq(struct device *dev);
+
 void mtk_mmsys_merge_async_config(struct device *dev, int idx, int width,
 				  int height, struct cmdq_pkt *cmdq_pkt);
 
