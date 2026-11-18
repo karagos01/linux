@@ -1109,6 +1109,32 @@ static int mtk_drm_of_ddp_path_build(struct device *dev, struct device_node *nod
 	return 0;
 }
 
+/*
+ * The CRTCs silently fall back to CPU register writes when the GCE mailbox of
+ * the mmsys is not available yet, which leaves command mode panels without
+ * frame updates. Wait for the mailbox controller to be bound instead.
+ */
+static int mtk_drm_wait_for_mbox(struct device_node *mmsys_np)
+{
+	struct device_node *mbox_np;
+	struct platform_device *mbox_pdev;
+	bool bound;
+
+	mbox_np = of_parse_phandle(mmsys_np, "mboxes", 0);
+	if (!mbox_np)
+		return 0;
+
+	mbox_pdev = of_find_device_by_node(mbox_np);
+	of_node_put(mbox_np);
+	if (!mbox_pdev)
+		return -EPROBE_DEFER;
+
+	bound = device_is_bound(&mbox_pdev->dev);
+	put_device(&mbox_pdev->dev);
+
+	return bound ? 0 : -EPROBE_DEFER;
+}
+
 static int mtk_drm_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1125,6 +1151,10 @@ static int mtk_drm_probe(struct platform_device *pdev)
 	private = devm_kzalloc(dev, sizeof(*private), GFP_KERNEL);
 	if (!private)
 		return -ENOMEM;
+
+	ret = mtk_drm_wait_for_mbox(phandle);
+	if (ret)
+		return ret;
 
 	private->mmsys_dev = dev->parent;
 	if (!private->mmsys_dev) {
