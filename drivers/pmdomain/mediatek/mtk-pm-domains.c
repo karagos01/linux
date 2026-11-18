@@ -913,6 +913,9 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_ACTIVE_WAKEUP))
 		pd->genpd.flags |= GENPD_FLAG_ACTIVE_WAKEUP;
 
+	if (MTK_SCPD_CAPS(pd, MTK_SCPD_NO_STAY_ON))
+		pd->genpd.flags |= GENPD_FLAG_NO_STAY_ON;
+
 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_KEEP_DEFAULT_OFF))
 		pm_genpd_init(&pd->genpd, NULL, true);
 	else
@@ -981,6 +984,44 @@ static int scpsys_add_subdomain(struct scpsys *scpsys, struct device_node *paren
 err_put_node:
 	of_node_put(child);
 	return ret;
+}
+
+/*
+ * A domain may sit below a domain of another power controller (e.g. a directly
+ * controlled domain below a hardware voter one): its node then names the parent
+ * with a "power-domains" property.
+ */
+static int scpsys_link_external_parents(struct scpsys *scpsys, struct device_node *np)
+{
+	struct of_phandle_args parent, child;
+	u32 id;
+	int ret;
+
+	for_each_available_child_of_node_scoped(np, node) {
+		ret = scpsys_link_external_parents(scpsys, node);
+		if (ret)
+			return ret;
+
+		if (of_parse_phandle_with_args(node, "power-domains", "#power-domain-cells",
+					       0, &parent))
+			continue;
+
+		ret = of_property_read_u32(node, "reg", &id);
+		if (!ret) {
+			child.np = scpsys->dev->of_node;
+			child.args_count = 1;
+			child.args[0] = id;
+			ret = of_genpd_add_subdomain(&parent, &child);
+		}
+		of_node_put(parent.np);
+		if (ret == -ENOENT)
+			return -EPROBE_DEFER;
+		if (ret)
+			return dev_err_probe(scpsys->dev, ret,
+					     "%pOF: failed to add to the parent domain\n", node);
+	}
+
+	return 0;
 }
 
 static void scpsys_remove_one_domain(struct scpsys_domain *pd)
@@ -1308,6 +1349,12 @@ static int scpsys_probe(struct platform_device *pdev)
 	ret = of_genpd_add_provider_onecell(np, &scpsys->pd_data);
 	if (ret) {
 		dev_err(dev, "failed to add provider: %d\n", ret);
+		goto err_cleanup_domains;
+	}
+
+	ret = scpsys_link_external_parents(scpsys, np);
+	if (ret) {
+		of_genpd_del_provider(np);
 		goto err_cleanup_domains;
 	}
 
