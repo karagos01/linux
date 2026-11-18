@@ -57,6 +57,10 @@ struct mtk_crtc {
 	u32				cmdq_event;
 	/* GCE event of the command-mode panel TE, -1 if none */
 	int				cmdq_te_event;
+	/* handshake with the firmware that reopens the display after power-on */
+	int				cmdq_va_start_event;
+	int				cmdq_va_end_event;
+	bool				reopen_pending;
 	u32				cmdq_vblank_cnt;
 	wait_queue_head_t		cb_blocking_queue;
 #endif
@@ -423,6 +427,9 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 
 	/* let display events (TE, frame done, ...) reach the GCE */
 	mtk_mmsys_gce_event_enable(mtk_crtc->mmsys_dev);
+#if IS_REACHABLE(CONFIG_MTK_CMDQ)
+	mtk_crtc->reopen_pending = true;
+#endif
 
 	dsc = mtk_ddp_comp_get_dsc(mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1]);
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
@@ -581,6 +588,37 @@ static void mtk_crtc_ddp_config(struct drm_crtc *crtc,
 	}
 }
 
+#if IS_REACHABLE(CONFIG_MTK_CMDQ)
+/*
+ * After a power cycle of the display the firmware leaves the routing registers
+ * locked and the display ports of the SMI translated by the IOMMU. Its secure
+ * GCE thread undoes the former when asked to with the "va start" token, which
+ * it answers with "va end"; only then do the routes written by the same packet
+ * take effect (the ones written by the CPU when the path was set up are lost).
+ */
+static void mtk_crtc_reopen_display(struct mtk_crtc *mtk_crtc, struct cmdq_pkt *cmdq_handle)
+{
+	int i;
+
+	if (mtk_crtc->cmdq_va_start_event < 0)
+		return;
+
+	if (cmdq_mbox_start_sec_disp_thread(mtk_crtc->cmdq_client.chan)) {
+		drm_err(mtk_crtc->base.dev, "Failed to start the firmware display thread\n");
+		return;
+	}
+
+	cmdq_pkt_clear_event(cmdq_handle, mtk_crtc->cmdq_va_end_event);
+	cmdq_pkt_set_event(cmdq_handle, mtk_crtc->cmdq_va_start_event);
+	cmdq_pkt_wfe(cmdq_handle, mtk_crtc->cmdq_va_end_event, true);
+
+	for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++)
+		mtk_mmsys_ddp_connect_cmdq(mtk_crtc->mmsys_dev, mtk_crtc->ddp_comp[i]->id,
+					   mtk_crtc->ddp_comp[i + 1]->id, cmdq_handle);
+	mtk_mmsys_gce_event_enable_cmdq(mtk_crtc->mmsys_dev, cmdq_handle);
+}
+#endif
+
 static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 {
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
@@ -647,6 +685,10 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 		mbox_flush(mtk_crtc->cmdq_client.chan, 2000);
 		cmdq_handle->cmd_buf_size = 0;
 		cmdq_pkt_clear_event(cmdq_handle, mtk_crtc->cmdq_event);
+		if (mtk_crtc->reopen_pending) {
+			mtk_crtc->reopen_pending = false;
+			mtk_crtc_reopen_display(mtk_crtc, cmdq_handle);
+		}
 		if (priv->data->cmd_mode) {
 			/*
 			 * Command mode: nothing free-runs, so apply the config
@@ -1239,6 +1281,18 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 
 		/* for sending blocking cmd in crtc disable */
 		init_waitqueue_head(&mtk_crtc->cb_blocking_queue);
+	}
+
+	/* <"va start" "va end"> tokens of the mmsys: see mtk_crtc_reopen_display() */
+	mtk_crtc->cmdq_va_start_event = -1;
+	if (mtk_crtc->cmdq_client.chan && mtk_mmsys_has_cmdq(mtk_crtc->mmsys_dev)) {
+		u32 va_events[2];
+
+		if (!of_property_read_u32_array(mtk_crtc->mmsys_dev->of_node,
+						"mediatek,gce-events", va_events, 2)) {
+			mtk_crtc->cmdq_va_start_event = va_events[0];
+			mtk_crtc->cmdq_va_end_event = va_events[1];
+		}
 	}
 
 	/* command mode: the output's TE GCE event syncs the frame push */
