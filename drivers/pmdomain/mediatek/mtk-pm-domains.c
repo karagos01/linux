@@ -1225,6 +1225,10 @@ static const struct of_device_id scpsys_of_match[] = {
 		.data = &mt6878_scpsys_data,
 	},
 	{
+		.compatible = "mediatek,mt6878-hwv-power-controller",
+		.data = &mt6878_scpsys_hwv_data,
+	},
+	{
 		.compatible = "mediatek,mt6893-power-controller",
 		.data = &mt6893_scpsys_data,
 	},
