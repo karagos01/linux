@@ -262,6 +262,7 @@ struct ssusb_mtk {
 	struct otg_switch_mtk otg_switch;
 	enum usb_dr_mode dr_mode;
 	bool is_host;
+	bool idle_gated;	/* clocks and PHYs off, no partner */
 	int u2_ports;
 	int u3_ports;
 	int u2p_dis_msk;
@@ -430,6 +431,7 @@ static inline void mtu3_clrbits(void __iomem *base, u32 offset, u32 bits)
 
 int ssusb_check_clocks(struct ssusb_mtk *ssusb, u32 ex_clks);
 void ssusb_ip_sw_reset(struct ssusb_mtk *ssusb);
+void ssusb_idle_gate(struct ssusb_mtk *ssusb, bool gate);
 int ssusb_host_enable(struct ssusb_mtk *ssusb);
 int ssusb_host_disable(struct ssusb_mtk *ssusb);
 struct usb_request *mtu3_alloc_request(struct usb_ep *ep, gfp_t gfp_flags);

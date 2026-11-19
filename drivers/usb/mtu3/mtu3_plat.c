@@ -174,6 +174,30 @@ static void ssusb_rscs_exit(struct ssusb_mtk *ssusb)
 	ssusb_phy_exit(ssusb);
 }
 
+/*
+ * Without a partner the controller has nothing to do: stop its PHYs and
+ * clocks so that the PLL behind them can be turned off, which the SPM needs
+ * before it may switch the 26 MHz clock off. Called from the role work only.
+ */
+void ssusb_idle_gate(struct ssusb_mtk *ssusb, bool gate)
+{
+	if (ssusb->idle_gated == gate)
+		return;
+
+	if (gate) {
+		ssusb_phy_power_off(ssusb);
+		clk_bulk_disable_unprepare(BULK_CLKS_CNT, ssusb->clks);
+	} else {
+		if (clk_bulk_prepare_enable(BULK_CLKS_CNT, ssusb->clks)) {
+			dev_err(ssusb->dev, "failed to enable clocks\n");
+			return;
+		}
+		if (ssusb_phy_power_on(ssusb))
+			dev_err(ssusb->dev, "failed to power on the PHYs\n");
+	}
+	ssusb->idle_gated = gate;
+}
+
 void ssusb_ip_sw_reset(struct ssusb_mtk *ssusb)
 {
 	/* reset whole ip (xhci & u3d) */
@@ -462,6 +486,8 @@ static void mtu3_remove(struct platform_device *pdev)
 	struct ssusb_mtk *ssusb = platform_get_drvdata(pdev);
 
 	pm_runtime_get_sync(&pdev->dev);
+	/* The teardown below touches the hardware and releases what it holds */
+	ssusb_idle_gate(ssusb, false);
 
 	switch (ssusb->dr_mode) {
 	case USB_DR_MODE_PERIPHERAL:
@@ -540,6 +566,10 @@ static int mtu3_suspend_common(struct device *dev, pm_message_t msg)
 
 	dev_dbg(dev, "%s\n", __func__);
 
+	/* Already quiesced, and the registers cannot be reached */
+	if (ssusb->idle_gated)
+		return 0;
+
 	switch (ssusb->dr_mode) {
 	case USB_DR_MODE_PERIPHERAL:
 		ret = ssusb_gadget_suspend(ssusb, msg);
@@ -583,6 +613,9 @@ static int mtu3_resume_common(struct device *dev, pm_message_t msg)
 	int ret;
 
 	dev_dbg(dev, "%s\n", __func__);
+
+	if (ssusb->idle_gated)
+		return 0;
 
 	ssusb_wakeup_set(ssusb, false);
 	ret = clk_bulk_prepare_enable(BULK_CLKS_CNT, ssusb->clks);

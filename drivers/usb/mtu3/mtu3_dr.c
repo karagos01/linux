@@ -352,12 +352,17 @@ static void ssusb_mode_sw_work(struct work_struct *work)
 	bool active = otg_sx->desired_role != USB_ROLE_NONE;
 
 	pm_runtime_get_sync(ssusb->dev);
-	if (active)
+	if (active) {
+		ssusb_idle_gate(ssusb, false);
 		ssusb_hwrscs_req(ssusb, true);
+	}
 
 	__ssusb_mode_sw_work(work);
 
 	ssusb_hwrscs_req(ssusb, active);
+	/* Only the device role leaves the controller stopped without a partner */
+	if (!active && !ssusb->is_host && !ssusb->u3d->is_active)
+		ssusb_idle_gate(ssusb, true);
 	pm_runtime_put(ssusb->dev);
 }
 
