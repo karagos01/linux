@@ -323,6 +323,17 @@ const struct clk_ops mtk_pll_fenc_clr_set_ops = {
 };
 EXPORT_SYMBOL_GPL(mtk_pll_fenc_clr_set_ops);
 
+/* Enable bits in a shared register with set/clear companions, no FENC status */
+const struct clk_ops mtk_pll_clr_set_ops = {
+	.is_prepared	= mtk_pll_is_prepared,
+	.prepare	= mtk_pll_prepare_setclr,
+	.unprepare	= mtk_pll_unprepare_setclr,
+	.recalc_rate	= mtk_pll_recalc_rate,
+	.determine_rate	= mtk_pll_determine_rate,
+	.set_rate	= mtk_pll_set_rate,
+};
+EXPORT_SYMBOL_GPL(mtk_pll_clr_set_ops);
+
 struct clk_hw *mtk_clk_register_pll_ops(struct mtk_clk_pll *pll,
 					const struct mtk_pll_data *data,
 					void __iomem *base,
