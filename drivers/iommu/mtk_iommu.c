@@ -242,6 +242,8 @@ struct mtk_iommu_plat_data {
 	struct {
 		unsigned int	iova_region_nr;
 		const struct mtk_iommu_iova_region	*iova_region;
+	u32			hyp_tab_id;	/* hypervisor table of this IOMMU */
+	u32			sec_type;	/* IOMMU type in the secure bank calls */
 	/* Identity-mapped window: the DRAM the masters can address physically */
 	phys_addr_t		direct_base;
 	size_t			direct_size;
@@ -929,7 +931,7 @@ static void mtk_iommu_hyp_sync(struct mtk_iommu_data *data,
 	arm_smccc_smc(MTK_SIP_HYPMMU_TYPE2_INV,
 		      lower_32_bits(s & ~0xfffULL) | upper_32_bits(s),
 		      lower_32_bits(e & ~0xfffULL) | upper_32_bits(e),
-		      0 /* tab_id */, 0, 0, 0, 0, &res);
+		      data->plat_data->hyp_tab_id, 0, 0, 0, 0, &res);
 	if (res.a0)
 		dev_err(data->dev, "hyp-mmu sync failed %lu, iova 0x%llx-0x%llx\n",
 			res.a0, s, e);
@@ -1188,8 +1190,9 @@ static void mtk_iommu_sec_bank_call(const struct mtk_iommu_data *data, u32 cmd)
 {
 	struct arm_smccc_res res;
 
-	/* MM IOMMU type 0, DISP IOMMU id 0 */
-	arm_smccc_smc(MTK_SIP_IOMMU_SECURE_CONTROL, (MTK_IOMMU_SEC_BK << 8) | cmd,
+	/* command | bank << 8 | IOMMU id (always 0 here) << 16 | IOMMU type << 24 */
+	arm_smccc_smc(MTK_SIP_IOMMU_SECURE_CONTROL,
+		      (data->plat_data->sec_type << 24) | (MTK_IOMMU_SEC_BK << 8) | cmd,
 		      0, 0, 0, 0, 0, 0, &res);
 	if (res.a0)
 		dev_warn(data->dev, "secure bank command %u failed: %lu\n", cmd, res.a0);
@@ -1616,6 +1619,10 @@ static int __maybe_unused mtk_iommu_runtime_suspend(struct device *dev)
 	void __iomem *base;
 	int i = 0;
 
+	/* The APU IOMMU keeps its registers while the APU sleeps */
+	if (MTK_IOMMU_IS_TYPE(data->plat_data, MTK_IOMMU_TYPE_APU))
+		return 0;
+
 	base = data->bank[i].base;
 	reg->wr_len_ctrl = readl_relaxed(base + REG_MMU_WR_LEN_CTRL);
 	reg->misc_ctrl = readl_relaxed(base + REG_MMU_MISC_CTRL);
@@ -1645,6 +1652,12 @@ static int __maybe_unused mtk_iommu_runtime_resume(struct device *dev)
 	struct mtk_iommu_domain *m4u_dom;
 	void __iomem *base;
 	int ret, i = 0;
+
+	if (MTK_IOMMU_IS_TYPE(data->plat_data, MTK_IOMMU_TYPE_APU)) {
+		if (data->bank[0].m4u_dom)
+			mtk_iommu_tlb_flush_all(data);
+		return 0;
+	}
 
 	ret = clk_prepare_enable(data->bclk);
 	if (ret) {
@@ -1802,6 +1815,29 @@ static const unsigned int mt8186_larb_region_msk[MT8192_MULTI_REGION_NR_MAX][MTK
 	[3] = {0},
 	[4] = {[13] = BIT(9) | BIT(10)},	/* larb13 port9/10 */
 	[5] = {[14] = ~0},			/* larb14 */
+};
+
+/*
+ * MT6878 APU M4U: only the firmware code/data aperture (1 GB .. 4 GB) the APU
+ * microprocessor boots from is used. Hypervisor owned like the display one,
+ * with its own table.
+ */
+static const struct mtk_iommu_iova_region mt6878_apu_code[] = {
+	{ .iova_base = SZ_1G,	.size = 0xc0000000ULL - SZ_8M },
+};
+
+static const struct mtk_iommu_plat_data mt6878_data_apu = {
+	.m4u_plat       = M4U_MT6878,
+	.flags          = IOVA_34_EN | MTK_IOMMU_TYPE_APU | PGTABLE_PA_35_EN |
+			  HYP_MMU_TYPE2,
+	.inv_sel_reg    = REG_MMU_INV_SEL_GEN2,
+	.banks_num      = 1,
+	.banks_enable   = {true},
+	.iova_region    = mt6878_apu_code,
+	.iova_region_nr = ARRAY_SIZE(mt6878_apu_code),
+	.hyp_tab_id     = 1,
+	.sec_type       = 1,
+	.larbid_remap   = {{0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}},
 };
 
 /*
@@ -2064,6 +2100,7 @@ static const struct of_device_id mtk_iommu_of_ids[] = {
 	{ .compatible = "mediatek,mt8167-m4u", .data = &mt8167_data},
 	{ .compatible = "mediatek,mt8173-m4u", .data = &mt8173_data},
 	{ .compatible = "mediatek,mt8183-m4u", .data = &mt8183_data},
+	{ .compatible = "mediatek,mt6878-apu-iommu",   .data = &mt6878_data_apu},
 	{ .compatible = "mediatek,mt6878-disp-iommu",  .data = &mt6878_data},
 	{ .compatible = "mediatek,mt8186-iommu-mm",    .data = &mt8186_data_mm}, /* mm: m4u */
 	{ .compatible = "mediatek,mt8188-iommu-infra", .data = &mt8188_data_infra},
