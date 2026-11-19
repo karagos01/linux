@@ -16,9 +16,16 @@
  */
 void mtk_lpm_bus_hold(void);
 void mtk_lpm_bus_release(void);
+
+/*
+ * The SPM firmware may now put the infra bus to sleep (it must not before the
+ * APU has been through a power cycle, see the APU driver).
+ */
+void mtk_lpm_infra_sleep_allow(void);
 #else
 static inline void mtk_lpm_bus_hold(void) { }
 static inline void mtk_lpm_bus_release(void) { }
+static inline void mtk_lpm_infra_sleep_allow(void) { }
 #endif
 
 #endif

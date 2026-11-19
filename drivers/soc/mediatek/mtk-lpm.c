@@ -78,6 +78,7 @@ static DEFINE_SPINLOCK(mtk_lpm_lock);
  */
 static unsigned int mtk_lpm_bus_users = 1;
 static bool mtk_lpm_ready;
+static bool mtk_lpm_infra_blocked = true;
 
 static unsigned long mtk_lpm_smc(u32 id, u32 act, u32 v1, u32 v2)
 {
@@ -93,13 +94,21 @@ static void mtk_lpm_set_req(u32 field, bool on)
 		    field, on);
 }
 
+/* Called with mtk_lpm_lock held */
+static void mtk_lpm_update_reqs(void)
+{
+	mtk_lpm_set_req(PW_REG_SPM_APSRC_REQ, mtk_lpm_bus_users);
+	mtk_lpm_set_req(PW_REG_SPM_INFRA_REQ,
+			mtk_lpm_bus_users || mtk_lpm_infra_blocked);
+}
+
 void mtk_lpm_bus_hold(void)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&mtk_lpm_lock, flags);
 	if (!mtk_lpm_bus_users++ && mtk_lpm_ready)
-		mtk_lpm_set_req(PW_REG_SPM_APSRC_REQ, true);
+		mtk_lpm_update_reqs();
 	spin_unlock_irqrestore(&mtk_lpm_lock, flags);
 }
 EXPORT_SYMBOL_GPL(mtk_lpm_bus_hold);
@@ -110,10 +119,22 @@ void mtk_lpm_bus_release(void)
 
 	spin_lock_irqsave(&mtk_lpm_lock, flags);
 	if (!WARN_ON(!mtk_lpm_bus_users) && !--mtk_lpm_bus_users && mtk_lpm_ready)
-		mtk_lpm_set_req(PW_REG_SPM_APSRC_REQ, false);
+		mtk_lpm_update_reqs();
 	spin_unlock_irqrestore(&mtk_lpm_lock, flags);
 }
 EXPORT_SYMBOL_GPL(mtk_lpm_bus_release);
+
+void mtk_lpm_infra_sleep_allow(void)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&mtk_lpm_lock, flags);
+	mtk_lpm_infra_blocked = false;
+	if (mtk_lpm_ready)
+		mtk_lpm_update_reqs();
+	spin_unlock_irqrestore(&mtk_lpm_lock, flags);
+}
+EXPORT_SYMBOL_GPL(mtk_lpm_infra_sleep_allow);
 
 static irqreturn_t mtk_lpm_spm_irq(int irq, void *data)
 {
@@ -183,15 +204,14 @@ static int mtk_lpm_probe(struct platform_device *pdev)
 			    LPM_ACT_SET, i, 0);
 
 	/*
-	 * The infra bus must stay up: with the infra request dropped the SPM
-	 * firmware never comes back from its sleep sequence on this platform
-	 * and the watchdog resets the SoC. The memory path, which is where
-	 * most of the idle power goes, sleeps without it.
+	 * A bus user needs the infra bus as well as the memory path. The
+	 * infra bus is also kept up until the APU driver reports that the SPM
+	 * firmware can put it to sleep: before the APU has gone through a
+	 * power cycle its restore engine never acknowledges, the firmware
+	 * waits for it forever and the watchdog resets the SoC.
 	 */
-	mtk_lpm_set_req(PW_REG_SPM_INFRA_REQ, true);
-
 	spin_lock_irqsave(&mtk_lpm_lock, flags);
-	mtk_lpm_set_req(PW_REG_SPM_APSRC_REQ, mtk_lpm_bus_users);
+	mtk_lpm_update_reqs();
 	mtk_lpm_ready = true;
 	spin_unlock_irqrestore(&mtk_lpm_lock, flags);
 
