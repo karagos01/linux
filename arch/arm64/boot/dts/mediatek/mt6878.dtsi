@@ -640,6 +640,7 @@
 					"hci_rst";
 
 			mediatek,ufs-disable-mcq;
+			mediatek,ufs-rtff-mtcmos;
 			status = "disabled";
 		};
 
