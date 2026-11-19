@@ -355,6 +355,7 @@ static void ssusb_mode_sw_work(struct work_struct *work)
 	if (active) {
 		ssusb_idle_gate(ssusb, false);
 		ssusb_hwrscs_req(ssusb, true);
+		ssusb_ip_context_check(ssusb);
 	}
 
 	__ssusb_mode_sw_work(work);
