@@ -1153,6 +1153,28 @@
 		 * mediatek,larbs, so the display keeps its working physical path;
 		 * only the fake GCE larb below is attached. Interrupt 0x116 = 278.
 		 */
+		apu_iommu: iommu@19010000 {
+			compatible = "mediatek,mt6878-apu-iommu";
+			reg = <0x19010000 0x1000>;
+			interrupts = <GIC_SPI 597 IRQ_TYPE_LEVEL_HIGH 0>;
+			power-domains = <&apu_top>;
+			#iommu-cells = <1>;
+		};
+
+		apu: remoteproc@190e1000 {
+			compatible = "mediatek,mt6878-apu";
+			reg = <0x190e1000 0x1000>;
+			interrupts = <GIC_SPI 586 IRQ_TYPE_LEVEL_HIGH 0>;
+			iommus = <&apu_iommu 0>;
+			power-domains = <&apu_top>;
+		};
+
+		apu_top: power-controller@190f0000 {
+			compatible = "mediatek,mt6878-apu-top";
+			reg = <0x190f0000 0x1000>;
+			#power-domain-cells = <0>;
+		};
+
 		disp_iommu: iommu@1e802000 {
 			compatible = "mediatek,mt6878-disp-iommu";
 			reg = <0x1e802000 0x1000>;
