@@ -118,6 +118,16 @@ config MTK_LPM
 	  the wake-up interrupts to TF-A, enables the SPM resource
 	  constraints and owns the software resource requests.
 
+config MTK_APU
+	bool "MediaTek APU host support"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on PM_GENERIC_DOMAINS && HAS_DMA
+	help
+	  Say yes here to boot the firmware of the AI processing unit of
+	  MT6878 and to answer its power-down handshake. The SPM cannot put
+	  the infra bus to sleep before the APU has gone through one such
+	  power cycle. The APU is not made available for computing.
+
 config MTK_MMSYS
 	tristate "MediaTek MMSYS Support"
 	default ARCH_MEDIATEK

@@ -10,6 +10,7 @@ obj-$(CONFIG_MTK_CONNSYS_GNSS) += mtk-connsys-gnss.o
 obj-$(CONFIG_MTK_CCCI) += mtk-ccci.o
 obj-$(CONFIG_MTK_DISP_REFRESH) += mtk-disp-refresh.o
 obj-$(CONFIG_MTK_LPM) += mtk-lpm.o
+obj-$(CONFIG_MTK_APU) += mtk-apu.o
 obj-$(CONFIG_MTK_MMSYS) += mtk-mmsys.o
 obj-$(CONFIG_MTK_MMSYS) += mtk-mutex.o
 obj-$(CONFIG_MTK_SVS) += mtk-svs.o
