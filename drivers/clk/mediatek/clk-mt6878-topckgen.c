@@ -1775,8 +1775,31 @@ static const struct of_device_id of_match_clk_mt6878_ck[] = {
 };
 MODULE_DEVICE_TABLE(of, of_match_clk_mt6878_ck);
 
+static int clk_mt6878_topck_probe(struct platform_device *pdev)
+{
+	struct clk_hw_onecell_data *clk_data;
+	int ret;
+
+	ret = mtk_clk_simple_probe(pdev);
+	if (ret)
+		return ret;
+
+	/*
+	 * The I2C driver keeps its clocks prepared for as long as it is bound,
+	 * which would keep UNIVPLL (the bootloader's choice for this mux)
+	 * running for good, and the SPM cannot switch the 26 MHz clock off
+	 * while that PLL is on. Run the I2C buses from the always-on MAINPLL
+	 * instead; do it here, before anything has a reference on the mux.
+	 */
+	clk_data = platform_get_drvdata(pdev);
+	clk_hw_set_parent(clk_data->hws[CLK_TOP_I2C_SEL],
+			  clk_data->hws[CLK_TOP_MAINPLL_D4_D4]);
+
+	return 0;
+}
+
 static struct platform_driver clk_mt6878_topck_drv = {
-	.probe = mtk_clk_simple_probe,
+	.probe = clk_mt6878_topck_probe,
 	.remove = mtk_clk_simple_remove,
 	.driver = {
 		.name = "clk-mt6878-topck",
