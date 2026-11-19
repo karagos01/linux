@@ -112,6 +112,7 @@ config MTK_LPM
 	bool "MediaTek low power manager"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
 	depends on ARM_PSCI_CPUIDLE || COMPILE_TEST
+	select PM_GENERIC_DOMAINS if PM
 	help
 	  Say yes here to let the SPM put the system resources (DRAM, EMI,
 	  RF rail) to sleep while all CPUs are idle. The driver describes

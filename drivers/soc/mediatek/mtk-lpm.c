@@ -16,6 +16,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm_domain.h>
 #include <linux/pm_wakeirq.h>
 #include <linux/soc/mediatek/mtk-lpm.h>
 #include <linux/soc/mediatek/mtk_sip_svc.h>
@@ -136,6 +137,30 @@ void mtk_lpm_infra_sleep_allow(void)
 }
 EXPORT_SYMBOL_GPL(mtk_lpm_infra_sleep_allow);
 
+/*
+ * A peripheral behind the infra bus can be busy while all CPUs are idle, for
+ * instance a storage host waiting for its data transfer to complete. The SPM
+ * does not notice all of them by itself, so they are attached to this power
+ * domain and hold the bus through runtime PM.
+ */
+static int mtk_lpm_bus_pd_on(struct generic_pm_domain *pd)
+{
+	mtk_lpm_bus_hold();
+	return 0;
+}
+
+static int mtk_lpm_bus_pd_off(struct generic_pm_domain *pd)
+{
+	mtk_lpm_bus_release();
+	return 0;
+}
+
+static struct generic_pm_domain mtk_lpm_bus_pd = {
+	.name = "lpm-bus",
+	.power_on = mtk_lpm_bus_pd_on,
+	.power_off = mtk_lpm_bus_pd_off,
+};
+
 static irqreturn_t mtk_lpm_spm_irq(int irq, void *data)
 {
 	/* TF-A acknowledges the SPM on the way out of idle; nothing to do. */
@@ -217,6 +242,19 @@ static int mtk_lpm_probe(struct platform_device *pdev)
 
 	mtk_lpm_smc(LPM_ID(LPM_USER_CPU_PM, CPU_PM_VALIDATE), LPM_ACT_SET, 0, 0);
 	cpuidle_resume_and_unlock();
+
+	/* The domain starts powered on, with a reference of its own */
+	mtk_lpm_bus_hold();
+	ret = pm_genpd_init(&mtk_lpm_bus_pd, NULL, false);
+	if (!ret) {
+		ret = of_genpd_add_provider_simple(dev->of_node, &mtk_lpm_bus_pd);
+		if (ret)
+			pm_genpd_remove(&mtk_lpm_bus_pd);
+	}
+	if (ret) {
+		mtk_lpm_bus_release();
+		dev_warn(dev, "cannot register the bus power domain: %d\n", ret);
+	}
 
 	return 0;
 }
