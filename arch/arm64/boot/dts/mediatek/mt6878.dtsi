@@ -230,10 +230,11 @@
 	 * SPM resource constraints (TF-A): wake-up interrupt description and
 	 * the software resource requests.
 	 */
-	lpm {
+	lpm: lpm {
 		compatible = "mediatek,mt6878-lpm";
 		interrupt-parent = <&gic>;
 		interrupts = <GIC_SPI 499 IRQ_TYPE_LEVEL_HIGH 0>;
+		#power-domain-cells = <0>;
 	};
 
 	clk13m: clock-13m {
@@ -569,6 +570,7 @@
 				 <&pericfg_ao CLK_PERAOP_MSDC0_H>;
 			clock-names = "source", "hclk", "source_cg", "bus_clk",
 				      "pclk_cg", "axi_cg", "sys_cg";
+			power-domains = <&lpm>;
 			status = "disabled";
 		};
 
