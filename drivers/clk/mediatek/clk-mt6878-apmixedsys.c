@@ -98,6 +98,10 @@
 	.pcwibits = MT6878_INTEGER_BITS,			\
 }
 
+/*
+ * The FENC status register reads zero from the kernel on this SoC, so the
+ * state of these PLLs is taken from their enable bit in PLLEN_ALL instead.
+ */
 #define PLL_FENC(_id, _name, _reg, _fenc_sta_ofs, _fenc_sta_bit,\
 		_flags, _pd_reg, _pd_shift,		\
 		_pcw_reg, _pcw_shift, _pcwbits,		\
@@ -120,7 +124,7 @@
 	.en_set_reg = PLLEN_ALL_SET,			\
 	.en_clr_reg = PLLEN_ALL_CLR,			\
 	.pll_en_bit = _pll_en_bit,			\
-	.ops = &mtk_pll_fenc_clr_set_ops,		\
+	.ops = &mtk_pll_clr_set_ops,			\
 }
 
 struct mtk_pll_desc {
@@ -145,21 +149,15 @@ static const struct mtk_pll_data apmixed_plls[] = {
 		0, 0, 0/*tuner*/,
 		CCIPLL_CON1, 0, 22/*pcw*/),
 	PLL_FENC(CLK_APMIXED_MAINPLL, "mainpll", MAINPLL_CON0/*base*/, FENC_STATUS_CON0,
-		6, PLL_AO, MAINPLL_CON1, 24/*pd*/, MAINPLL_CON1, 0, 22, 0/*tuner*/),
+		6, PLL_AO, MAINPLL_CON1, 24/*pd*/, MAINPLL_CON1, 0, 22, 6/*en*/),
 	PLL_FENC(CLK_APMIXED_UNIVPLL, "univpll", UNIVPLL_CON0/*base*/, FENC_STATUS_CON0,
-		 5, 0, UNIVPLL_CON1, 24/*pd*/, UNIVPLL_CON1, 0, 22, 0/*tuner*/),
-	PLL_SETCLR(CLK_APMIXED_MSDCPLL, "msdcpll",
-		4, 0, 0,
-		MSDCPLL_CON1, 24/*pd*/,
-		0, 0, 0/*tuner*/,
-		MSDCPLL_CON1, 0, 22/*pcw*/),
+		 5, 0, UNIVPLL_CON1, 24/*pd*/, UNIVPLL_CON1, 0, 22, 5/*en*/),
+	PLL_FENC(CLK_APMIXED_MSDCPLL, "msdcpll", MSDCPLL_CON0/*base*/, FENC_STATUS_CON0,
+		 4, 0, MSDCPLL_CON1, 24/*pd*/, MSDCPLL_CON1, 0, 22, 4/*en*/),
 	PLL_FENC(CLK_APMIXED_MMPLL, "mmpll", MMPLL_CON0/*base*/, FENC_STATUS_CON0,
-		 3, 0, MMPLL_CON1, 24/*pd*/, MMPLL_CON1, 0, 22, 0/*tuner*/),
-	PLL_SETCLR(CLK_APMIXED_UFSPLL, "ufspll",
-		2, 0, 0,
-		UFSPLL_CON1, 24/*pd*/,
-		0, 0, 0/*tuner*/,
-		UFSPLL_CON1, 0, 22/*pcw*/),
+		 3, 0, MMPLL_CON1, 24/*pd*/, MMPLL_CON1, 0, 22, 3/*en*/),
+	PLL_FENC(CLK_APMIXED_UFSPLL, "ufspll", UFSPLL_CON0/*base*/, FENC_STATUS_CON0,
+		 2, 0, UFSPLL_CON1, 24/*pd*/, UFSPLL_CON1, 0, 22, 2/*en*/),
 	PLL_SETCLR(CLK_APMIXED_APLL1, "apll1",
 		1, 0, 0,
 		APLL1_CON1, 24/*pd*/,
