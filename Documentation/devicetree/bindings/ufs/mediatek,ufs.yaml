@@ -50,6 +50,13 @@ properties:
     $ref: /schemas/types.yaml#/definitions/flag
     description: The mask to disable MCQ (Multi-Circular Queue) for UFS host.
 
+  mediatek,ufs-rtff-mtcmos:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description:
+      The power domain of the UFS host is controlled by the secure firmware and
+      keeps the controller state in retention flip-flops, so the host driver
+      may turn it off whenever the link is in a low power state.
+
 required:
   - compatible
   - clocks
