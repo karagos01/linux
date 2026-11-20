@@ -172,6 +172,7 @@ struct lvts_sensor {
 	int dt_id;
 	int low_thresh;
 	int high_thresh;
+	bool valid_seen;
 };
 
 struct lvts_ctrl {
@@ -388,7 +389,16 @@ static int lvts_get_temp(struct thermal_zone_device *tz, int *temp)
 	 * functionning temperature and directly jump to a system
 	 * shutdown.
 	 */
-	if (rc)
+	if (!rc)
+		lvts_sensor->valid_seen = true;
+
+	/*
+	 * On some SoCs the firmware takes the controllers over while the core
+	 * rail sleeps in idle and reads the measurements itself, which clears
+	 * the valid bit. The controller keeps measuring: once it has been
+	 * seen initialized, a raw temperature without the valid bit is good.
+	 */
+	if (rc && !(lvts_sensor->valid_seen && (value & 0xffff)))
 		return -EAGAIN;
 
 	*temp = lvts_raw_to_temp(value, lvts_data);
