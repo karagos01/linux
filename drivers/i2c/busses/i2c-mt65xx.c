@@ -55,6 +55,7 @@
 
 #define I2C_DMA_CON_TX			0x0000
 #define I2C_DMA_CON_RX			0x0001
+#define I2C_DMA_CON_DEFAULT		0x0008
 #define I2C_DMA_ASYNC_MODE		0x0004
 #define I2C_DMA_SKIP_CONFIG		0x0010
 #define I2C_DMA_DIR_CHANGE		0x0200
@@ -1015,6 +1016,15 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
 		restart_flag = I2C_RS_TRANSFER;
 
 	reinit_completion(&i2c->msg_complete);
+
+	/*
+	 * Some SoCs put the core rail or the infra bus to sleep while they
+	 * idle, and the controller or its DMA channel come back with their
+	 * registers reset: set them up again.
+	 */
+	if ((i2c->timing_reg && !mtk_i2c_readw(i2c, OFFSET_TIMING)) ||
+	    readl(i2c->pdmabase + OFFSET_CON) == I2C_DMA_CON_DEFAULT)
+		mtk_i2c_init_hw(i2c);
 
 	if (i2c->dev_comp->apdma_sync &&
 	    i2c->op != I2C_MASTER_WRRD && num > 1) {
