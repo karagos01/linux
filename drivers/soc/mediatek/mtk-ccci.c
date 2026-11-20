@@ -35,6 +35,8 @@
 #include <linux/of_address.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
+#include <linux/pm_wakeirq.h>
+#include <linux/pm_wakeup.h>
 #include <linux/poll.h>
 #include <linux/random.h>
 #include <linux/skbuff.h>
@@ -2875,6 +2877,15 @@ static int mtk_ccci_probe(struct platform_device *pdev)
 			       IRQF_NO_AUTOEN, "ccif-exp", ccci);
 	if (ret)
 		return ret;
+
+	/* Incoming calls and SMS arrive over CCIF: let them wake the system. */
+	ret = devm_device_init_wakeup(dev);
+	if (ret)
+		return ret;
+	ret = devm_pm_set_wake_irq(dev, ccci->irq);
+	if (ret)
+		return ret;
+
 	ccci->irq_dpmaif = platform_get_irq(pdev, 2);
 	if (ccci->irq_dpmaif < 0)
 		return ccci->irq_dpmaif;
