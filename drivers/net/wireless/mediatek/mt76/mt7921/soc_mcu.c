@@ -358,6 +358,62 @@ static int mt7921_soc_pm_bss(struct mt792x_dev *dev, struct ieee80211_vif *vif,
 	}
 }
 
+/*
+ * Low power mode of the firmware, used by the stock driver with the display
+ * off: while in power save, broadcast frames and multicast frames of groups
+ * the host did not join are dropped and only every n-th DTIM beacon is
+ * received. The firmware answers ARP requests for the addresses of the
+ * interface itself, but not reliably: broadcast ARP requests of hosts that
+ * do not know the address yet may go unanswered. It is enabled only once the
+ * connection is settled and has an IPv4 address, as DHCP replies may be
+ * broadcast.
+ */
+static unsigned int ps_mdtim;
+module_param(ps_mdtim, uint, 0644);
+MODULE_PARM_DESC(ps_mdtim,
+		 "Low power mode in power save, listen to every n-th DTIM (0: off)");
+
+#define MT7921_SOC_LP_DELAY	(30 * HZ)
+
+static void mt7921_soc_lp_update(struct mt792x_dev *dev, u8 bss_idx)
+{
+	struct mt7921_soc_bss *sbss = &mt7921_soc_dev(dev)->bss[bss_idx];
+	struct {
+		u8 bss_idx;
+		u8 enable;
+		u8 mdtim;
+		u8 rsv[65];
+	} __packed req = {
+		.bss_idx = bss_idx,
+		.mdtim = min(ps_mdtim, 10U),
+	};
+	bool lp;
+
+	lp = ps_mdtim && sbss->connected && !sbss->ap && sbss->ps &&
+	     sbss->has_ip &&
+	     time_after_eq(jiffies, sbss->connected_at + MT7921_SOC_LP_DELAY);
+	if (lp == sbss->lp)
+		return;
+
+	sbss->lp = lp;
+	req.enable = lp;
+	mt7921_soc_legacy_send(dev, MCU_CE_CMD_LEGACY_SET_SUSPEND_MODE, &req,
+			       sizeof(req));
+}
+
+void mt7921_soc_lp_work(struct work_struct *work)
+{
+	struct mt7921_soc_dev *sdev = container_of(work, struct mt7921_soc_dev,
+						   lp_work.work);
+	struct mt792x_dev *dev = &sdev->dev;
+	int i;
+
+	mt792x_mutex_acquire(dev);
+	for (i = 0; i < ARRAY_SIZE(sdev->bss); i++)
+		mt7921_soc_lp_update(dev, i);
+	mt792x_mutex_release(dev);
+}
+
 static int mt7921_soc_ps_profile(struct mt792x_dev *dev, u8 bss_idx, bool ps)
 {
 	struct {
@@ -369,8 +425,13 @@ static int mt7921_soc_ps_profile(struct mt792x_dev *dev, u8 bss_idx, bool ps)
 		/* CAM or fast PS-Poll */
 		.ps_profile = ps ? 2 : 0,
 	};
+	int ret;
 
-	return mt7921_soc_legacy_send(dev, MCU_CE_CMD_SET_PS_PROFILE, &req, sizeof(req));
+	ret = mt7921_soc_legacy_send(dev, MCU_CE_CMD_SET_PS_PROFILE, &req, sizeof(req));
+	mt7921_soc_dev(dev)->bss[bss_idx].ps = ps;
+	mt7921_soc_lp_update(dev, bss_idx);
+
+	return ret;
 }
 
 /* UNI DEV_INFO_UPDATE: own address of an interface, BSS_ACTIVATE_CTRL */
@@ -411,6 +472,8 @@ static int mt7921_soc_dev_info(struct mt792x_dev *dev, struct sk_buff *skb)
 	if (req->active) {
 		sbss->ap = mt7921_soc_dev(dev)->adding_ap;
 		sbss->privacy = false;
+		sbss->has_ip = false;
+		sbss->lp = false;
 	}
 
 	mt7921_soc_send_activate(dev, idx, req->omac_idx, req->omac_addr, sbss->ap,
@@ -471,6 +534,55 @@ static bool mt7921_soc_beacon(struct mt792x_dev *dev, u8 bss_idx,
 
 	sbss->privacy = privacy;
 	return true;
+}
+
+/*
+ * UNI OFFLOAD with the ARP addresses: the firmware answers ARP requests for
+ * these addresses itself while broadcast frames are filtered (power save).
+ */
+static int mt7921_soc_offload(struct mt792x_dev *dev, struct sk_buff *skb)
+{
+	const struct {
+		u8 bss_idx;
+		u8 pad[3];
+		struct mt76_connac_arpns_tlv arp;
+		__be32 ip[];
+	} __packed *req = (void *)skb->data;
+	struct {
+		u8 bss_idx;
+		u8 count;
+		u8 version;
+		u8 rsv;
+		struct {
+			__be32 ip;
+			__be32 mask;
+		} __packed addr[IEEE80211_BSS_ARP_ADDR_LIST_LEN];
+	} __packed cmd = {};
+	int i, n, ret;
+
+	if (skb->len < sizeof(*req) ||
+	    le16_to_cpu(req->arp.tag) != UNI_OFFLOAD_OFFLOAD_ARP)
+		return 0;
+
+	n = min_t(int, req->arp.ips_num, ARRAY_SIZE(cmd.addr));
+	n = min_t(int, n, (skb->len - sizeof(*req)) / sizeof(__be32));
+
+	if (req->bss_idx >= ARRAY_SIZE(mt7921_soc_dev(dev)->bss))
+		return 0;
+
+	cmd.bss_idx = req->bss_idx;
+	cmd.count = n;
+	cmd.version = 1;
+	for (i = 0; i < n; i++)
+		cmd.addr[i].ip = req->ip[i];
+
+	ret = mt7921_soc_legacy_send(dev, MCU_CE_CMD_LEGACY_SET_IP_ADDRESS, &cmd,
+				     offsetof(typeof(cmd), addr) +
+				     max(n, 1) * sizeof(cmd.addr[0]));
+	mt7921_soc_dev(dev)->bss[req->bss_idx].has_ip = n > 0;
+	mt7921_soc_lp_update(dev, req->bss_idx);
+
+	return ret;
 }
 
 /* UNI BSS_INFO_UPDATE: SET_BSS_INFO with the current state of the BSS */
@@ -549,6 +661,13 @@ static int mt7921_soc_bss_info(struct mt792x_dev *dev, struct sk_buff *skb)
 		mt7921_soc_abort_channel(dev, bss_idx);
 		mt7921_soc_pm_bss(dev, vif, false);
 	}
+
+	if (!was_connected && sbss->connected) {
+		sbss->connected_at = jiffies;
+		mod_delayed_work(system_wq, &mt7921_soc_dev(dev)->lp_work,
+				 MT7921_SOC_LP_DELAY + 1);
+	}
+	mt7921_soc_lp_update(dev, bss_idx);
 
 	mt7921_soc_send_bss_info(dev, vif, sbss);
 
@@ -984,8 +1103,8 @@ bool mt7921_soc_legacy_cmd(struct mt792x_dev *dev, struct sk_buff *skb, int cmd,
 	*ret = 0;
 
 	if (cmd == MCU_CE_CMD(SET_RX_FILTER)) {
-		/* Legacy filter: broadcast and all multicast frames */
-		__le32 filter = cpu_to_le32(0x0c);
+		/* Legacy packet filter instead of the frame filter bits */
+		__le32 filter = cpu_to_le32(mt7921_soc_dev(dev)->rx_filter);
 
 		skb_trim(skb, 0);
 		skb_put_data(skb, &filter, sizeof(filter));
@@ -1044,6 +1163,8 @@ bool mt7921_soc_legacy_cmd(struct mt792x_dev *dev, struct sk_buff *skb, int cmd,
 		*ret = mt7921_soc_sta_rec(dev, skb);
 	else if (cmd == MCU_UNI_CMD(ROC))
 		*ret = mt7921_soc_roc(dev, skb);
+	else if (cmd == MCU_UNI_CMD(OFFLOAD))
+		*ret = mt7921_soc_offload(dev, skb);
 	else
 		/* Offloads, suspend and sniffer settings */
 		dev_dbg(mdev->dev, "Skipping unified command %08x\n", cmd);
@@ -1130,6 +1251,54 @@ static void mt7921_soc_ba_event(struct mt76_dev *mdev, struct sk_buff *skb, bool
 		}
 	}
 	rcu_read_unlock();
+}
+
+/*
+ * Multicast filter: pass only the groups the host listens to, so that
+ * unrelated multicast (mDNS of other hosts) does not wake the host. The
+ * firmware applies the list in its low power mode only (see ps_mdtim). An
+ * access point and long lists fall back to all multicast frames.
+ */
+int mt7921_soc_set_multicast(struct mt792x_dev *dev, struct mt7921_soc_mc_list *mc)
+{
+	struct mt7921_soc_dev *sdev = mt7921_soc_dev(dev);
+	struct mt7921_legacy_mcast_addr *req;
+	bool all = !mc || mc->all || mc->count > LEGACY_MAX_MCAST_ADDR;
+	__le32 filter[17] = {};
+	int i, ret = 0;
+
+	for (i = 0; i < ARRAY_SIZE(sdev->bss); i++)
+		if (sdev->bss[i].active && sdev->bss[i].ap)
+			all = true;
+
+	if (!all) {
+		req = kzalloc_obj(*req, GFP_KERNEL);
+		if (!req)
+			return -ENOMEM;
+
+		req->count = cpu_to_le32(mc->count);
+		memcpy(req->addr, mc->addr, mc->count * ETH_ALEN);
+		for (i = 0; i < ARRAY_SIZE(sdev->bss); i++) {
+			if (!sdev->bss[i].active)
+				continue;
+			req->bss_idx = i;
+			ret = mt7921_soc_legacy_send(dev, MCU_CE_CMD_LEGACY_MAC_MCAST_ADDR,
+						     req, sizeof(*req));
+			if (ret)
+				break;
+		}
+		kfree(req);
+		if (ret)
+			all = true;
+	}
+
+	sdev->rx_filter = LEGACY_RX_FILTER_BROADCAST |
+			  (all ? LEGACY_RX_FILTER_ALL_MULTICAST :
+				 LEGACY_RX_FILTER_MULTICAST);
+	filter[0] = cpu_to_le32(sdev->rx_filter);
+
+	return mt7921_soc_legacy_send(dev, MCU_CE_CMD_LEGACY_SET_RX_FILTER,
+				      filter, sizeof(filter));
 }
 
 /* Returns true if the event has been consumed */

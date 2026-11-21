@@ -18,6 +18,11 @@ struct mt7921_soc_bss {
 	/* Channel request to abort once the BSS does not need it any more */
 	bool abort_pending;
 	u8 abort_token;
+	/* Firmware low power mode, see ps_mdtim */
+	bool ps;
+	bool has_ip;
+	bool lp;
+	unsigned long connected_at;
 };
 
 struct mt7921_soc_dev {
@@ -30,6 +35,17 @@ struct mt7921_soc_dev {
 	/* The interface being added is an access point, DEV_INFO has no type */
 	bool adding_ap;
 	struct completion ap_grant;
+	/* Legacy RX packet filter, see configure_filter */
+	u32 rx_filter;
+	/* Enables the low power mode some time after a connection */
+	struct delayed_work lp_work;
+};
+
+/* Multicast addresses passed from prepare_multicast to configure_filter */
+struct mt7921_soc_mc_list {
+	bool all;
+	int count;
+	u8 addr[][ETH_ALEN];
 };
 
 static inline struct mt7921_soc_dev *mt7921_soc_dev(struct mt792x_dev *dev)
@@ -38,6 +54,8 @@ static inline struct mt7921_soc_dev *mt7921_soc_dev(struct mt792x_dev *dev)
 }
 
 int mt7921_soc_legacy_send(struct mt792x_dev *dev, int id, const void *data, int len);
+int mt7921_soc_set_multicast(struct mt792x_dev *dev, struct mt7921_soc_mc_list *mc);
+void mt7921_soc_lp_work(struct work_struct *work);
 int mt7921_soc_ap_channel(struct mt792x_dev *dev, struct ieee80211_vif *vif);
 bool mt7921_soc_legacy_cmd(struct mt792x_dev *dev, struct sk_buff *skb, int cmd,
 			   int *wait_seq, int *ret);

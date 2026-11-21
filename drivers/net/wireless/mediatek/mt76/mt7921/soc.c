@@ -23,6 +23,7 @@
 #include "../dma.h"
 #include "mcu.h"
 #include "soc.h"
+#include "soc_mcu.h"
 
 #define MT7921_SOC_NVRAM		"mediatek/mt6878-wifi-nvram.bin"
 
@@ -516,13 +517,28 @@ static int mt7921_soc_drv_pmctrl(struct mt792x_dev *dev)
 {
 	struct mt76_phy *mphy = &dev->mt76.phy;
 	struct mt76_connac_pm *pm = &dev->pm;
-	int err;
+	int err, i;
 
 	err = mt7921_soc_drv_own(dev);
 	if (err < 0)
 		return err;
 
-	mt792x_wpdma_reinit_cond(dev);
+	/*
+	 * The WFDMA loses its state in deep sleep. Its reset fails at times
+	 * while the DMA is still busy; the interrupts stay off then and the
+	 * link is dead, so try again and reset the chip as the last resort.
+	 */
+	for (i = 0; i < 5; i++) {
+		if (!mt792x_wpdma_reinit_cond(dev))
+			break;
+		msleep(20);
+	}
+	if (i == 5 && !test_bit(MT76_RESET, &mphy->state)) {
+		dev_err(dev->mt76.dev, "WFDMA not recovered, resetting the chip\n");
+		mt792x_reset(&dev->mt76);
+	} else if (i) {
+		dev_warn(dev->mt76.dev, "WFDMA recovered after %d retries\n", i);
+	}
 	clear_bit(MT76_STATE_PM, &mphy->state);
 
 	pm->stats.last_wake_event = jiffies;
@@ -1359,6 +1375,7 @@ static void mt7921_soc_unregister_device(struct mt792x_dev *dev)
 
 	cancel_work_sync(&dev->init_work);
 	mt76_unregister_device(&dev->mt76);
+	cancel_delayed_work_sync(&to_soc_dev(dev)->lp_work);
 	mt76_for_each_q_rx(&dev->mt76, i)
 		napi_disable(&dev->mt76.napi[i]);
 	cancel_delayed_work_sync(&pm->ps_work);
@@ -1448,6 +1465,51 @@ static int mt7921_soc_start_ap(struct ieee80211_hw *hw, struct ieee80211_vif *vi
 		return ret;
 
 	return mt7921_ops.start_ap(hw, vif, link_conf);
+}
+
+static u64 mt7921_soc_prepare_multicast(struct ieee80211_hw *hw,
+					struct netdev_hw_addr_list *mc_list)
+{
+	int count = netdev_hw_addr_list_count(mc_list);
+	struct mt7921_soc_mc_list *mc;
+	struct netdev_hw_addr *ha;
+	int i = 0;
+
+	if (count > LEGACY_MAX_MCAST_ADDR)
+		count = 0;
+
+	mc = kzalloc(struct_size(mc, addr, count), GFP_ATOMIC);
+	if (!mc)
+		return 0;
+
+	if (count != netdev_hw_addr_list_count(mc_list)) {
+		mc->all = true;
+		return (u64)(unsigned long)mc;
+	}
+
+	netdev_hw_addr_list_for_each(ha, mc_list)
+		memcpy(mc->addr[i++], ha->addr, ETH_ALEN);
+	mc->count = i;
+
+	return (u64)(unsigned long)mc;
+}
+
+static void mt7921_soc_configure_filter(struct ieee80211_hw *hw,
+					unsigned int changed_flags,
+					unsigned int *total_flags, u64 multicast)
+{
+	struct mt7921_soc_mc_list *mc = (void *)(unsigned long)multicast;
+	struct mt792x_dev *dev = mt792x_hw_dev(hw);
+
+	if (*total_flags & FIF_ALLMULTI)
+		mc = NULL;
+
+	mt792x_mutex_acquire(dev);
+	mt7921_soc_set_multicast(dev, mc);
+	mt792x_mutex_release(dev);
+
+	kfree((void *)(unsigned long)multicast);
+	*total_flags &= FIF_ALLMULTI;
 }
 
 static int mt7921_soc_probe(struct platform_device *pdev)
@@ -1553,6 +1615,8 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 	ops->ampdu_action = mt7921_soc_ampdu_action;
 	ops->add_interface = mt7921_soc_add_interface;
 	ops->start_ap = mt7921_soc_start_ap;
+	ops->prepare_multicast = mt7921_soc_prepare_multicast;
+	ops->configure_filter = mt7921_soc_configure_filter;
 
 	mdev = mt76_alloc_device(pdev_dev, sizeof(*sdev), ops, &drv_ops);
 	if (!mdev)
@@ -1562,6 +1626,8 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 	sdev = to_soc_dev(dev);
 	sdev->cs = cs;
 	init_completion(&sdev->ap_grant);
+	INIT_DELAYED_WORK(&sdev->lp_work, mt7921_soc_lp_work);
+	sdev->rx_filter = LEGACY_RX_FILTER_BROADCAST | LEGACY_RX_FILTER_ALL_MULTICAST;
 	platform_set_drvdata(pdev, mdev);
 
 	nvram_name = MT7921_SOC_NVRAM;
