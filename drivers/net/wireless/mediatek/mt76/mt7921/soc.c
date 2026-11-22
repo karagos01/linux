@@ -528,15 +528,20 @@ static int mt7921_soc_drv_pmctrl(struct mt792x_dev *dev)
 	 * is still running here: the generic reset frees the RX buffers
 	 * before it stops the DMA, and a frame coming in meanwhile leaves the
 	 * RX DMA busy for good, the reset fails and the link is dead. Stop the
-	 * DMA and let it finish first; retry if the reset fails anyway.
+	 * DMA and let it finish first, and deliver what it received (often the
+	 * frame that woke us) instead of dropping it; retry if the reset fails
+	 * anyway.
 	 */
-	if (mt792x_dma_need_reinit(dev)) {
+	if (mt792x_dma_need_reinit(dev) &&
+	    (mt76_rr(dev, MT_WFDMA0_GLO_CFG) &
+	     (MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN))) {
 		mt76_clear(dev, MT_WFDMA0_GLO_CFG,
 			   MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN);
 		if (!mt76_poll_msec_tick(dev, MT_WFDMA0_GLO_CFG,
 					 MT_WFDMA0_GLO_CFG_TX_DMA_BUSY |
 					 MT_WFDMA0_GLO_CFG_RX_DMA_BUSY, 0, 100, 1))
 			dev_warn(dev->mt76.dev, "WFDMA still busy before reinit\n");
+		mt76_dma_rx_drain(&dev->mt76);
 	}
 
 	for (i = 0; i < 5; i++) {

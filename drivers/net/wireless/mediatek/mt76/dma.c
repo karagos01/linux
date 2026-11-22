@@ -1095,6 +1095,31 @@ int mt76_dma_rx_poll(struct napi_struct *napi, int budget)
 }
 EXPORT_SYMBOL_GPL(mt76_dma_rx_poll);
 
+/*
+ * Process what the stopped DMA left in the RX queues, so that a reset of the
+ * queues does not drop it.
+ */
+void mt76_dma_rx_drain(struct mt76_dev *dev)
+{
+	int i;
+
+	mt76_for_each_q_rx(dev, i)
+		napi_disable(&dev->napi[i]);
+
+	local_bh_disable();
+	rcu_read_lock();
+	mt76_for_each_q_rx(dev, i) {
+		mt76_dma_rx_process(dev, &dev->q_rx[i], dev->q_rx[i].ndesc);
+		mt76_rx_poll_complete(dev, i, NULL);
+	}
+	rcu_read_unlock();
+	local_bh_enable();
+
+	mt76_for_each_q_rx(dev, i)
+		napi_enable(&dev->napi[i]);
+}
+EXPORT_SYMBOL_GPL(mt76_dma_rx_drain);
+
 static void
 mt76_dma_rx_queue_init(struct mt76_dev *dev, enum mt76_rxq_id qid,
 		       int (*poll)(struct napi_struct *napi, int budget))

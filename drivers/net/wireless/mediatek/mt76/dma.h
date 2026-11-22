@@ -164,6 +164,7 @@ enum mt76_dma_wed_ind_reason {
 };
 
 int mt76_dma_rx_poll(struct napi_struct *napi, int budget);
+void mt76_dma_rx_drain(struct mt76_dev *dev);
 void mt76_dma_attach(struct mt76_dev *dev);
 void mt76_dma_cleanup(struct mt76_dev *dev);
 int mt76_dma_rx_fill(struct mt76_dev *dev, struct mt76_queue *q,
