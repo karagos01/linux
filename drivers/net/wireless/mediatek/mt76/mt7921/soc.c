@@ -524,21 +524,30 @@ static int mt7921_soc_drv_pmctrl(struct mt792x_dev *dev)
 		return err;
 
 	/*
-	 * The WFDMA loses its state in deep sleep. Its reset fails at times
-	 * while the DMA is still busy; the interrupts stay off then and the
-	 * link is dead, so try again and reset the chip as the last resort.
+	 * Each deep sleep needs a WFDMA reinit, but unlike on PCIe the DMA
+	 * is still running here: the generic reset frees the RX buffers
+	 * before it stops the DMA, and a frame coming in meanwhile leaves the
+	 * RX DMA busy for good, the reset fails and the link is dead. Stop the
+	 * DMA and let it finish first; retry if the reset fails anyway.
 	 */
+	if (mt792x_dma_need_reinit(dev)) {
+		mt76_clear(dev, MT_WFDMA0_GLO_CFG,
+			   MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN);
+		if (!mt76_poll_msec_tick(dev, MT_WFDMA0_GLO_CFG,
+					 MT_WFDMA0_GLO_CFG_TX_DMA_BUSY |
+					 MT_WFDMA0_GLO_CFG_RX_DMA_BUSY, 0, 100, 1))
+			dev_warn(dev->mt76.dev, "WFDMA still busy before reinit\n");
+	}
+
 	for (i = 0; i < 5; i++) {
 		if (!mt792x_wpdma_reinit_cond(dev))
 			break;
 		msleep(20);
 	}
-	if (i == 5 && !test_bit(MT76_RESET, &mphy->state)) {
-		dev_err(dev->mt76.dev, "WFDMA not recovered, resetting the chip\n");
-		mt792x_reset(&dev->mt76);
-	} else if (i) {
+	if (i == 5)
+		dev_err(dev->mt76.dev, "WFDMA not recovered, WiFi is down\n");
+	else if (i)
 		dev_warn(dev->mt76.dev, "WFDMA recovered after %d retries\n", i);
-	}
 	clear_bit(MT76_STATE_PM, &mphy->state);
 
 	pm->stats.last_wake_event = jiffies;
