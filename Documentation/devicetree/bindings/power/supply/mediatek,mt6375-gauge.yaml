@@ -28,6 +28,10 @@ properties:
 
   monitored-battery: true
 
+  shunt-resistor-micro-ohms:
+    description: Battery current sense resistor of the gauge.
+    default: 1000
+
 required:
   - compatible
   - io-channels
