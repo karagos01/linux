@@ -40,6 +40,12 @@
 #define MT6375_FGADC_CHARGE_LSB_NAH	85
 
 /*
+ * The charge and current LSBs hold for a 1 mOhm sense resistor (the gain
+ * error selection the bootloader programs); scale them for the one mounted.
+ */
+#define MT6375_GAUGE_DEFAULT_SHUNT_UOHM	1000
+
+/*
  * The accumulator is latched for a consistent read: set SW_READ_PRE, wait for
  * LATCHDATA_ST, read FG_CAR, then release with SW_CLEAR.
  */
@@ -75,6 +81,7 @@ struct mt6375_gauge_data {
 	struct power_supply_battery_info *info;
 	struct power_supply *chg_psy;
 	struct thermal_zone_device *tz;
+	u32 shunt_uohm;
 
 	/* Serialises the coulomb-counter latch-read-release sequence. */
 	struct mutex car_lock;
@@ -271,7 +278,8 @@ static int mt6375_gauge_read_charge(struct mt6375_gauge_data *ddata, s64 *uah)
 	else
 		lsb = mag;				/* charging */
 
-	*uah = div_s64(lsb * MT6375_FGADC_CHARGE_LSB_NAH, 1000);
+	*uah = div_s64(lsb * MT6375_FGADC_CHARGE_LSB_NAH *
+		       MT6375_GAUGE_DEFAULT_SHUNT_UOHM, 1000 * ddata->shunt_uohm);
 	return 0;
 }
 
@@ -300,7 +308,8 @@ static int mt6375_gauge_get_current(struct mt6375_gauge_data *ddata, int *uA)
 	if (raw > S16_MAX)
 		raw -= U16_MAX;
 
-	*uA = div_s64((s64)raw * MT6375_FGADC_CUR_LSB_NA, 1000);
+	*uA = div_s64((s64)raw * MT6375_FGADC_CUR_LSB_NA *
+		      MT6375_GAUGE_DEFAULT_SHUNT_UOHM, 1000 * ddata->shunt_uohm);
 	return 0;
 }
 
@@ -491,6 +500,12 @@ static int mt6375_gauge_probe(struct platform_device *pdev)
 	ddata->regmap = dev_get_regmap(dev->parent, NULL);
 	if (!ddata->regmap)
 		return dev_err_probe(dev, -ENODEV, "Failed to get regmap\n");
+
+	ddata->shunt_uohm = MT6375_GAUGE_DEFAULT_SHUNT_UOHM;
+	device_property_read_u32(dev, "shunt-resistor-micro-ohms",
+				 &ddata->shunt_uohm);
+	if (!ddata->shunt_uohm)
+		return dev_err_probe(dev, -EINVAL, "Invalid sense resistor\n");
 
 	ddata->vbat_chan = devm_iio_channel_get(dev, "vbat");
 	if (IS_ERR(ddata->vbat_chan))
