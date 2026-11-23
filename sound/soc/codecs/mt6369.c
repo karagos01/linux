@@ -34,6 +34,7 @@ struct mt6369_priv {
 	bool dl_active;		/* playback (downlink) stream powered */
 	bool spk_on;		/* lineout analog output stage powered */
 	bool rcv_on;		/* receiver analog output stage powered */
+	bool mic_muted;		/* "Mic Capture Switch" off */
 	unsigned int lineout_gain;	/* LOL analog gain (ANA_CON129), 0..0x12 */
 	unsigned int rcv_gain;	/* receiver analog gain (ANA_CON133), 0..0x12 */
 };
@@ -401,6 +402,16 @@ static void mt6369_mtkaif_tx_enable(struct regmap *regmap)
 	regmap_update_bits(regmap, MT6369_AFE_AUD_PAD_TOP, 0xff, 0x13);
 }
 
+#define MT6369_PGA_INPUT_MASK		0xc0
+#define MT6369_PGA_L_ON			0x41	/* preamp on, input AIN0 */
+#define MT6369_PGA_R_ON			0xc1	/* preamp on, input AIN2 */
+
+/* The preamp input, or none while "Mic Capture Switch" is off */
+static unsigned int mt6369_pga_val(struct mt6369_priv *priv, unsigned int on)
+{
+	return priv->mic_muted ? on & ~MT6369_PGA_INPUT_MASK : on;
+}
+
 /*
  * Uplink (microphone) capture path. The whole analog-mic -> ADC -> AFE-UL-SRC
  * -> MTKAIF-TX bring-up is emitted here in the exact order captured from a
@@ -464,11 +475,12 @@ static int mt_mic_event(struct snd_soc_dapm_widget *w,
 		/*
 		 * mic preamp (PGA) and ADC, both channels. The ADC registers
 		 * carry a static bit2 (0x04) in addition to the power-up bits:
-		 * stock reads 0x54, and clearing bit2 (plain 0x50) leaves the
-		 * converter muted.
+		 * stock reads 0x54; plain 0x50 lowers the level by about 24 dB.
 		 */
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON0, 0x41);
-		regmap_write(regmap, MT6369_AUDENC_ANA_CON2, 0xc1);
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON0,
+			     mt6369_pga_val(priv, MT6369_PGA_L_ON));
+		regmap_write(regmap, MT6369_AUDENC_ANA_CON2,
+			     mt6369_pga_val(priv, MT6369_PGA_R_ON));
 		regmap_write(regmap, MT6369_AUDENC_ANA_CON1, 0x54);
 		regmap_write(regmap, MT6369_AUDENC_ANA_CON3, 0x54);
 		/* MTKAIF TX link (protocol 2) */
@@ -826,7 +838,44 @@ static int mt6369_put_out_gain(struct snd_kcontrol *kcontrol,
 	return 1;
 }
 
+/*
+ * Mute the microphone in the codec, so that it also silences the paths that
+ * bypass the sound server, such as the modem's call uplink.
+ */
+static int mt6369_get_mic_switch(struct snd_kcontrol *kcontrol,
+				 struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+
+	ucontrol->value.integer.value[0] = !priv->mic_muted;
+	return 0;
+}
+
+static int mt6369_put_mic_switch(struct snd_kcontrol *kcontrol,
+				 struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	bool muted = !ucontrol->value.integer.value[0];
+
+	if (muted == priv->mic_muted)
+		return 0;
+
+	priv->mic_muted = muted;
+	if (priv->ul_active) {
+		regmap_write(priv->regmap, MT6369_AUDENC_ANA_CON0,
+			     mt6369_pga_val(priv, MT6369_PGA_L_ON));
+		regmap_write(priv->regmap, MT6369_AUDENC_ANA_CON2,
+			     mt6369_pga_val(priv, MT6369_PGA_R_ON));
+	}
+
+	return 1;
+}
+
 static const struct snd_kcontrol_new mt6369_snd_controls[] = {
+	SOC_SINGLE_BOOL_EXT("Mic Capture Switch", 0, mt6369_get_mic_switch,
+			    mt6369_put_mic_switch),
 	SOC_SINGLE_EXT_TLV("Lineout Playback Volume", MT6369_AUDDEC_ANA_CON129, 0,
 			   MT6369_OUT_GAIN_MAX, 0, mt6369_get_out_gain,
 			   mt6369_put_out_gain, out_gain_tlv),
