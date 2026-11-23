@@ -957,6 +957,12 @@
 			io-channels = <&mt6375_adc MT6375_ADC_VBAT>;
 			io-channel-names = "vbat";
 			monitored-battery = <&battery>;
+			/*
+			 * The vendor DT says 1 mOhm, but the gauge then counts
+			 * exactly twice what the board's SH366100 gauge does,
+			 * whose learned capacity matches the cell's.
+			 */
+			shunt-resistor-micro-ohms = <2000>;
 		};
 
 		tcpc {
