@@ -1860,6 +1860,18 @@ config REGULATOR_VQMMC_IPQ4019
 	  This driver provides support for the VQMMC LDO I/0
 	  voltage regulator of the IPQ4019 SD/EMMC controller.
 
+config REGULATOR_WL28681
+	tristate "Will Semiconductor WL28681 camera PMIC"
+	depends on I2C && OF
+	select REGMAP_I2C
+	help
+	  This driver supports the Will Semiconductor WL28681, an I2C
+	  controlled PMIC with seven LDOs that powers the camera modules
+	  of phones such as the Volla Phone Plinius. Each LDO can be
+	  switched and set in 8 mV steps.
+
+	  Say M here to build it as a module called wl28681-regulator.
+
 config REGULATOR_WM831X
 	tristate "Wolfson Microelectronics WM831x PMIC regulators"
 	depends on MFD_WM831X

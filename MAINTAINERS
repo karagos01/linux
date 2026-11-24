@@ -29118,6 +29118,13 @@ L:	linux-input@vger.kernel.org
 S:	Maintained
 F:	drivers/hid/hid-wiimote*
 
+WILL SEMICONDUCTOR WL28681 REGULATOR DRIVER
+M:	Jan Benedikt <karagos01@gmail.com>
+L:	linux-kernel@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/regulator/willsemi,wl28681.yaml
+F:	drivers/regulator/wl28681-regulator.c
+
 WILOCITY WIL6210 WIRELESS DRIVER
 L:	linux-wireless@vger.kernel.org
 S:	Orphan
