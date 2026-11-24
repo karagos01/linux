@@ -524,9 +524,13 @@ static const struct iio_chan_spec scp_sar_channels[] = {
 	IIO_CHAN_SOFT_TIMESTAMP(3),
 };
 
-/* orientation = Euler angles (azimuth->yaw, pitch, roll), in degrees */
+/*
+ * orientation = Euler angles (azimuth, pitch, roll), in degrees. The azimuth
+ * is the tilt-compensated heading from magnetic north, which is what
+ * in_rot_from_north_magnetic_tilt_comp carries, so a compass can use it.
+ */
 static const struct iio_chan_spec scp_orient_channels[] = {
-	SCP_AXIS_CHAN(IIO_ROT, YAW, 0),
+	SCP_AXIS_CHAN(IIO_ROT, NORTH_MAGN_TILT_COMP, 0),
 	SCP_AXIS_CHAN(IIO_ROT, PITCH, 1),
 	SCP_AXIS_CHAN(IIO_ROT, ROLL, 2),
 	IIO_CHAN_SOFT_TIMESTAMP(3),
