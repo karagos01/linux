@@ -166,6 +166,20 @@
 		reg = <0x0 0x40000000 0x3 0x0>;
 	};
 
+	/*
+	 * Switched 1.2 V camera supply; the sensors with a 1.2 V core supply
+	 * from the WL28681 do not answer without it, so it is modelled as the
+	 * input of the PMIC's low-voltage LDOs.
+	 */
+	cam_dvdd_in: regulator-cam-dvdd-in {
+		compatible = "regulator-fixed";
+		regulator-name = "cam-dvdd-in";
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
+		gpio = <&pio 37 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
 	reserved-memory {
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -1056,6 +1070,63 @@
 		compatible = "awinic,aw87565";
 		reg = <0x5b>;
 		sound-name-prefix = "Spk R";
+	};
+
+	/*
+	 * Camera module supplies: LDO1/2 the 1.2 V sensor cores, the 2.8 V
+	 * outputs the sensors' analog supplies and the autofocus actuator,
+	 * LDO6 the shared I/O supply. LDO3-7 step from 1.372 V in 8 mV, so
+	 * 1.8 V and 2.8 V come out as 1.804 V and 2.804 V.
+	 */
+	camera_pmic: pmic@35 {
+		compatible = "willsemi,wl28681";
+		reg = <0x35>;
+		enable-gpios = <&pio 183 GPIO_ACTIVE_HIGH>;
+		vin12-supply = <&cam_dvdd_in>;
+
+		regulators {
+			cam1_dvdd: ldo1 {
+				regulator-name = "cam1-dvdd";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+			};
+
+			cam2_dvdd: ldo2 {
+				regulator-name = "cam2-dvdd";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+			};
+
+			cam1_avdd: ldo3 {
+				regulator-name = "cam1-avdd";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2808000>;
+			};
+
+			cam2_avdd: ldo4 {
+				regulator-name = "cam2-avdd";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2808000>;
+			};
+
+			cam3_avdd: ldo5 {
+				regulator-name = "cam3-avdd";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2808000>;
+			};
+
+			cam_dovdd: ldo6 {
+				regulator-name = "cam-dovdd";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1808000>;
+			};
+
+			cam0_afvdd: ldo7 {
+				regulator-name = "cam0-afvdd";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2808000>;
+			};
+		};
 	};
 };
 
