@@ -258,6 +258,14 @@
 		clock-output-names = "clk32k";
 	};
 
+	/* on-chip ULPOSC, the parent of the topckgen osc_* dividers */
+	ulposc: clock-260m {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <260000000>;
+		clock-output-names = "ulposc";
+	};
+
 	pmu-a55 {
 		compatible = "arm,cortex-a55-pmu";
 		interrupt-parent = <&gic>;
