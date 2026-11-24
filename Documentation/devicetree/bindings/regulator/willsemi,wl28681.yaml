@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/regulator/willsemi,wl28681.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Will Semiconductor WL28681 camera PMIC
+
+maintainers:
+  - Jan Benedikt <karagos01@gmail.com>
+
+description:
+  The WL28681 is an I2C controlled power management IC for camera modules
+  with seven low-dropout regulators, programmable in 8 mV steps. LDO1 and
+  LDO2 are low-voltage outputs for digital cores (for example 1.2 V), LDO3
+  to LDO7 high-voltage outputs for analog, I/O and actuator supplies (for
+  example 1.8 V and 2.8 V).
+
+properties:
+  compatible:
+    const: willsemi,wl28681
+
+  reg:
+    maxItems: 1
+
+  enable-gpios:
+    maxItems: 1
+    description:
+      GPIO connected to the chip enable (reset) pin, active high. The chip
+      does not answer on I2C while it is held low.
+
+  vin12-supply:
+    description: Input supply of LDO1 and LDO2.
+
+  regulators:
+    type: object
+    additionalProperties: false
+
+    patternProperties:
+      "^ldo[1-7]$":
+        type: object
+        $ref: regulator.yaml#
+        unevaluatedProperties: false
+
+required:
+  - compatible
+  - reg
+  - regulators
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        pmic@35 {
+            compatible = "willsemi,wl28681";
+            reg = <0x35>;
+            enable-gpios = <&pio 183 GPIO_ACTIVE_HIGH>;
+
+            regulators {
+                ldo2 {
+                    regulator-name = "cam2-dvdd";
+                    regulator-min-microvolt = <1200000>;
+                    regulator-max-microvolt = <1200000>;
+                };
+
+                ldo6 {
+                    regulator-name = "cam-dovdd";
+                    regulator-min-microvolt = <1800000>;
+                    regulator-max-microvolt = <1808000>;
+                };
+            };
+        };
+    };
