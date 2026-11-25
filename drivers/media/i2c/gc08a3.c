@@ -58,6 +58,7 @@
 #define GC08A3_DEFAULT_CLK_FREQ (24 * HZ_PER_MHZ)
 #define GC08A3_MBUS_CODE MEDIA_BUS_FMT_SRGGB10_1X10
 #define GC08A3_DATA_LANES 4
+#define GC08A3_DATA_LANES_2 2
 
 #define GC08A3_RGB_DEPTH 10
 
@@ -71,6 +72,11 @@ static const char *const gc08a3_test_pattern_menu[] = {
 static const s64 gc08a3_link_freq_menu_items[] = {
 	(336 * HZ_PER_MHZ),
 	(207 * HZ_PER_MHZ),
+};
+
+/* two lanes carry the same pixel rate at twice the bit rate */
+static const s64 gc08a3_link_freq_menu_items_2lane[] = {
+	(672 * HZ_PER_MHZ),
 };
 
 static const char *const gc08a3_supply_name[] = {
@@ -100,6 +106,11 @@ struct gc08a3 {
 	struct regmap *regmap;
 	unsigned long link_freq_bitmap;
 	const struct gc08a3_mode *cur_mode;
+
+	unsigned int lanes;
+	unsigned int num_modes;
+	const s64 *link_freqs;
+	unsigned int num_link_freqs;
 };
 
 struct gc08a3_reg_list {
@@ -264,6 +275,26 @@ static const struct cci_reg_sequence mode_1920x1080[] = {
 	{ CCI_REG8(0x0a67), 0x00 },
 	{ CCI_REG8(0x0084), 0x10 },
 	{ CCI_REG8(0x0102), 0x09 },
+};
+
+/*
+ * Two-lane MIPI output of the 3264x2448 mode, applied on top of the
+ * four-lane tables: doubled MIPI clock, lane count and HS timing.
+ */
+static const struct cci_reg_sequence mode_3264x2448_2lane[] = {
+	{ CCI_REG8(0x0334), 0xc0 },
+	{ CCI_REG8(0x0114), 0x01 },
+	{ CCI_REG8(0x0180), 0x67 },
+	{ CCI_REG8(0x0181), 0x30 },
+	{ CCI_REG8(0x0115), 0x10 },
+	{ CCI_REG8(0x0121), 0x0b },
+	{ CCI_REG8(0x0122), 0x0d },
+	{ CCI_REG8(0x0123), 0x2f },
+	{ CCI_REG8(0x0125), 0x12 },
+	{ CCI_REG8(0x0126), 0x0f },
+	{ CCI_REG8(0x0129), 0x0c },
+	{ CCI_REG8(0x012a), 0x13 },
+	{ CCI_REG8(0x012b), 0x0f },
 };
 
 static const struct cci_reg_sequence mode_table_common[] = {
@@ -641,10 +672,12 @@ static int gc08a3_enum_frame_size(struct v4l2_subdev *subdev,
 				  struct v4l2_subdev_state *sd_state,
 				  struct v4l2_subdev_frame_size_enum *fse)
 {
+	struct gc08a3 *gc08a3 = to_gc08a3(subdev);
+
 	if (fse->code != GC08A3_MBUS_CODE)
 		return -EINVAL;
 
-	if (fse->index >= ARRAY_SIZE(gc08a3_modes))
+	if (fse->index >= gc08a3->num_modes)
 		return -EINVAL;
 
 	fse->min_width = gc08a3_modes[fse->index].width;
@@ -713,7 +746,7 @@ static int gc08a3_set_format(struct v4l2_subdev *sd,
 	struct v4l2_rect *crop;
 	const struct gc08a3_mode *mode;
 
-	mode = v4l2_find_nearest_size(gc08a3_modes, ARRAY_SIZE(gc08a3_modes),
+	mode = v4l2_find_nearest_size(gc08a3_modes, gc08a3->num_modes,
 				      width, height, fmt->format.width,
 				      fmt->format.height);
 
@@ -938,6 +971,14 @@ static int gc08a3_start_streaming(struct gc08a3 *gc08a3)
 	if (ret < 0)
 		goto err_rpm_put;
 
+	if (gc08a3->lanes == GC08A3_DATA_LANES_2) {
+		ret = cci_multi_reg_write(gc08a3->regmap, mode_3264x2448_2lane,
+					  ARRAY_SIZE(mode_3264x2448_2lane),
+					  NULL);
+		if (ret < 0)
+			goto err_rpm_put;
+	}
+
 	ret = __v4l2_ctrl_handler_setup(&gc08a3->ctrls);
 	if (ret < 0) {
 		dev_err(gc08a3->dev, "could not sync v4l2 controls\n");
@@ -1042,10 +1083,30 @@ static int gc08a3_parse_fwnode(struct gc08a3 *gc08a3)
 		goto done;
 	}
 
+	gc08a3->lanes = bus_cfg.bus.mipi_csi2.num_data_lanes;
+	switch (gc08a3->lanes) {
+	case GC08A3_DATA_LANES:
+		gc08a3->num_modes = ARRAY_SIZE(gc08a3_modes);
+		gc08a3->link_freqs = gc08a3_link_freq_menu_items;
+		gc08a3->num_link_freqs = ARRAY_SIZE(gc08a3_link_freq_menu_items);
+		break;
+	case GC08A3_DATA_LANES_2:
+		/* only the full resolution mode is known for two lanes */
+		gc08a3->num_modes = 1;
+		gc08a3->link_freqs = gc08a3_link_freq_menu_items_2lane;
+		gc08a3->num_link_freqs =
+			ARRAY_SIZE(gc08a3_link_freq_menu_items_2lane);
+		break;
+	default:
+		ret = dev_err_probe(dev, -EINVAL, "%u data lanes unsupported\n",
+				    gc08a3->lanes);
+		goto done;
+	}
+
 	ret = v4l2_link_freq_to_bitmap(dev, bus_cfg.link_frequencies,
 				       bus_cfg.nr_of_link_frequencies,
-				       gc08a3_link_freq_menu_items,
-				       ARRAY_SIZE(gc08a3_link_freq_menu_items),
+				       gc08a3->link_freqs,
+				       gc08a3->num_link_freqs,
 				       &gc08a3->link_freq_bitmap);
 	if (ret)
 		goto done;
@@ -1056,10 +1117,9 @@ done:
 	return ret;
 }
 
-static u64 gc08a3_to_pixel_rate(u32 f_index)
+static u64 gc08a3_to_pixel_rate(struct gc08a3 *gc08a3, u32 f_index)
 {
-	u64 pixel_rate =
-		gc08a3_link_freq_menu_items[f_index] * 2 * GC08A3_DATA_LANES;
+	u64 pixel_rate = gc08a3->link_freqs[f_index] * 2 * gc08a3->lanes;
 
 	return div_u64(pixel_rate, GC08A3_RGB_DEPTH);
 }
@@ -1089,9 +1149,9 @@ static int gc08a3_init_controls(struct gc08a3 *gc08a3)
 	v4l2_ctrl_new_int_menu(ctrl_hdlr,
 			       &gc08a3_ctrl_ops,
 			       V4L2_CID_LINK_FREQ,
-			       ARRAY_SIZE(gc08a3_link_freq_menu_items) - 1,
+			       gc08a3->num_link_freqs - 1,
 			       0,
-			       gc08a3_link_freq_menu_items);
+			       gc08a3->link_freqs);
 	if (gc08a3->link_freq)
 		gc08a3->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
@@ -1099,9 +1159,9 @@ static int gc08a3_init_controls(struct gc08a3 *gc08a3)
 		v4l2_ctrl_new_std(ctrl_hdlr,
 				  &gc08a3_ctrl_ops,
 				  V4L2_CID_PIXEL_RATE, 0,
-				  gc08a3_to_pixel_rate(0),
+				  gc08a3_to_pixel_rate(gc08a3, 0),
 				  1,
-				  gc08a3_to_pixel_rate(0));
+				  gc08a3_to_pixel_rate(gc08a3, 0));
 
 	gc08a3->vblank =
 		v4l2_ctrl_new_std(ctrl_hdlr,
