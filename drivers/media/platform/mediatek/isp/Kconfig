@@ -14,3 +14,15 @@ config VIDEO_MTK_ISP7X_SENINF
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called mtk-seninf.
+
+config VIDEO_MTK_ISP7X_CAMSV
+	tristate "MediaTek ISP7.x CAMSV raw capture"
+	depends on VIDEO_MTK_ISP7X_SENINF
+	select VIDEOBUF2_DMA_CONTIG
+	help
+	  Support for the CAMSV capture units of MediaTek ISP7.x camera
+	  systems, such as the one in MT6878. CAMSV writes the raw Bayer
+	  frames received by seninf to memory without processing them.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called mtk-camsv.
