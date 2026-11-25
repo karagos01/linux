@@ -723,6 +723,29 @@ static const struct scp_sensor_desc scp_sensor_table[] = {
 #define SCP_NR_SENSORS ARRAY_SIZE(scp_sensor_table)
 
 /*
+ * The accelerometer/gyroscope chip reports in a frame rotated by 180 degrees
+ * around Z relative to the display: held upright the phone reads -1 g on Y
+ * instead of the +1 g the IIO mount-matrix convention expects, so the display
+ * auto-rotation ends up upside down. Rotate the samples of that chip, and of
+ * the SCP sensors fused from it, back into the display frame by negating X
+ * and Y (and the X/Y words of the uncalibrated bias).
+ */
+static bool scp_sensor_rotated(u8 type)
+{
+	switch (type) {
+	case SCP_SENSOR_TYPE_ACCEL:
+	case SCP_SENSOR_TYPE_UNCAL_ACCEL:
+	case SCP_SENSOR_TYPE_GRAVITY:
+	case SCP_SENSOR_TYPE_LINEAR_ACCEL:
+	case SCP_SENSOR_TYPE_GYRO:
+	case SCP_SENSOR_TYPE_UNCAL_GYRO:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/*
  * A quaternion channel returns all four components from one read; every other
  * channel returns a single value. read_raw_multi shadows read_raw in the IIO
  * core, so all channels are served here.
@@ -1304,6 +1327,13 @@ static void scp_drain_data_work(struct work_struct *work)
 			continue;
 		}
 		nv = s->desc->nvals;
+
+		if (scp_sensor_rotated(s->desc->type)) {
+			rec.value[0] = -rec.value[0];
+			rec.value[1] = -rec.value[1];
+			rec.value[3] = -rec.value[3];
+			rec.value[4] = -rec.value[4];
+		}
 
 		/*
 		 * Cache the whole record (all six value words) so sysfs reads
