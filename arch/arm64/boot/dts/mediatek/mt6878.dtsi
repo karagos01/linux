@@ -1186,6 +1186,71 @@
 			#power-domain-cells = <0>;
 		};
 
+		camsys_main: clock-controller@1a000000 {
+			compatible = "mediatek,mt6878-camsys-main";
+			reg = <0x1a000000 0x1000>;
+			#clock-cells = <1>;
+		};
+
+		seninf: seninf@1a00e000 {
+			compatible = "mediatek,mt6878-seninf-core";
+			reg = <0x1a00e000 0x18000>,
+			      <0x11c80000 0x30000>;
+			reg-names = "base", "ana-rx";
+			interrupts = <GIC_SPI 152 IRQ_TYPE_LEVEL_HIGH 0>;
+			power-domains = <&spm MT6878_POWER_DOMAIN_CAM_MAIN>,
+					<&spm MT6878_POWER_DOMAIN_CSI_RX>;
+			clocks = <&camsys_main CLK_CAM_MAIN_SENINF>,
+				 <&camsys_main CLK_CAM_MAIN_CAM>,
+				 <&camsys_main CLK_CAM_MAIN_CAMTG>,
+				 <&topckgen CLK_TOP_SENINF_SEL>,
+				 <&topckgen CLK_TOP_SENINF1_SEL>,
+				 <&topckgen CLK_TOP_SENINF2_SEL>,
+				 <&topckgen CLK_TOP_SENINF3_SEL>,
+				 <&topckgen CLK_TOP_CAMTM_SEL>;
+			clock-names = "cam-seninf", "cam-cam", "cam-camtg",
+				      "seninf0", "seninf1", "seninf2", "seninf3",
+				      "camtm";
+			/* 312 MHz, the lowest seninf operating point */
+			assigned-clocks = <&topckgen CLK_TOP_SENINF_SEL>,
+					  <&topckgen CLK_TOP_SENINF1_SEL>,
+					  <&topckgen CLK_TOP_SENINF2_SEL>,
+					  <&topckgen CLK_TOP_SENINF3_SEL>;
+			assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL_D4_D2>,
+						 <&topckgen CLK_TOP_UNIVPLL_D4_D2>,
+						 <&topckgen CLK_TOP_UNIVPLL_D4_D2>,
+						 <&topckgen CLK_TOP_UNIVPLL_D4_D2>;
+			status = "disabled";
+		};
+
+		camsv4: camsv@1a104000 {
+			compatible = "mediatek,mt6878-camsv";
+			reg = <0x1a104000 0x1000>,
+			      <0x1a10c000 0x1000>,
+			      <0x1a114000 0x1000>,
+			      <0x1a124000 0x1000>,
+			      <0x1a000000 0x1000>;
+			reg-names = "base", "inner", "dma", "scq", "camsys";
+			interrupts = <GIC_SPI 663 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 664 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 665 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "done", "err", "sof";
+			power-domains = <&spm MT6878_POWER_DOMAIN_CAM_MAIN>;
+			clocks = <&camsys_main CLK_CAM_MAIN_CAM>,
+				 <&camsys_main CLK_CAM_MAIN_LARB29>,
+				 <&camsys_main CLK_CAM_MAIN_CAMSV_TOP>,
+				 <&camsys_main CLK_CAM_MAIN_CAM2MM0_GALS>,
+				 <&camsys_main CLK_CAM_MAIN_CAM2MM1_GALS>,
+				 <&camsys_main CLK_CAM_MAIN_CAMSV_E_CON_1>,
+				 <&topckgen CLK_TOP_CAM_SEL>,
+				 <&topckgen CLK_TOP_CAMTM_SEL>;
+			clock-names = "cam", "larb", "camsv-top", "gals0",
+				      "gals1", "camsv", "top-cam", "top-camtm";
+			mediatek,camsv-id = <4>;
+			mediatek,cammux-id = <0x20>;
+			status = "disabled";
+		};
+
 		disp_iommu: iommu@1e802000 {
 			compatible = "mediatek,mt6878-disp-iommu";
 			reg = <0x1e802000 0x1000>;
@@ -1279,6 +1344,11 @@
 					#power-domain-cells = <0>;
 				};
 
+				power-domain@MT6878_POWER_DOMAIN_CSI_RX {
+					reg = <MT6878_POWER_DOMAIN_CSI_RX>;
+					#power-domain-cells = <0>;
+				};
+
 				power-domain@MT6878_POWER_DOMAIN_SSUSB {
 					reg = <MT6878_POWER_DOMAIN_SSUSB>;
 					mediatek,infracfg = <&infracfg_ao>;
@@ -1306,6 +1376,36 @@
 					mediatek,infracfg = <&infracfg_ao>;
 					power-domains = <&hwv_spm MT6878_HWV_POWER_DOMAIN_MM_INFRA>;
 					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT6878_POWER_DOMAIN_CAM_VCORE {
+					reg = <MT6878_POWER_DOMAIN_CAM_VCORE>;
+					mediatek,infracfg = <&infracfg_ao>;
+					power-domains = <&hwv_spm MT6878_HWV_POWER_DOMAIN_MM_INFRA>;
+					#address-cells = <1>;
+					#size-cells = <0>;
+					#power-domain-cells = <0>;
+
+					power-domain@MT6878_POWER_DOMAIN_CAM_MAIN {
+						reg = <MT6878_POWER_DOMAIN_CAM_MAIN>;
+						/*
+						 * The GALS bridges to the multimedia bus
+						 * have to run while the bus protection
+						 * handshakes, the local arbiters while
+						 * the SRAM powers up.
+						 */
+						clocks = <&topckgen CLK_TOP_CAM_SEL>,
+							 <&camsys_main CLK_CAM_MAIN_CAM2MM0_GALS>,
+							 <&camsys_main CLK_CAM_MAIN_CAM2MM1_GALS>,
+							 <&camsys_main CLK_CAM_MAIN_LARB13>,
+							 <&camsys_main CLK_CAM_MAIN_LARB14>,
+							 <&camsys_main CLK_CAM_MAIN_LARB29>,
+							 <&camsys_main CLK_CAM_MAIN_CAM_MRAW>;
+						clock-names = "cam", "cam-0", "cam-1", "cam-2",
+							      "cam-3", "cam-4", "cam-5";
+						mediatek,infracfg = <&infracfg_ao>;
+						#power-domain-cells = <0>;
+					};
 				};
 
 				power-domain@MT6878_POWER_DOMAIN_MM_PROC {
