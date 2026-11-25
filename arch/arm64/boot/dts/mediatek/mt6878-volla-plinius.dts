@@ -185,6 +185,38 @@
 		#size-cells = <2>;
 		ranges;
 
+		/*
+		 * The eFuse block is secure-only. The bootloader copies the
+		 * eFuse words LK passes on (/chosen/atag,devinfo) here.
+		 */
+		devinfo: nvram@4807f000 {
+			compatible = "mediatek,mt6878-devinfo", "nvmem-rmem";
+			reg = <0x00 0x4807f000 0x00 0x1000>;
+			no-map;
+
+			nvmem-layout {
+				compatible = "fixed-layout";
+				#address-cells = <1>;
+				#size-cells = <1>;
+
+				csi_efuse0: csi-data@320 {
+					reg = <0x320 0x4>;
+				};
+
+				csi_efuse1: csi-data@324 {
+					reg = <0x324 0x4>;
+				};
+
+				csi_efuse2: csi-data@328 {
+					reg = <0x328 0x4>;
+				};
+
+				csi_efuse3: csi-data@32c {
+					reg = <0x32c 0x4>;
+				};
+			};
+		};
+
 		aee-debug-kinfo@48080000 {
 			reg = <0x0 0x48080000 0x0 0x00010000>;
 			no-map;
@@ -1393,6 +1425,123 @@
 	port {
 		dsi0_out: endpoint {
 			remote-endpoint = <&panel_in>;
+		};
+	};
+};
+
+/* Front GC32E1 on CSI port 1, rear GC08A3 on half port 3A */
+&seninf {
+	status = "okay";
+
+	seninf_csi3a: csi-port-3a {
+		compatible = "mediatek,mt6878-seninf";
+		csi-port = "3A";
+		nvmem-cells = <&csi_efuse3>;
+		nvmem-cell-names = "csi-efuse";
+
+		port {
+			seninf_csi3a_in: endpoint {
+				remote-endpoint = <&gc08a3_out>;
+				data-lanes = <1 2>;
+			};
+		};
+	};
+
+	seninf_csi1: csi-port-1 {
+		compatible = "mediatek,mt6878-seninf";
+		csi-port = "1";
+		hs-trail-parameter = <0x20>;
+		nvmem-cells = <&csi_efuse1>;
+		nvmem-cell-names = "csi-efuse";
+
+		port {
+			seninf_csi1_in: endpoint {
+				remote-endpoint = <&gc32e1_out>;
+				data-lanes = <1 2 3 4>;
+			};
+		};
+	};
+};
+
+&camsv4 {
+	mediatek,seninf = <&seninf_csi1>, <&seninf_csi3a>;
+	status = "okay";
+};
+
+&i2c4 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	clock-frequency = <400000>;
+	status = "okay";
+
+	camera@4a {
+		compatible = "galaxycore,gc32e1";
+		reg = <0x4a>;
+		clocks = <&topckgen CLK_TOP_CAMTG2_SEL>;
+		assigned-clocks = <&topckgen CLK_TOP_CAMTG2_SEL>;
+		assigned-clock-parents = <&topckgen CLK_TOP_UVPLL192M_D8>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam1_mclk_pins>;
+		reset-gpios = <&pio 25 GPIO_ACTIVE_LOW>;
+		avdd-supply = <&cam1_avdd>;
+		dvdd-supply = <&cam1_dvdd>;
+		dovdd-supply = <&cam_dovdd>;
+		orientation = <0>;
+		rotation = <90>;
+
+		port {
+			gc32e1_out: endpoint {
+				remote-endpoint = <&seninf_csi1_in>;
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <381600000>;
+			};
+		};
+	};
+};
+
+&i2c7 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	clock-frequency = <400000>;
+	status = "okay";
+
+	camera@31 {
+		compatible = "galaxycore,gc08a3";
+		reg = <0x31>;
+		clocks = <&topckgen CLK_TOP_CAMTG4_SEL>;
+		assigned-clocks = <&topckgen CLK_TOP_CAMTG4_SEL>;
+		assigned-clock-parents = <&topckgen CLK_TOP_UVPLL192M_D8>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam2_mclk_pins>;
+		reset-gpios = <&pio 27 GPIO_ACTIVE_LOW>;
+		avdd-supply = <&cam2_avdd>;
+		dvdd-supply = <&cam2_dvdd>;
+		dovdd-supply = <&cam_dovdd>;
+		orientation = <1>;
+		rotation = <90>;
+
+		port {
+			gc08a3_out: endpoint {
+				remote-endpoint = <&seninf_csi3a_in>;
+				data-lanes = <1 2>;
+				link-frequencies = /bits/ 64 <672000000>;
+			};
+		};
+	};
+};
+
+&pio {
+	cam1_mclk_pins: cam1-mclk-pins {
+		pins-mclk {
+			pinmux = <(MTK_PIN_NO(93) | 1)>;
+			drive-strength = <4>;
+		};
+	};
+
+	cam2_mclk_pins: cam2-mclk-pins {
+		pins-mclk {
+			pinmux = <(MTK_PIN_NO(95) | 1)>;
+			drive-strength = <4>;
 		};
 	};
 };
