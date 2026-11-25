@@ -22,6 +22,9 @@
 #define MT6878_TOP_AXI_PROT_EN_MMSYS_SET_0		0xc14
 #define MT6878_TOP_AXI_PROT_EN_MMSYS_CLR_0		0xc18
 #define MT6878_TOP_AXI_PROT_EN_MMSYS_STA_0		0xc1c
+#define MT6878_TOP_AXI_PROT_EN_MMSYS_SET_1		0xc24
+#define MT6878_TOP_AXI_PROT_EN_MMSYS_CLR_1		0xc28
+#define MT6878_TOP_AXI_PROT_EN_MMSYS_STA_1		0xc2c
 
 /* VLPCFG bus protection, reached through the "mediatek,infracfg-nao" regmap */
 #define MT6878_VLP_AXI_PROT_EN_SET			0x214
@@ -35,6 +38,10 @@
 #define MT6878_TOP_AXI_PROT_EN_PERISYS_0_AUDIO		BIT(6)
 #define MT6878_TOP_AXI_PROT_EN_PERISYS_0_SSUSB		BIT(7)
 #define MT6878_TOP_AXI_PROT_EN_MMSYS_0_DISP		(BIT(18) | GENMASK(1, 0))
+#define MT6878_TOP_AXI_PROT_EN_MMSYS_0_CAM_MAIN		BIT(29)
+#define MT6878_TOP_AXI_PROT_EN_MMSYS_0_CAM_MAIN_2ND	BIT(30)
+#define MT6878_TOP_AXI_PROT_EN_MMSYS_0_CAM_VCORE	BIT(31)
+#define MT6878_TOP_AXI_PROT_EN_MMSYS_1_CAM_VCORE	GENMASK(10, 9)
 #define MT6878_VLP_AXI_PROT_EN_MM_PROC			BIT(8)
 #define MT6878_VLP_AXI_PROT_EN_MM_PROC_2ND		GENMASK(10, 9)
 
@@ -89,6 +96,15 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 					MT6878_TOP_AXI_PROT_EN_PERISYS_STA_0),
 		},
 	},
+	/* The CSI-2 receiver PHYs */
+	[MT6878_POWER_DOMAIN_CSI_RX] = {
+		.name = "csi-rx",
+		.sta_mask = MT6878_PWR_ACK,
+		.sta2nd_mask = MT6878_PWR_ACK_2ND,
+		.ctl_offs = 0xe9c,
+		.pwr_sta_offs = 0xe9c,
+		.pwr_sta2nd_offs = 0xe9c,
+	},
 	/*
 	 * DISP and MM_PROC sit below MM_INFRA, which is switched by the hardware
 	 * voter (see scpsys_hwv_domain_data_mt6878): their nodes name it as their
@@ -105,6 +121,45 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 		.sram_pdn_ack_bits = BIT(12),
 		.bp_cfg = {
 			BUS_PROT_WR_IGN(INFRA, MT6878_TOP_AXI_PROT_EN_MMSYS_0_DISP,
+					MT6878_TOP_AXI_PROT_EN_MMSYS_SET_0,
+					MT6878_TOP_AXI_PROT_EN_MMSYS_CLR_0,
+					MT6878_TOP_AXI_PROT_EN_MMSYS_STA_0),
+		},
+	},
+	/* Camera subsystem: CAM_VCORE (below MM_INFRA) feeds CAM_MAIN */
+	[MT6878_POWER_DOMAIN_CAM_VCORE] = {
+		.name = "cam-vcore",
+		.sta_mask = MT6878_PWR_ACK,
+		.sta2nd_mask = MT6878_PWR_ACK_2ND,
+		.ctl_offs = 0xe5c,
+		.pwr_sta_offs = 0xe5c,
+		.pwr_sta2nd_offs = 0xe5c,
+		.bp_cfg = {
+			BUS_PROT_WR_IGN(INFRA, MT6878_TOP_AXI_PROT_EN_MMSYS_0_CAM_VCORE,
+					MT6878_TOP_AXI_PROT_EN_MMSYS_SET_0,
+					MT6878_TOP_AXI_PROT_EN_MMSYS_CLR_0,
+					MT6878_TOP_AXI_PROT_EN_MMSYS_STA_0),
+			BUS_PROT_WR_IGN(INFRA, MT6878_TOP_AXI_PROT_EN_MMSYS_1_CAM_VCORE,
+					MT6878_TOP_AXI_PROT_EN_MMSYS_SET_1,
+					MT6878_TOP_AXI_PROT_EN_MMSYS_CLR_1,
+					MT6878_TOP_AXI_PROT_EN_MMSYS_STA_1),
+		},
+	},
+	[MT6878_POWER_DOMAIN_CAM_MAIN] = {
+		.name = "cam-main",
+		.sta_mask = MT6878_PWR_ACK,
+		.sta2nd_mask = MT6878_PWR_ACK_2ND,
+		.ctl_offs = 0xe48,
+		.pwr_sta_offs = 0xe48,
+		.pwr_sta2nd_offs = 0xe48,
+		.sram_pdn_bits = BIT(8),
+		.sram_pdn_ack_bits = BIT(12),
+		.bp_cfg = {
+			BUS_PROT_WR_IGN(INFRA, MT6878_TOP_AXI_PROT_EN_MMSYS_0_CAM_MAIN,
+					MT6878_TOP_AXI_PROT_EN_MMSYS_SET_0,
+					MT6878_TOP_AXI_PROT_EN_MMSYS_CLR_0,
+					MT6878_TOP_AXI_PROT_EN_MMSYS_STA_0),
+			BUS_PROT_WR_IGN(INFRA, MT6878_TOP_AXI_PROT_EN_MMSYS_0_CAM_MAIN_2ND,
 					MT6878_TOP_AXI_PROT_EN_MMSYS_SET_0,
 					MT6878_TOP_AXI_PROT_EN_MMSYS_CLR_0,
 					MT6878_TOP_AXI_PROT_EN_MMSYS_STA_0),
