@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config VIDEO_MTK_ISP7X_SENINF
+	tristate "MediaTek ISP7.x seninf CSI-2 receiver"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	help
+	  Support for the seninf sensor interface of MediaTek ISP7.x camera
+	  systems, such as the one in MT6878. Seninf receives MIPI CSI-2
+	  data from the camera sensors and routes it to the capture units.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called mtk-seninf.
