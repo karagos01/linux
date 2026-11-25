@@ -110,6 +110,16 @@ config VIDEO_GC2145
 	  To compile this driver as a module, choose M here: the
 	  module will be called gc2145.
 
+config VIDEO_GC32E1
+	tristate "GalaxyCore gc32e1 sensor support"
+	select V4L2_CCI_I2C
+	help
+	  This is a Video4Linux2 sensor driver for the GalaxyCore gc32e1
+	  camera sensor.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called gc32e1.
+
 config VIDEO_HI556
 	tristate "Hynix Hi-556 sensor support"
 	help
