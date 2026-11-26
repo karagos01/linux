@@ -62,6 +62,8 @@
 #define GC32E1_HTS			3777
 #define GC32E1_VTS_DEF			2656
 
+#define GC32E1_IDENTIFY_ATTEMPTS	3
+
 static const char *const gc32e1_supply_names[] = {
 	"dovdd",
 	"dvdd",
@@ -603,21 +605,27 @@ static inline struct gc32e1 *to_gc32e1(struct v4l2_subdev *sd)
 static int gc32e1_power_on(struct device *dev)
 {
 	struct gc32e1 *gc32e1 = to_gc32e1(dev_get_drvdata(dev));
+	unsigned int i;
 	int ret;
 
-	ret = regulator_bulk_enable(ARRAY_SIZE(gc32e1->supplies),
-				    gc32e1->supplies);
-	if (ret) {
-		dev_err(dev, "failed to enable regulators: %d\n", ret);
-		return ret;
+	/*
+	 * Bring the supplies up one after the other, I/O first, rather than
+	 * concurrently with regulator_bulk_enable().
+	 */
+	for (i = 0; i < ARRAY_SIZE(gc32e1->supplies); i++) {
+		ret = regulator_enable(gc32e1->supplies[i].consumer);
+		if (ret) {
+			dev_err(dev, "failed to enable %s: %d\n",
+				gc32e1->supplies[i].supply, ret);
+			goto err_disable;
+		}
+		fsleep(1000);
 	}
 
 	ret = clk_prepare_enable(gc32e1->xclk);
 	if (ret) {
 		dev_err(dev, "failed to enable clock: %d\n", ret);
-		regulator_bulk_disable(ARRAY_SIZE(gc32e1->supplies),
-				       gc32e1->supplies);
-		return ret;
+		goto err_disable;
 	}
 
 	fsleep(2000);
@@ -625,15 +633,22 @@ static int gc32e1_power_on(struct device *dev)
 	fsleep(5000);
 
 	return 0;
+
+err_disable:
+	while (i--)
+		regulator_disable(gc32e1->supplies[i].consumer);
+	return ret;
 }
 
 static int gc32e1_power_off(struct device *dev)
 {
 	struct gc32e1 *gc32e1 = to_gc32e1(dev_get_drvdata(dev));
+	unsigned int i;
 
 	gpiod_set_value_cansleep(gc32e1->reset_gpio, 1);
 	clk_disable_unprepare(gc32e1->xclk);
-	regulator_bulk_disable(ARRAY_SIZE(gc32e1->supplies), gc32e1->supplies);
+	for (i = ARRAY_SIZE(gc32e1->supplies); i--;)
+		regulator_disable(gc32e1->supplies[i].consumer);
 
 	return 0;
 }
@@ -954,11 +969,28 @@ out:
 
 static int gc32e1_identify(struct gc32e1 *gc32e1)
 {
+	unsigned int attempt;
 	u64 hi, lo, id;
-	int ret = 0;
+	int ret;
 
-	cci_read(gc32e1->regmap, GC32E1_REG_CHIP_ID_H, &hi, &ret);
-	cci_read(gc32e1->regmap, GC32E1_REG_CHIP_ID_L, &lo, &ret);
+	/*
+	 * The first access after power up sometimes times out at boot, with
+	 * the sensor holding the bus. Power cycle the sensor and try again.
+	 */
+	for (attempt = 1; ; attempt++) {
+		ret = 0;
+		cci_read(gc32e1->regmap, GC32E1_REG_CHIP_ID_H, &hi, &ret);
+		cci_read(gc32e1->regmap, GC32E1_REG_CHIP_ID_L, &lo, &ret);
+		if (!ret || attempt == GC32E1_IDENTIFY_ATTEMPTS)
+			break;
+
+		dev_warn(gc32e1->dev,
+			 "failed to read chip id (%d), power cycling\n", ret);
+		gc32e1_power_off(gc32e1->dev);
+		ret = gc32e1_power_on(gc32e1->dev);
+		if (ret)
+			return ret;
+	}
 	if (ret)
 		return dev_err_probe(gc32e1->dev, ret,
 				     "failed to read chip id\n");
