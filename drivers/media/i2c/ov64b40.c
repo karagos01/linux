@@ -5,7 +5,7 @@
  * The register sequences were taken from the vendor imgsensor driver of
  * the Volla Phone Plinius. Two modes over four MIPI CSI-2 D-PHY lanes are
  * supported: the 2x2 binned full field of view (4624x3472, 30 fps) and a
- * scaled 1920x1080 crop (120 fps).
+ * scaled 1920x1080 crop (30 fps by default, up to 120 fps).
  *
  * Copyright (C) 2026 Jan Benedikt <karagos01@gmail.com>
  */
@@ -1648,8 +1648,9 @@ static const struct cci_reg_sequence ov64b40_1920x1080_regs[] = {
 struct ov64b40_mode {
 	u32 width;
 	u32 height;
-	/* line length in V4L2 pixels and default frame length in lines */
+	/* line length in V4L2 pixels, minimum and default frame length in lines */
 	u32 hts;
+	u32 vts_min;
 	u32 vts_def;
 	struct v4l2_rect crop;
 	const struct cci_reg_sequence *regs;
@@ -1661,6 +1662,7 @@ static const struct ov64b40_mode ov64b40_modes[] = {
 		.width = 4624,
 		.height = 3472,
 		.hts = 1056 * 8,
+		.vts_min = 3636,
 		.vts_def = 3636,
 		.crop = { 0, 0, OV64B40_NATIVE_WIDTH, OV64B40_NATIVE_HEIGHT },
 		.regs = ov64b40_4624x3472_regs,
@@ -1670,7 +1672,9 @@ static const struct ov64b40_mode ov64b40_modes[] = {
 		.width = 1920,
 		.height = 1080,
 		.hts = 504 * 8,
-		.vts_def = 1904,
+		/* 120 fps at the shortest, 30 fps by default */
+		.vts_min = 1904,
+		.vts_def = 1904 * 4,
 		.crop = { 784, 1312, 7680, 4320 },
 		.regs = ov64b40_1920x1080_regs,
 		.num_regs = ARRAY_SIZE(ov64b40_1920x1080_regs),
@@ -1833,7 +1837,7 @@ static int ov64b40_init_controls(struct ov64b40 *ov64b40)
 
 	ov64b40->vblank = v4l2_ctrl_new_std(hdl, &ov64b40_ctrl_ops,
 					    V4L2_CID_VBLANK,
-					    mode->vts_def - mode->height,
+					    mode->vts_min - mode->height,
 					    OV64B40_VTS_MAX - mode->height, 2,
 					    mode->vts_def - mode->height);
 
@@ -1880,7 +1884,7 @@ static void ov64b40_update_controls(struct ov64b40 *ov64b40)
 	u32 hblank = mode->hts - mode->width;
 
 	__v4l2_ctrl_modify_range(ov64b40->hblank, hblank, hblank, 1, hblank);
-	__v4l2_ctrl_modify_range(ov64b40->vblank, mode->vts_def - mode->height,
+	__v4l2_ctrl_modify_range(ov64b40->vblank, mode->vts_min - mode->height,
 				 OV64B40_VTS_MAX - mode->height, 2,
 				 mode->vts_def - mode->height);
 	__v4l2_ctrl_s_ctrl(ov64b40->vblank, mode->vts_def - mode->height);
