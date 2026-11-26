@@ -18,6 +18,7 @@
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 
@@ -954,6 +955,47 @@ static const irq_handler_t camsv_irq_handlers[] = {
 	camsv_irq_done, camsv_irq_err, camsv_irq_sof,
 };
 
+static void camsv_unlink_supplier(void *data)
+{
+	struct device_link *link = data;
+	struct device *supplier = link->supplier;
+
+	device_link_del(link);
+	put_device(supplier);
+}
+
+/* Keep a device runtime resumed for as long as the CAMSV is */
+static int camsv_link_supplier(struct mtk_camsv *sv, const char *prop)
+{
+	struct platform_device *pdev;
+	struct device_link *link;
+	struct device_node *np;
+
+	np = of_parse_phandle(sv->dev->of_node, prop, 0);
+	if (!np)
+		return dev_err_probe(sv->dev, -EINVAL, "no %s\n", prop);
+
+	pdev = of_find_device_by_node(np);
+	of_node_put(np);
+	if (!pdev)
+		return -EPROBE_DEFER;
+
+	if (!platform_get_drvdata(pdev)) {
+		put_device(&pdev->dev);
+		return -EPROBE_DEFER;
+	}
+
+	link = device_link_add(sv->dev, &pdev->dev,
+			       DL_FLAG_PM_RUNTIME | DL_FLAG_STATELESS);
+	if (!link) {
+		put_device(&pdev->dev);
+		return dev_err_probe(sv->dev, -ENODEV, "failed to link %s\n",
+				     prop);
+	}
+
+	return devm_add_action_or_reset(sv->dev, camsv_unlink_supplier, link);
+}
+
 static int camsv_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1004,6 +1046,19 @@ static int camsv_probe(struct platform_device *pdev)
 	sv->num_clks = devm_clk_bulk_get_all(dev, &sv->clks);
 	if (sv->num_clks < 0)
 		return dev_err_probe(dev, sv->num_clks, "failed to get clocks\n");
+
+	/*
+	 * The image DMA reaches the DRAM through the multimedia SMI common,
+	 * which sits in the display power domain, and the multimedia
+	 * infrastructure only asks the SPM for the DRAM while its GCE does.
+	 * Without both the writes are dropped whenever the display is off.
+	 */
+	ret = camsv_link_supplier(sv, "mediatek,smi");
+	if (ret)
+		return ret;
+	ret = camsv_link_supplier(sv, "mediatek,gce");
+	if (ret)
+		return ret;
 
 	/* the SMI path is not translated yet: physical addresses only */
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
