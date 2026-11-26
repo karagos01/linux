@@ -180,6 +180,30 @@
 		enable-active-high;
 	};
 
+	/* Main camera module supplies, switched by GPIOs */
+	cam0_avdd: regulator-cam0-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam0-avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&pio 115 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	/*
+	 * The module also needs the switched 1.2 V supply; it is modelled
+	 * as the input of the core supply.
+	 */
+	cam0_dvdd: regulator-cam0-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam0-dvdd";
+		regulator-min-microvolt = <1100000>;
+		regulator-max-microvolt = <1100000>;
+		gpio = <&pio 36 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		vin-supply = <&cam_dvdd_in>;
+	};
+
 	reserved-memory {
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -1429,9 +1453,26 @@
 	};
 };
 
-/* Front GC32E1 on CSI port 1, rear GC08A3 on half port 3A */
+/*
+ * Main OV64B40 on CSI port 0, front GC32E1 on CSI port 1, rear GC08A3 on
+ * half port 3A
+ */
 &seninf {
 	status = "okay";
+
+	seninf_csi0: csi-port-0 {
+		compatible = "mediatek,mt6878-seninf";
+		csi-port = "0";
+		nvmem-cells = <&csi_efuse0>;
+		nvmem-cell-names = "csi-efuse";
+
+		port {
+			seninf_csi0_in: endpoint {
+				remote-endpoint = <&ov64b40_out>;
+				data-lanes = <1 2 3 4>;
+			};
+		};
+	};
 
 	seninf_csi3a: csi-port-3a {
 		compatible = "mediatek,mt6878-seninf";
@@ -1464,8 +1505,51 @@
 };
 
 &camsv4 {
-	mediatek,seninf = <&seninf_csi1>, <&seninf_csi3a>;
+	mediatek,seninf = <&seninf_csi0>, <&seninf_csi1>, <&seninf_csi3a>;
 	status = "okay";
+};
+
+&i2c2 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	clock-frequency = <1000000>;
+	status = "okay";
+
+	cam0_focus: lens@c {
+		compatible = "dongwoon,dw9768";
+		reg = <0x0c>;
+		vin-supply = <&cam_dovdd>;
+		vdd-supply = <&cam0_afvdd>;
+		dongwoon,aac-mode = <2>;
+		dongwoon,aac-timing = <0x60>;
+		dongwoon,clock-presc = <0>;
+	};
+
+	camera@36 {
+		compatible = "ovti,ov64b40";
+		reg = <0x36>;
+		clocks = <&topckgen CLK_TOP_CAMTG_SEL>;
+		assigned-clocks = <&topckgen CLK_TOP_CAMTG_SEL>;
+		assigned-clock-parents = <&topckgen CLK_TOP_UVPLL192M_D8>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam0_mclk_pins>;
+		reset-gpios = <&pio 24 GPIO_ACTIVE_LOW>;
+		powerdown-gpios = <&pio 19 GPIO_ACTIVE_LOW>;
+		avdd-supply = <&cam0_avdd>;
+		dvdd-supply = <&cam0_dvdd>;
+		dovdd-supply = <&cam_dovdd>;
+		lens-focus = <&cam0_focus>;
+		orientation = <1>;
+		rotation = <270>;
+
+		port {
+			ov64b40_out: endpoint {
+				remote-endpoint = <&seninf_csi0_in>;
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <751000000>;
+			};
+		};
+	};
 };
 
 &i2c4 {
@@ -1531,6 +1615,13 @@
 };
 
 &pio {
+	cam0_mclk_pins: cam0-mclk-pins {
+		pins-mclk {
+			pinmux = <(MTK_PIN_NO(92) | 1)>;
+			drive-strength = <4>;
+		};
+	};
+
 	cam1_mclk_pins: cam1-mclk-pins {
 		pins-mclk {
 			pinmux = <(MTK_PIN_NO(93) | 1)>;
