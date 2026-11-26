@@ -1248,6 +1248,8 @@
 				      "gals1", "camsv", "top-cam", "top-camtm";
 			mediatek,camsv-id = <4>;
 			mediatek,cammux-id = <0x20>;
+			mediatek,smi = <&smi_common_disp>;
+			mediatek,gce = <&gce>;
 			status = "disabled";
 		};
 
