@@ -1121,6 +1121,38 @@ void mtk_connsys_bringup_end(struct mtk_connsys *cs)
 }
 EXPORT_SYMBOL_GPL(mtk_connsys_bringup_end);
 
+/*
+ * The radio firmwares log into ring buffers in the connsys memory, set up by
+ * a header at the start of each logging area. Only a valid header enables
+ * the logging, and none is set up here, but the memory may hold anything
+ * after a power loss, or the header of an earlier stock boot: clear the
+ * headers before any firmware runs so that it never logs to a stale or random
+ * place.
+ */
+static const u32 mtk_connsys_log_headers[] = {
+	0xb00000,	/* WiFi */
+	0xb48000,	/* Bluetooth */
+};
+
+#define CONNSYS_LOG_HEADER_SIZE		0x40
+
+static int mtk_connsys_clear_log_headers(struct mtk_connsys *cs)
+{
+	void __iomem *hdr;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(mtk_connsys_log_headers); i++) {
+		hdr = ioremap(cs->emi_base + mtk_connsys_log_headers[i],
+			      CONNSYS_LOG_HEADER_SIZE);
+		if (!hdr)
+			return -ENOMEM;
+		memset_io(hdr, 0, CONNSYS_LOG_HEADER_SIZE);
+		iounmap(hdr);
+	}
+
+	return 0;
+}
+
 /**
  * mtk_connsys_emi_base - physical address of the connsys memory
  * @cs: connsys handle
@@ -1213,6 +1245,10 @@ static int mtk_connsys_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	cs->emi_base = res.start;
+
+	ret = mtk_connsys_clear_log_headers(cs);
+	if (ret)
+		return ret;
 
 	for (i = 0; i < ARRAY_SIZE(cs->common_supplies); i++)
 		cs->common_supplies[i].supply = mtk_connsys_common_supplies[i];
