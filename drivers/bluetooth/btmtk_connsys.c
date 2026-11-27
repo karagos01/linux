@@ -1042,6 +1042,14 @@ static int btmtk_connsys_probe(struct platform_device *pdev)
 	if (!bt->beif)
 		return -ENOMEM;
 
+	/*
+	 * The boot ROM reads the BEIF ring header before it starts the RAM code,
+	 * so it has to be valid before the BGF CPU is released.
+	 */
+	ret = beif_reset(bt);
+	if (ret)
+		return ret;
+
 	/* Powering BGF up must not overlap with the WiFi bring-up */
 	mtk_connsys_bringup_begin(bt->cs);
 
