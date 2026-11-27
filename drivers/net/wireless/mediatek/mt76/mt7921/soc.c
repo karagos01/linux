@@ -81,6 +81,7 @@
 /* Release manifest of the firmware loaded by the bootloader */
 #define SOC_EMI_FW_VER_OFFSET		0xb00024
 #define SOC_EMI_FW_VER_LEN		128
+#define SOC_EMI_SIZE			0xd00000
 
 /* ROM code commands */
 #define MCU_CMD_SOC_PHY_ACTION		0x08
@@ -998,6 +999,10 @@ static void mt7921_soc_print_fw_version(struct mt792x_dev *dev)
 		return;
 	ofs = readl(p) & 0xffffff;
 	memunmap(p);
+
+	/* Set by the firmware, so it may not be there yet */
+	if (!ofs || ofs > SOC_EMI_SIZE - SOC_EMI_FW_VER_LEN)
+		return;
 
 	p = memremap(emi + ofs, SOC_EMI_FW_VER_LEN, MEMREMAP_WC);
 	if (!p)
