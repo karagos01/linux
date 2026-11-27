@@ -66,6 +66,19 @@
 #define BGF_OFF_PWR_ACK_S		BIT(0)
 #define CFG_BT_PWRCTLCR0		0x18001208
 #define BT_FUNC_EN_B			BIT(0)
+#define RGU_SEMA_M1_SW_RST		0x1800015c
+#define SEMA_M1_SW_RST_B		BIT(0)
+#define CONN_WT_SLP_TOP_CK_2		0x18003128	/* A-die top clock 2 */
+#define TOP_CK_2_EN_B			BIT(0)
+#define TOP_CK_2_BSY_B			BIT(1)
+#define CFG_EMI_CTL_BT			0x18011118
+#define BT_EMI_REQ_B			BIT(0)
+#define BT_SRCCLKENA_B			BIT(1)
+#define BT_AP_BUS_REQ_B			BIT(2)
+#define BT_APSRC_REQ_B			BIT(3)
+#define BT_INFRA_REQ_B			BIT(5)
+#define CONN_SEMA_M1_OWN_REL		0x18071200	/* outside the conn window */
+#define CONN_SEMA_M1_OWN_REL_SIZE	0x64
 
 /* CONN2BT / BT2CONN GALS sleep-protect (conn window) */
 #define CONN2BT_GALS_SLP_CTL		0x18001450
@@ -519,6 +532,77 @@ static int bgf_power_on(struct btmtk_connsys *bt)
 	dev_info(bt->dev, "BGF MCU alive (IP 0x%08x, PC 0x%08x)\n",
 		 ver, bt_rd(bt, BGF_MCU_PC));
 	return 0;
+}
+
+/* Enable one GALS sleep-protect channel and wait for the ack. */
+static int bgf_gals_protect(struct btmtk_connsys *bt, u32 ctl, u32 status,
+			    u32 en_bit, u32 ack_bit)
+{
+	bt_set(bt, ctl, en_bit);
+	return bt_poll(bt, status, ack_bit, ack_bit, 500, 50000);
+}
+
+/*
+ * Power the BGF subsystem off again, the reverse of bgf_power_on(): isolate it
+ * from the conn_infra bus, drop its power, hold the CPU in reset and release
+ * what the firmware may still hold (the A-die clock, the BT semaphores and
+ * the EMI requests). Without this a new power-up finds the BGF in the state
+ * the firmware left it in and the boot ROM does not start.
+ */
+static void bgf_power_off(struct btmtk_connsys *bt)
+{
+	void __iomem *sema;
+	u32 pwr;
+	int ret, i;
+
+	if (bgf_conninfra_wakeup(bt)) {
+		dev_err(bt->dev, "conn_infra not awake, cannot power BGF off\n");
+		return;
+	}
+
+	ret = bgf_gals_protect(bt, BT2CONN_GALS_SLP_CTL, BT2CONN_GALS_SLP_STATUS,
+			       GALS_SLP_PROT_TX_EN_B, GALS_SLP_PROT_TX_ACK_B);
+	ret |= bgf_gals_protect(bt, BT2CONN_GALS_SLP_CTL, BT2CONN_GALS_SLP_STATUS,
+				GALS_SLP_PROT_RX_EN_B, GALS_SLP_PROT_RX_ACK_B);
+	ret |= bgf_gals_protect(bt, CONN2BT_GALS_SLP_CTL, CONN2BT_GALS_SLP_STATUS,
+				GALS_SLP_PROT_TX_EN_B, GALS_SLP_PROT_TX_ACK_B);
+	ret |= bgf_gals_protect(bt, CONN2BT_GALS_SLP_CTL, CONN2BT_GALS_SLP_STATUS,
+				GALS_SLP_PROT_RX_EN_B, GALS_SLP_PROT_RX_ACK_B);
+	if (ret)
+		dev_warn(bt->dev, "GALS sleep-protect not acked on power off\n");
+
+	bt_clr(bt, CFG_BT_PWRCTLCR0, BT_FUNC_EN_B);
+
+	pwr = bt_rd(bt, RGU_BGFSYS_ON_TOP_PWR_CTL) & ~(GENMASK(31, 16) | BIT(7));
+	bt_wr(bt, RGU_BGFSYS_ON_TOP_PWR_CTL, pwr | 0x42540000);
+
+	bt_clr(bt, RGU_BGFSYS_CPU_SW_RST, BGF_CPU_SW_RST_B);
+	usleep_range(1000, 1100);
+
+	/* Stop the A-die clock the firmware turned on for BT */
+	bt_clr(bt, CONN_WT_SLP_TOP_CK_2, TOP_CK_2_EN_B);
+	if (bt_poll(bt, CONN_WT_SLP_TOP_CK_2, TOP_CK_2_BSY_B, 0, 500, 50000))
+		dev_warn(bt->dev, "A-die top clock 2 still busy\n");
+
+	/* Release the semaphores the firmware may hold, then reset them */
+	sema = ioremap(CONN_SEMA_M1_OWN_REL, CONN_SEMA_M1_OWN_REL_SIZE);
+	if (sema) {
+		for (i = 0; i < CONN_SEMA_M1_OWN_REL_SIZE; i += 4)
+			writel(readl(sema + i) | BIT(0), sema + i);
+		iounmap(sema);
+	}
+	bt_clr(bt, RGU_SEMA_M1_SW_RST, SEMA_M1_SW_RST_B);
+	bt_set(bt, RGU_SEMA_M1_SW_RST, SEMA_M1_SW_RST_B);
+
+	/* Drop the BT EMI, clock and bus requests */
+	bt_set(bt, CFG_EMI_CTL_BT, BT_EMI_REQ_B);
+	bt_clr(bt, CFG_EMI_CTL_BT, BT_EMI_REQ_B);
+	bt_set(bt, CFG_EMI_CTL_BT, BT_SRCCLKENA_B);
+	bt_clr(bt, CFG_EMI_CTL_BT, BT_SRCCLKENA_B | BT_AP_BUS_REQ_B | BT_APSRC_REQ_B);
+	bt_set(bt, CFG_EMI_CTL_BT, BT_INFRA_REQ_B);
+	bt_clr(bt, CFG_EMI_CTL_BT, BT_INFRA_REQ_B);
+
+	bgf_conninfra_release(bt);
 }
 
 /* (Re)initialize the BEIF ring header the firmware expects, verify EMI write. */
@@ -1124,6 +1208,7 @@ err_free_hdev:
 	hci_free_dev(bt->hdev);
 	bt->hdev = NULL;
 err_power_off:
+	bgf_power_off(bt);
 	mtk_connsys_power_off(bt->cs, MTK_CONNSYS_BT);
 	return ret;
 }
@@ -1137,6 +1222,7 @@ static void btmtk_connsys_remove(struct platform_device *pdev)
 		hci_free_dev(bt->hdev);
 	}
 	cancel_delayed_work_sync(&bt->idle_work);
+	bgf_power_off(bt);
 	mtk_connsys_power_off(bt->cs, MTK_CONNSYS_BT);
 }
 
